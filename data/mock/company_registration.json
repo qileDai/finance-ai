@@ -1,0 +1,69 @@
+{
+  "company_name_en": "ABC Technology Limited",
+  "company_name_cn": "艾比西科技有限公司",
+  "company_type": "private_limited_by_shares",
+  "registered_office": {
+    "flat_floor": "Unit 1201, 12/F",
+    "building": "Central Plaza",
+    "street": "18 Harbour Road",
+    "district": "Wan Chai",
+    "region": "Hong Kong"
+  },
+  "contact": {
+    "email": "contact@abctech.hk",
+    "phone": "21234567"
+  },
+  "share_capital": {
+    "currency": "HKD",
+    "total_shares": 10000,
+    "par_value": 1,
+    "paid_up": 10000
+  },
+  "founder_members": [
+    {
+      "name_en": "CHAN Tai Man",
+      "name_cn": "陳大文",
+      "id_type": "HKID",
+      "id_number": "A123456(7)",
+      "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong",
+      "shares": 10000
+    }
+  ],
+  "directors": [
+    {
+      "name_en": "CHAN Tai Man",
+      "name_cn": "陳大文",
+      "id_type": "HKID",
+      "id_number": "A123456(7)",
+      "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong",
+      "email": "chan@abctech.hk",
+      "phone": "91234567"
+    }
+  ],
+  "company_secretary": {
+    "name_en": "WONG Siu Ming",
+    "name_cn": "黃小明",
+    "id_type": "HKID",
+    "id_number": "B765432(1)",
+    "address": "Suite 501, 5/F, Business Tower, 88 Queen's Road, Central, Hong Kong",
+    "email": "secretary@abctech.hk",
+    "phone": "92345678",
+    "type": "natural_person"
+  },
+  "business_nature_code": "620100",
+  "business_nature_desc": "Computer programming activities",
+  "br_certificate_years": 3,
+  "applicant": {
+    "title": "Mr",
+    "name_en": "CHAN Tai Man",
+    "name_cn": "陳大文",
+    "id_type": "HKID",
+    "id_number": "A123456(7)",
+    "email": "chan@abctech.hk",
+    "phone": "91234567",
+    "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong"
+  },
+  "password_hint": "Mother maiden name: Lee",
+  "security_question": "What is your mother's maiden name?",
+  "security_answer": "Lee"
+}

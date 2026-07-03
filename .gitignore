@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+output/
+data/materials/
+*.log
+.playwright/
+.pytest_cache/
+.ai-memory.md
