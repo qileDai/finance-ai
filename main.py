@@ -72,12 +72,28 @@ def check_captcha_deps(step: str | None) -> None:
     if mode == "manual":
         print("[提示] 验证码模式: manual — 将在浏览器中手动输入")
         return
-    if mode in ("audio", "auto"):
-        print("[提示] 验证码: 优先点击「读出验证码」+ Whisper 粤语识别")
-        if mode == "auto" and settings.twocaptcha_api_key:
-            print("[提示] 回退: 2Captcha 图形识别")
-        elif mode == "auto":
-            print("[提示] 回退: 本地 OCR / 手动输入")
+    if mode == "2captcha":
+        if settings.twocaptcha_api_key:
+            print(
+                f"[提示] 验证码模式: 2captcha — 仅 2Captcha 多帧识别"
+                f"（{settings.twocaptcha_max_variants} 变体并行）"
+            )
+            try:
+                import PIL  # noqa: F401
+            except ImportError:
+                print("[警告] 未安装 Pillow，请执行: pip install Pillow")
+        else:
+            print("[警告] CAPTCHA_MODE=2captcha 但未配置 TWOCAPTCHA_API_KEY")
+        return
+    if mode == "auto":
+        if settings.twocaptcha_api_key:
+            print("[提示] 验证码: 优先 2Captcha 多帧识别，失败后 OCR/LLM 回退")
+            try:
+                import PIL  # noqa: F401
+            except ImportError:
+                print("[警告] 未安装 Pillow，2Captcha 无法工作: pip install Pillow")
+        else:
+            print("[提示] 验证码: 本地 OCR / 手动输入（未配置 TWOCAPTCHA_API_KEY）")
         return
     if mode == "ollama":
         if settings.ollama_vision_model:
@@ -85,13 +101,9 @@ def check_captcha_deps(step: str | None) -> None:
         else:
             print("[警告] CAPTCHA_MODE=ollama 但未配置 OLLAMA_VISION_MODEL")
         return
-    if mode == "2captcha":
-        if settings.twocaptcha_api_key:
-            print("[提示] 验证码模式: 2captcha — 使用打码平台识别")
-        else:
-            print("[警告] CAPTCHA_MODE=2captcha 但未配置 TWOCAPTCHA_API_KEY")
+    if mode == "audio":
+        print("[提示] 验证码模式: audio — 读出验证码 + Whisper 粤语识别")
         return
-
     if mode == "ocr":
         print("[提示] 验证码模式: ocr — 本地 ddddocr")
         try:

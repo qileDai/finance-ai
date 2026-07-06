@@ -7,7 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from config.settings import PROJECT_ROOT, settings
-from src.browser.captcha_best import resolve_captcha_best
+from src.browser.captcha_best import resolve_2captcha_only, resolve_captcha_best
 from src.browser.captcha_solver import decode_data_url_image, try_solve_captcha
 
 try:
@@ -313,10 +313,30 @@ async def fill_captcha(page: "Page", llm_client=None) -> bool:
                 MAX_CAPTCHA_RETRIES,
             )
 
-        if mode == "auto" and image_bytes:
-            code, confidence, candidates = await resolve_captcha_best(
-                page, image_bytes, max_len, llm_client=llm_client
+        if mode in ("auto", "2captcha") and settings.twocaptcha_api_key and image_bytes:
+            code, confidence, candidates = await asyncio.to_thread(
+                resolve_2captcha_only, image_bytes, max_len
             )
+            if code and len(code) >= max_len:
+                logger.info("2Captcha 识别成功: %s (置信度=%s)", code[:max_len], confidence)
+            elif mode == "2captcha":
+                logger.warning(
+                    "2Captcha 未识别成功 (尝试 %d/%d)，刷新验证码重试",
+                    attempt,
+                    MAX_CAPTCHA_RETRIES,
+                )
+                await _reload_captcha(page)
+                continue
+            else:
+                logger.warning("2Captcha 未成功，尝试 OCR/LLM 回退")
+                code, confidence, candidates = await resolve_captcha_best(
+                    page,
+                    image_bytes,
+                    max_len,
+                    llm_client=llm_client,
+                    use_audio=False,
+                    skip_2captcha=True,
+                )
         elif mode == "audio" and solve_captcha_from_audio:
             try:
                 code = await solve_captcha_from_audio(
@@ -325,11 +345,22 @@ async def fill_captcha(page: "Page", llm_client=None) -> bool:
                 confidence = "medium" if code and len(code) >= max_len else "low"
             except Exception as e:
                 logger.warning("语音识别失败: %s", e)
-        elif mode in ("auto", "ocr", "2captcha", "ollama") and image_bytes:
+        elif mode in ("ocr", "ollama", "2captcha") and image_bytes:
             code = await asyncio.to_thread(
                 try_solve_captcha, image_bytes, llm_client, max_len
             )
-            confidence = "medium" if code and len(code) >= max_len else "low"
+            confidence = "high" if code and len(code) >= max_len and mode == "2captcha" else (
+                "medium" if code and len(code) >= max_len else "low"
+            )
+        elif mode == "auto" and image_bytes:
+            code, confidence, candidates = await resolve_captcha_best(
+                page,
+                image_bytes,
+                max_len,
+                llm_client=llm_client,
+                use_audio=False,
+                skip_2captcha=True,
+            )
 
         if not code or len(code) < max_len:
             if attempt >= MAX_CAPTCHA_RETRIES - 1:

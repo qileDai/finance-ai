@@ -39,10 +39,12 @@ class Settings(BaseSettings):
     browser_keep_open_seconds: int = 60  # 结束或出错后保持浏览器打开的秒数
 
     # 验证码识别
-    # auto=2Captcha多帧+LLM视觉+OCR+语音融合（推荐）| 2captcha | audio | ocr | manual
+    # auto=优先2Captcha→OCR回退 | 2captcha=仅打码平台 | audio | ocr | manual
     captcha_mode: str = "auto"
     captcha_manual_timeout: int = 180
     twocaptcha_api_key: str = ""
+    twocaptcha_max_variants: int = 5  # 并行提交的 GIF 帧变体数
+    twocaptcha_timeout: int = 120  # 单次 2Captcha 任务超时（秒）
     captcha_save_debug: bool = True
     # Ollama 本地视觉模型（免费，推荐 qwen2.5vl:7b）
     ollama_base_url: str = "http://localhost:11434"

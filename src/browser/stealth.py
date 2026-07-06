@@ -14,6 +14,8 @@ PRELOAD_SCRIPT = """
 window.DisableDevtool = function() { return { success: false, reason: 'blocked' }; };
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 window.chrome = window.chrome || { runtime: {} };
+const _now = performance.now.bind(performance);
+performance.now = function() { return _now(); };
 """
 
 
@@ -29,6 +31,15 @@ async def setup_stealth_context(context: Any) -> None:
                 status=200,
                 content_type="application/javascript",
                 body="// blocked by register-ai",
+            )
+            return
+        # 注册页会加载 pdf.mjs，非 module 上下文会抛 import.meta 错误并拖死 domcontentloaded
+        if "pdfjs" in url or "pdf.mjs" in url:
+            logger.debug("已跳过 PDF 查看器脚本: %s", route.request.url)
+            await route.fulfill(
+                status=200,
+                content_type="application/javascript",
+                body="// blocked: pdf viewer not needed\nexport default {};\n",
             )
             return
         # 阻止被踢到公司注册处公开站（非 e-services 子域）

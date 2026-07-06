@@ -272,39 +272,17 @@ def solve_ocr_only(
 def _try_2captcha(image_bytes: bytes, max_length: int | None) -> str:
     """调用 2Captcha，成功返回文本，失败返回空字符串"""
     from config.settings import settings
+    from src.browser.captcha_best import resolve_2captcha_only
 
     if not settings.twocaptcha_api_key:
         return ""
-    from src.browser.captcha_api import solve_2captcha
 
     length = max_length or 5
     try:
-        raw = solve_2captcha(
-            image_bytes,
-            settings.twocaptcha_api_key,
-            min_len=length,
-            max_len=length,
-        )
-        text = normalize_captcha_text(raw, max_length)
-        if not text:
-            logger.warning("2Captcha 结果清洗后为空: %r", raw)
-            return ""
-
-        if text.isalpha() and text.lower() in (
-            "white", "black", "image", "captcha", "code", "error", "none",
-        ):
-            logger.warning("2Captcha 返回可疑结果，忽略: %s", text)
-            return ""
-        if len(set(text.lower())) == 1:
-            logger.warning("2Captcha 返回重复字符，忽略: %s", text)
-            return ""
-
-        if len(text) >= length:
-            logger.info("2Captcha 识别验证码: %s", text[:length])
-            return text[:length]
-        if len(text) >= length - 1:
-            logger.info("2Captcha 识别验证码 (%d位): %s", len(text), text)
-            return text
+        code, confidence, _ = resolve_2captcha_only(image_bytes, length)
+        if code and len(code) >= length:
+            logger.info("2Captcha 识别验证码: %s (置信度=%s)", code[:length], confidence)
+            return code[:length]
     except Exception as e:
         logger.warning("2Captcha 识别失败: %s", e)
     return ""

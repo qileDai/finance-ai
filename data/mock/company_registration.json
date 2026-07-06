@@ -65,5 +65,9 @@
   },
   "password_hint": "Mother maiden name: Lee",
   "security_question": "What is your mother's maiden name?",
-  "security_answer": "Lee"
+  "security_answer": "Lee",
+  "icris_account": {
+    "username": "chantaimanhk26",
+    "password": "Chan2026Pass"
+  }
 }
