@@ -65,11 +65,30 @@ async def create_browser_context(browser: Any) -> Any:
     """创建带反检测保护的浏览器上下文"""
     context = await browser.new_context(
         viewport={"width": 1280, "height": 900},
-        locale="zh-HK",
+        locale="zh-CN",
         user_agent=USER_AGENT,
         extra_http_headers={
-            "Accept-Language": "zh-HK,zh-CN;q=0.9,en;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,zh-HK;q=0.8,en;q=0.7",
         },
     )
     await setup_stealth_context(context)
+    try:
+        await context.add_cookies(
+            [
+                {
+                    "name": "locale",
+                    "value": "zh_CN",
+                    "domain": "www.e-services.cr.gov.hk",
+                    "path": "/",
+                },
+                {
+                    "name": "lang",
+                    "value": "zh_CN",
+                    "domain": ".e-services.cr.gov.hk",
+                    "path": "/",
+                },
+            ]
+        )
+    except Exception:
+        pass
     return context

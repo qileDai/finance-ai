@@ -1,0 +1,1275 @@
+{
+  "markers": {
+    "url": "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s02.do?applicationId=c0e8984e-51db-40cf-ab03-65fee341f74f&xm=K6RkKjpkdgxaFOf5FiSTRZDWg2OKO7Q%2Bgz9Eb3oyPlhrvmdfd5X73LYlCDGuZdSjY7L%2F8SaecnAjIGnVHdjzvA%3D%3D#",
+    "title": "公司注册处 - 用户登记",
+    "bodySnippet": "移动至主要内容\nCompanies Registry\n字型大小\nEN\n繁\nPrint\nHelp\nShare\n2026年7月6日 13:40 (GMT+8)\n首页\n最新消息\n实用资讯\n联络我们\n用户登记\n用户登记\n这个页面的主要内容\n1\n填写帐户资料\n2\n填写用户资料\n3\n提交身分证明\n4\n复审帐户资料\n5\n确认\n步骤1 - 填写帐户资料 \n了解更多\n用户类别\n用户类别\n个人\n根据香港《公司条例》成立/迁册/注册的公司(CR公司)\n只在香港税务局辖下的商业登记署登记的业务(BR实体)\n其他非个人\n拟订用的服务\n电子提交\n电子查册\n主要帐户 \n其后帐户 \n了解更多电子查册其後帐户\n \n取览不提供的资料／受保护资料\n(只适用於特定类别指明人士，及属非自然人的特定类别指明人士的获授权代表)\n指明人士的类别 \n了解更多\n \n请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士\n属非自然人的指明人士的获授权代表 \n欲使用的用户名称及欲使用密码\n用户名称\n检查用户名称有效性\n密码 \n了解更多\n密码必须包含至少10个字符，其中包含至少一个数字、一个大写字母和一个小写字母。\n确认密码\n取 消 返 回 继 续\n首页\n网站指南\n重要告示\n条款及条件\n联络我们\n2026 © 公司注册处版权所有\n修订日期: 2026年6月17日\n我们使用 cookies 来确保我们在我们的网站上为你提供最佳体验，了解你的兴趣并向你提供个性化内容，如我们的 Cookie 政策中进一步规定的那样。如果你接受在我们的网站上使用 cookies，请按“接受”按钮表明你接受。\n接受",
+    "hasUserCategory": true,
+    "hasAccountProfile": true
+  },
+  "formItems": [
+    {
+      "idx": 0,
+      "label": "用户类别",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [],
+      "itemText": "用户类别\n用户类别\n个人\n根据香港《公司条例》成立/迁册/注册的公司(CR公司)\n只在香港税务局辖下的商业登记署登记的业务(BR实体)\n其他非个人"
+    },
+    {
+      "idx": 1,
+      "label": "",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [],
+      "itemText": "用户类别\n个人\n根据香港《公司条例》成立/迁册/注册的公司(CR公司)\n只在香港税务局辖下的商业登记署登记的业务(BR实体)\n其他非个人"
+    },
+    {
+      "idx": 2,
+      "label": "拟订用的服务",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "电子提交",
+          "checked": false
+        },
+        {
+          "text": "电子查册",
+          "checked": false
+        },
+        {
+          "text": "取览不提供的资料／受保护资料",
+          "checked": false
+        },
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [
+        {
+          "text": "主要帐户",
+          "checked": false
+        },
+        {
+          "text": "其后帐户 \n了解更多电子查册其後帐户",
+          "checked": false
+        },
+        {
+          "text": "指明人士的类别 \n了解更多",
+          "checked": false
+        },
+        {
+          "text": "属非自然人的指明人士的获授权代表",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "filing",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "search",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "principal",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "subsequent",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "pi",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "C",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "R",
+          "visible": true
+        }
+      ],
+      "itemText": "拟订用的服务\n电子提交\n电子查册\n主要帐户 \n其后帐户 \n了解更多电子查册其後帐户\n \n取览不提供的资料／受保护资料\n(只适用於特定类别指明人士，及属非自然人的特定类别指明人士的获授权代表)\n指明人士的类别 \n了解更多\n \n请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士\n属非自然人的指明人士的获"
+    },
+    {
+      "idx": 3,
+      "label": "电子提交",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "电子提交",
+          "checked": false
+        },
+        {
+          "text": "电子查册",
+          "checked": false
+        },
+        {
+          "text": "取览不提供的资料／受保护资料",
+          "checked": false
+        },
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [
+        {
+          "text": "主要帐户",
+          "checked": false
+        },
+        {
+          "text": "其后帐户 \n了解更多电子查册其後帐户",
+          "checked": false
+        },
+        {
+          "text": "指明人士的类别 \n了解更多",
+          "checked": false
+        },
+        {
+          "text": "属非自然人的指明人士的获授权代表",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "filing",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "search",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "principal",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "subsequent",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "pi",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "C",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "R",
+          "visible": true
+        }
+      ],
+      "itemText": "电子提交\n电子查册\n主要帐户 \n其后帐户 \n了解更多电子查册其後帐户\n \n取览不提供的资料／受保护资料\n(只适用於特定类别指明人士，及属非自然人的特定类别指明人士的获授权代表)\n指明人士的类别 \n了解更多\n \n请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士\n属非自然人的指明人士的获授权代表"
+    },
+    {
+      "idx": 4,
+      "label": "主要帐户",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [
+        {
+          "text": "主要帐户",
+          "checked": false
+        },
+        {
+          "text": "其后帐户 \n了解更多电子查册其後帐户",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "principal",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "subsequent",
+          "visible": true
+        }
+      ],
+      "itemText": "主要帐户 \n其后帐户 \n了解更多电子查册其後帐户"
+    },
+    {
+      "idx": 5,
+      "label": "主要帐户",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [
+        {
+          "text": "主要帐户",
+          "checked": false
+        },
+        {
+          "text": "其后帐户 \n了解更多电子查册其後帐户",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "principal",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "serviceType",
+          "id": "",
+          "placeholder": "",
+          "value": "subsequent",
+          "visible": true
+        }
+      ],
+      "itemText": "主要帐户 \n其后帐户 \n了解更多电子查册其後帐户"
+    },
+    {
+      "idx": 6,
+      "label": "指明人士的类别 \n了解更多",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [
+        {
+          "text": "指明人士的类别 \n了解更多",
+          "checked": false
+        },
+        {
+          "text": "属非自然人的指明人士的获授权代表",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "C",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "R",
+          "visible": true
+        }
+      ],
+      "itemText": "(只适用於特定类别指明人士，及属非自然人的特定类别指明人士的获授权代表)\n指明人士的类别 \n了解更多\n \n请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士\n属非自然人的指明人士的获授权代表"
+    },
+    {
+      "idx": 7,
+      "label": "指明人士的类别 \n了解更多",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [
+        {
+          "text": "指明人士的类别 \n了解更多",
+          "checked": false
+        },
+        {
+          "text": "属非自然人的指明人士的获授权代表",
+          "checked": false
+        }
+      ],
+      "inputs": [
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "C",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        },
+        {
+          "type": "radio",
+          "name": "accessProtectedInfoServiceType",
+          "id": "",
+          "placeholder": "",
+          "value": "R",
+          "visible": true
+        }
+      ],
+      "itemText": "指明人士的类别 \n了解更多\n \n请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士\n属非自然人的指明人士的获授权代表"
+    },
+    {
+      "idx": 8,
+      "label": "请选择适用的类别",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        }
+      ],
+      "itemText": "请选择适用的类别\n清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士"
+    },
+    {
+      "idx": 9,
+      "label": "清盘人",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [
+        {
+          "text": "清盘人",
+          "checked": false
+        },
+        {
+          "text": "破产案受託人",
+          "checked": false
+        },
+        {
+          "text": "公职人员或公共机构",
+          "checked": false
+        },
+        {
+          "text": "表列人士",
+          "checked": false
+        },
+        {
+          "text": "律师",
+          "checked": false
+        },
+        {
+          "text": "外地律师",
+          "checked": false
+        },
+        {
+          "text": "执业会计师",
+          "checked": false
+        },
+        {
+          "text": "金融机构(认可机构除外)",
+          "checked": false
+        },
+        {
+          "text": "认可机构",
+          "checked": false
+        },
+        {
+          "text": "指定非金融业人士",
+          "checked": false
+        }
+      ],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "LQ_LQ",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "TB_TB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "OB_OB",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SP_SP",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "SR_SR",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FL_FL",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "CA_CA",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "FI_FI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "AI_AI",
+          "visible": true
+        },
+        {
+          "type": "checkbox",
+          "name": "",
+          "id": "",
+          "placeholder": "",
+          "value": "DP_DP",
+          "visible": true
+        }
+      ],
+      "itemText": "清盘人\n破产案受託人\n公职人员或公共机构\n表列人士\n律师\n外地律师\n执业会计师\n金融机构(认可机构除外)\n认可机构\n指定非金融业人士"
+    },
+    {
+      "idx": 10,
+      "label": "欲使用的用户名称及欲使用密码",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "text",
+          "name": "",
+          "id": "userId",
+          "placeholder": "用户名称",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": "欲使用的用户名称及欲使用密码\n用户名称\n检查用户名称有效性"
+    },
+    {
+      "idx": 11,
+      "label": "用户名称",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "text",
+          "name": "",
+          "id": "userId",
+          "placeholder": "用户名称",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": "用户名称\n检查用户名称有效性"
+    },
+    {
+      "idx": 12,
+      "label": "密码",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "password",
+          "name": "",
+          "id": "password",
+          "placeholder": "密码",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": "密码 \n了解更多\n密码必须包含至少10个字符，其中包含至少一个数字、一个大写字母和一个小写字母。"
+    },
+    {
+      "idx": 13,
+      "label": "",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "password",
+          "name": "",
+          "id": "password",
+          "placeholder": "密码",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": ""
+    },
+    {
+      "idx": 14,
+      "label": "确认密码",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "password",
+          "name": "",
+          "id": "confirm",
+          "placeholder": "确认密码",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": "确认密码"
+    },
+    {
+      "idx": 15,
+      "label": "",
+      "hasSelect": false,
+      "selectHtml": "",
+      "selectText": "",
+      "selectClasses": "",
+      "checkboxes": [],
+      "radios": [],
+      "inputs": [
+        {
+          "type": "password",
+          "name": "",
+          "id": "confirm",
+          "placeholder": "确认密码",
+          "value": "",
+          "visible": true
+        }
+      ],
+      "itemText": ""
+    }
+  ],
+  "selects": [
+    {
+      "idx": 0,
+      "tag": "SELECT",
+      "classes": "size-xl",
+      "role": "",
+      "text": "用户类别\n个人\n根据香港《公司条例》成立/迁册/注册的公司(CR公司)\n只在香港税务局辖下的商业登记署登记的业务(BR实体)\n其他非个人",
+      "placeholder": "",
+      "selected": "",
+      "html": "<select class=\"size-xl\" data-__meta=\"[object Object]\" data-__field=\"[object Object]\" id=\"userType\"><option value=\"\" disabled=\"disabled\" selected=\"selected\">用户类别</option> <option value=\"0\"><!---->个人</option><option value=\"2\"><!---->根据香港《公司条例》成立/迁册/注册的公司(CR公司)</option><option value=\"3\"><!---->只在香港税务局辖下的商业登记署登记的业务(BR实体)</option><option value=\"1\"><!---->其他非个人</option> <!----><!----><!----><!----></select>",
+      "visible": true
+    }
+  ],
+  "dropdowns": []
+}

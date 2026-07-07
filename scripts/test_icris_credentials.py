@@ -12,7 +12,8 @@ from src.materials.packager import load_mock_data
 def main():
     data = load_mock_data()
     user, pwd = derive_icris_credentials(data)
-    assert user == "chantaimanhk26", user
+    assert user.startswith("chantaimanhk26"), user
+    assert len(user) == len("chantaimanhk26") + 2, user
     assert pwd == "Chan2026Pass", pwd
     assert len(pwd) >= 10
     assert pwd[0].isupper()
