@@ -49,7 +49,11 @@ def append_random_username_suffix(username: str, length: int = 2) -> str:
 
 
 def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
-    """从 mock 数据生成 ICRIS 用户名与符合规则的密码"""
+    """从 mock 数据生成 ICRIS 用户名与符合规则的密码（同一次流程用户名保持一致）"""
+    session = data.setdefault("_icris_session", {})
+    if session.get("username") and session.get("password"):
+        return session["username"], session["password"]
+
     acct = data.get("icris_account", {})
     applicant = data.get("applicant", {})
 
@@ -63,9 +67,38 @@ def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
             username = parts.lower() or "icrisuser"
 
     username = append_random_username_suffix(username, length=2)
-
     password = ensure_icris_password(acct.get("password") or data.get("password_hint", ""))
+    session["username"] = username
+    session["password"] = password
     return username, password
+
+
+def split_applicant_english_name(name_en: str) -> tuple[str, str]:
+    """英文姓名 → (名, 姓)，如 CHAN Tai Man → (Tai Man, CHAN)"""
+    parts = [p for p in (name_en or "").split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    return " ".join(parts[1:]), parts[0]
+
+
+def derive_mock_china_address(applicant: dict[str, Any]) -> dict[str, str]:
+    """非香港地址（中国大陆）mock 数据"""
+    cn = applicant.get("address_cn")
+    if isinstance(cn, dict):
+        return {
+            "room": str(cn.get("room", "8楼A室")),
+            "building": str(cn.get("building", "幸福大厦")),
+            "street": str(cn.get("street", "科技园南路1号")),
+            "region": str(cn.get("region", "广东省深圳市南山区 518000")),
+        }
+    return {
+        "room": "8楼A室",
+        "building": "快乐大厦",
+        "street": "中关村大街1号",
+        "region": "广东省广州市天河区 510000",
+    }
 
 
 def ensure_icris_password(raw: str) -> str:
@@ -1845,7 +1878,52 @@ class IcrisRegistrationBot:
 
         # 优先：s02 原生表单 (#userType / filing / search / serviceType / #userId ...)
         filled = await self._fill_account_profile_native(page, data)
-        if filled >= 5:
+        if filled < 5:
+            # 回退：Ant Design 组件路径
+            logger.info("原生填写不足 (%d)，尝试 Ant Design 回退", filled)
+            if await self._select_user_category_individual(page):
+                filled += 1
+                await page.wait_for_timeout(800)
+
+            checkbox_steps = [
+                r"电子提交|電子提交",
+                r"电子查册|電子查冊",
+            ]
+            for cb_pat in checkbox_steps:
+                if await self._ensure_checkbox_by_text(page, cb_pat):
+                    filled += 1
+                    await page.wait_for_timeout(400)
+                elif await self._ensure_checkbox_in_section(
+                    page, r"拟订用的服务|擬訂用的服務", cb_pat
+                ):
+                    filled += 1
+                    await page.wait_for_timeout(400)
+
+            if await self._select_primary_account_radio(page):
+                filled += 1
+                await page.wait_for_timeout(400)
+
+            field_map = [
+                (r"用户名称|用戶名稱|Username|userName|loginName", username),
+                (r"密码|密碼|Password", password),
+                (r"确认密码|確認密碼|confirmPassword|rePassword|Confirm", password),
+            ]
+            for label_pat, value in field_map:
+                if await self._fill_ant_form_by_label(page, label_pat, value):
+                    filled += 1
+                elif await self._fill_input_near_label(page, [label_pat], value):
+                    filled += 1
+                elif await self._fill_field(page, [label_pat], value):
+                    filled += 1
+
+            for selector, value in (
+                ("#userId", username),
+                ("#password", password),
+                ("#confirm", password),
+            ):
+                if await self._fill_native_input(page, selector, value):
+                    filled += 1
+        else:
             status = await self._get_account_profile_status(page)
             logger.info(
                 "账户资料原生填写完成 %d 项 (用户名=%s, 状态=%s)",
@@ -1853,48 +1931,6 @@ class IcrisRegistrationBot:
                 username,
                 status,
             )
-            return filled
-
-        # 回退：Ant Design 组件路径
-        logger.info("原生填写不足 (%d)，尝试 Ant Design 回退", filled)
-        if await self._select_user_category_individual(page):
-            filled += 1
-            await page.wait_for_timeout(800)
-
-        checkbox_steps = [
-            r"电子提交|電子提交",
-            r"电子查册|電子查冊",
-        ]
-        for cb_pat in checkbox_steps:
-            if await self._ensure_checkbox_by_text(page, cb_pat):
-                filled += 1
-                await page.wait_for_timeout(400)
-            elif await self._ensure_checkbox_in_section(
-                page, r"拟订用的服务|擬訂用的服務", cb_pat
-            ):
-                filled += 1
-                await page.wait_for_timeout(400)
-
-        if await self._select_primary_account_radio(page):
-            filled += 1
-            await page.wait_for_timeout(400)
-
-        field_map = [
-            (r"用户名称|用戶名稱|Username|userName|loginName", username),
-            (r"密码|密碼|Password", password),
-            (r"确认密码|確認密碼|confirmPassword|rePassword|Confirm", password),
-        ]
-        for label_pat, value in field_map:
-            if await self._fill_ant_form_by_label(page, label_pat, value):
-                filled += 1
-            elif await self._fill_input_near_label(page, [label_pat], value):
-                filled += 1
-            elif await self._fill_field(page, [label_pat], value):
-                filled += 1
-
-        for selector, value in (("#userId", username), ("#password", password), ("#confirm", password)):
-            if await self._fill_native_input(page, selector, value):
-                filled += 1
 
         status = await self._get_account_profile_status(page)
         individual_ok = status.get("userCategory", False)
@@ -1913,6 +1949,15 @@ class IcrisRegistrationBot:
             status,
             page.url[:100],
         )
+
+        if filled > 0 and status.get("userCategory") and status.get("username"):
+            if await self._click_account_profile_continue(page):
+                await self._log_page(page, "账户资料继续后")
+            else:
+                logger.warning("账户资料填写后未能点击「继续」")
+        elif filled > 0:
+            logger.warning("账户资料未完整，跳过点击继续: %s", status)
+
         return filled
 
     async def _fill_field(self, page: "Page", keywords: list[str], value: str) -> bool:
@@ -1930,10 +1975,14 @@ class IcrisRegistrationBot:
                 if lbl_for:
                     inp = scope.locator(f"#{lbl_for}")
                     if await inp.count() > 0:
+                        if await inp.is_disabled():
+                            continue
                         await inp.fill(value)
                         return True
                 inp = lbl.locator("xpath=following::input[1] | following::textarea[1]")
                 if await inp.count() > 0:
+                    if await inp.first.is_disabled():
+                        continue
                     await inp.first.fill(value)
                     return True
 
@@ -1946,7 +1995,307 @@ class IcrisRegistrationBot:
 
         return False
 
+    def _is_user_info_url(self, url: str) -> bool:
+        return bool(re.search(r"registration/s03", url.lower()))
+
+    async def _is_user_info_step(self, page: "Page") -> bool:
+        if self._is_user_info_url(page.url):
+            return True
+        return bool(
+            await page.evaluate(
+                """() => /填写用户资料|填寫用戶資料|步骤2\\s*-\\s*填写用户资料/.test(
+                    document.body ? document.body.innerText : ''
+                )"""
+            )
+        )
+
+    async def _wait_for_user_info_form(self, page: "Page", timeout_ms: int = 90000) -> bool:
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const t = document.body ? document.body.innerText : '';
+                    if (!/填写用户资料|填寫用戶資料/.test(t)) return false;
+                    const enabled = document.querySelectorAll(
+                        "input:not([disabled]):not([type='hidden']):not([type='checkbox']):not([type='radio']), "
+                        + "select:not([disabled]), textarea:not([disabled])"
+                    );
+                    return enabled.length >= 2;
+                }""",
+                timeout=timeout_ms,
+            )
+            await page.wait_for_timeout(800)
+            return True
+        except Exception:
+            return await self._is_user_info_step(page)
+
+    async def _fill_enabled_field_by_label(
+        self,
+        page: "Page",
+        label_pattern: str,
+        value: str,
+        *,
+        field_type: str = "text",
+    ) -> bool:
+        """按标签填写可用字段（跳过 disabled，兼容 Vue）"""
+        if not value:
+            return False
+        ok = await page.evaluate(
+            """([labelPat, val, ftype]) => {
+                const labelRe = new RegExp(labelPat, 'i');
+                const setNativeValue = (el, v) => {
+                    const Ctor = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement;
+                    const setter = Object.getOwnPropertyDescriptor(Ctor.prototype, 'value').set;
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const blocks = document.querySelectorAll(
+                    '.ant-form-item, fieldset, .form-group, tr, .content'
+                );
+                for (const item of blocks) {
+                    const label = item.querySelector(
+                        'label, .ant-form-item-label, .rowTitle, th, .control-label'
+                    );
+                    const labelText = label ? (label.innerText || '').trim() : '';
+                    if (!labelText || !labelRe.test(labelText)) continue;
+                    if (ftype === 'select') {
+                        const sel = item.querySelector('select:not([disabled])');
+                        if (!sel) continue;
+                        const opt = [...sel.options].find(o =>
+                            new RegExp(val, 'i').test((o.textContent || '').trim()) || o.value === val
+                        );
+                        if (opt) {
+                            sel.value = opt.value;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                        continue;
+                    }
+                    const inp = item.querySelector(
+                        "input:not([disabled]):not([type='checkbox']):not([type='radio']):not([type='hidden']), "
+                        + "textarea:not([disabled])"
+                    );
+                    if (!inp) continue;
+                    inp.focus();
+                    setNativeValue(inp, val);
+                    return true;
+                }
+                return false;
+            }""",
+            [label_pattern, value, field_type],
+        )
+        if ok:
+            logger.info("已填写用户资料 [%s]", label_pattern)
+        return bool(ok)
+
+    async def _fill_by_placeholder(
+        self,
+        page: "Page",
+        placeholder_pattern: str,
+        value: str,
+        *,
+        index: int = 0,
+    ) -> bool:
+        """按 input placeholder 填写（s03 Vue 表单常用 placeholder 作标签）"""
+        if not value:
+            return False
+        ph_re = re.compile(placeholder_pattern, re.I)
+        try:
+            inputs = page.locator(
+                "input.ant-input:not([disabled]), "
+                "textarea.ant-input:not([disabled]), "
+                "input:not([disabled]):not([type='hidden']):not([type='checkbox']):not([type='radio'])"
+            )
+            matches: list[Any] = []
+            for i in range(await inputs.count()):
+                item = inputs.nth(i)
+                ph = (await item.get_attribute("placeholder") or "").strip()
+                aria = (await item.get_attribute("aria-label") or "").strip()
+                if ph_re.search(ph) or ph_re.search(aria):
+                    matches.append(item)
+            if len(matches) > index:
+                target = matches[index]
+                await target.scroll_into_view_if_needed()
+                await target.fill(value)
+                await target.dispatch_event("input")
+                await target.dispatch_event("change")
+                logger.info("已按 placeholder 填写 [%s]", placeholder_pattern)
+                return True
+        except Exception as exc:
+            logger.debug("placeholder fill failed: %s", exc)
+
+        ok = await page.evaluate(
+            """([pat, val, idx]) => {
+                const phRe = new RegExp(pat, 'i');
+                const setNativeValue = (el, v) => {
+                    const Ctor = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement;
+                    const setter = Object.getOwnPropertyDescriptor(Ctor.prototype, 'value').set;
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const inputs = [...document.querySelectorAll(
+                    "input:not([disabled]):not([type='hidden']):not([type='checkbox']):not([type='radio']), "
+                    + "textarea:not([disabled])"
+                )].filter(inp => {
+                    const ph = inp.placeholder || inp.getAttribute('aria-label') || '';
+                    return phRe.test(ph);
+                });
+                if (inputs.length <= idx) return false;
+                const inp = inputs[idx];
+                inp.focus();
+                setNativeValue(inp, val);
+                return true;
+            }""",
+            [placeholder_pattern, value, index],
+        )
+        if ok:
+            logger.info("已按 placeholder(JS) 填写 [%s]", placeholder_pattern)
+        return bool(ok)
+
+    async def _fill_user_info_step(self, page: "Page", data: dict[str, Any]) -> int:
+        """填写用户资料（s03）：称谓/姓名/地址/联络资料"""
+        if not await self._is_user_info_step(page):
+            if not await self._wait_for_user_info_form(page, timeout_ms=30000):
+                logger.warning("当前不在用户资料步骤, url=%s", page.url)
+                return 0
+
+        await self._ensure_simplified_chinese(page)
+        if not await self._wait_for_user_info_form(page):
+            logger.warning("用户资料表单未就绪, url=%s", page.url)
+        await page.wait_for_timeout(800)
+
+        applicant = data.get("applicant", {})
+        given, surname = split_applicant_english_name(applicant.get("name_en", ""))
+        title = applicant.get("title", "Mr")
+        id_type = applicant.get("id_type", "HKID")
+        email = applicant.get("email", "")
+        phone = applicant.get("phone", "")
+        addr = derive_mock_china_address(applicant)
+
+        logger.info("开始填写用户资料 (url=%s)", page.url[:120])
+
+        filled = 0
+
+        async def _inc(ok: bool, label: str = "") -> None:
+            nonlocal filled
+            if ok:
+                filled += 1
+                if label:
+                    logger.info("用户资料: %s", label)
+                await page.wait_for_timeout(250)
+
+        # 姓名（placeholder 为主）
+        for pat, val, name in [
+            (r"英文姓氏|英文姓", surname, "英文姓氏"),
+            (r"英文名字|英文名", given, "英文名字"),
+            (r"中文姓名|中文名", applicant.get("name_cn", ""), "中文姓名"),
+        ]:
+            ok = await self._fill_by_placeholder(page, pat, val)
+            if not ok:
+                ok = await self._fill_enabled_field_by_label(page, pat, val)
+            await _inc(ok, name)
+
+        for label_pat, value, ftype, name in [
+            (r"称谓|稱謂|Title", title, "select", "称谓"),
+            (r"身份识别类别|身份識別類別|证件类型|證件類型", id_type, "select", "证件类型"),
+            (
+                r"身份识别号码|身份識別號碼|证件号码|證件號碼",
+                applicant.get("id_number", ""),
+                "text",
+                "证件号码",
+            ),
+        ]:
+            await _inc(
+                await self._fill_enabled_field_by_label(
+                    page, label_pat, str(value), field_type=ftype
+                ),
+                name,
+            )
+
+        # 非香港地址 + 中国地址栏
+        await _inc(
+            await self._select_radio_in_section(page, r"地址", r"非香港地址|非香港"),
+            "非香港地址",
+        )
+        for pat, val, name in [
+            (r"室.*楼.*座|室.*樓.*座", addr["room"], "室/楼/座"),
+            (r"大厦|大廈", addr["building"], "大厦"),
+            (r"街道|屋苑|地段|村", addr["street"], "街道"),
+            (r"区.*市.*省|區.*市.*省|邮递|郵遞", addr["region"], "区/市/省"),
+        ]:
+            ok = await self._fill_by_placeholder(page, pat, val)
+            if not ok:
+                ok = await self._fill_enabled_field_by_label(page, pat, val)
+            await _inc(ok, name)
+
+        # 国家/地区 → 中国
+        await _inc(
+            await self._select_ant_dropdown_by_label(
+                page, r"国家|地區|地区", r"CHN|中國|中国"
+            ),
+            "国家/地区=中国",
+        )
+
+        # 电邮 + 确认电邮
+        for pat, name in [
+            (r"^电邮地址$|^電郵地址$", "电邮地址"),
+            (r"确认电邮|確認電郵", "确认电邮"),
+        ]:
+            ok = await self._fill_by_placeholder(page, pat, email)
+            if not ok:
+                ok = await self._fill_enabled_field_by_label(page, pat, email)
+            await _inc(ok, name)
+
+        # 香港联络电话
+        ok = await self._fill_by_placeholder(page, r"联络电话|聯絡電話|香港联络", phone)
+        if not ok:
+            ok = await self._fill_enabled_field_by_label(
+                page, r"香港联络|聯絡電話|流动电话|流動電話", phone
+            )
+        await _inc(ok, "联络电话")
+
+        # 通讯语言 → 中文
+        await _inc(
+            await self._select_ant_dropdown_by_label(
+                page, r"通讯语言|通訊語言", r"中文|简体|繁体|簡體|繁體"
+            ),
+            "通讯语言=中文",
+        )
+
+        # 按常见 id/name 再填一次（Vue 表单兜底）
+        id_map = [
+            ("#engSurName, input[name*='engSur' i], input[id*='engSur' i]", surname, "text"),
+            ("#engOtherName, input[name*='engOther' i], input[id*='engOther' i]", given, "text"),
+            ("#chiName, input[name*='chiName' i], input[id*='chiName' i]", applicant.get("name_cn", ""), "text"),
+            ("#emailAddr, input[name*='email' i]:not([name*='confirm' i])", email, "text"),
+            ("input[name*='confirm' i][name*='email' i], input[id*='confirmEmail' i]", email, "text"),
+            ("#mobileNo, input[name*='mobile' i], input[id*='mobile' i], input[name*='phone' i]", phone, "text"),
+            ("#idNo, input[name*='idNo' i], input[id*='idNum' i], input[name*='hkid' i]", applicant.get("id_number", ""), "text"),
+        ]
+        for selector, value, ftype in id_map:
+            if not value:
+                continue
+            for sel in selector.split(", "):
+                sel = sel.strip()
+                if ftype == "text" and await self._fill_native_input(page, sel, str(value)):
+                    filled += 1
+                    break
+
+        logger.info("用户资料已填写 %d 项", filled)
+
+        if filled > 0:
+            if await self._click_continue(page):
+                await self._log_page(page, "用户资料继续后")
+            else:
+                logger.warning("用户资料填写后未能点击「继续」")
+
+        return filled
+
     async def _fill_registration_form(self, page: "Page", data: dict[str, Any]) -> int:
+        if await self._is_user_info_step(page):
+            return await self._fill_user_info_step(page, data)
+
         if not self._is_registration_page(page.url):
             logger.warning("跳过填表：当前不在 registration 页面")
             return 0
@@ -1955,36 +2304,37 @@ class IcrisRegistrationBot:
         username, password = derive_icris_credentials(data)
         field_map = [
             (["title", "salutation", "稱謂"], applicant.get("title", "Mr")),
-            (["surname", "last", "姓"], applicant.get("name_en", "").split()[-1] if applicant.get("name_en") else ""),
-            (["given", "first", "名"], applicant.get("name_en", "").split()[0] if applicant.get("name_en") else ""),
+            (["surname", "last", "英文姓氏"], applicant.get("name_en", "").split()[-1] if applicant.get("name_en") else ""),
+            (["given", "first", "英文名字"], " ".join(applicant.get("name_en", "").split()[:-1]) if applicant.get("name_en") else ""),
             (["nameEn", "englishName", "英文"], applicant.get("name_en", "")),
             (["nameCh", "chineseName", "中文"], applicant.get("name_cn", "")),
             (["email", "電郵", "邮箱"], applicant.get("email", "")),
             (["phone", "telephone", "電話", "电话"], applicant.get("phone", "")),
             (["idNo", "idNumber", "identity", "身份"], applicant.get("id_number", "")),
             (["address", "地址"], applicant.get("address", "")),
-            (["userName", "username", "loginName", "用户名称", "用戶名稱"], username),
-            (["password", "密碼", "密码"], password),
-            (["confirmPassword", "rePassword", "確認"], password),
             (["hint", "passwordHint"], data.get("password_hint", "")),
             (["securityAnswer", "answer"], data.get("security_answer", "")),
         ]
 
         filled = 0
         for keywords, value in field_map:
-            if await self._fill_field(page, keywords, str(value)):
+            if value and await self._fill_field(page, keywords, str(value)):
                 filled += 1
 
-        selects = page.locator("form select")
-        sel_count = await selects.count()
-        for i in range(sel_count):
+        selects = page.locator("form select:not([disabled])")
+        for i in range(await selects.count()):
             sel = selects.nth(i)
             name = (await sel.get_attribute("name") or "").lower()
             if "idtype" in name or "id_type" in name or "doctype" in name:
                 try:
                     await sel.select_option(label=applicant.get("id_type", "HKID"))
+                    filled += 1
                 except Exception:
-                    await sel.select_option(index=1)
+                    try:
+                        await sel.select_option(index=1)
+                        filled += 1
+                    except Exception:
+                        pass
 
         logger.info("已填写 %d 个注册表单字段", filled)
         return filled
@@ -1994,44 +2344,131 @@ class IcrisRegistrationBot:
         if not self._is_registration_page(page.url):
             return False
 
-        form = page.locator("form[action*='registration' i], form").first
+        continue_pattern = re.compile(r"继\s*续|繼\s*續|Continue|Next|下一步", re.I)
+
+        # s02 页面继续按钮：button[type=submit].primary（文字「继 续」）
+        submit_continue = page.locator(
+            "button[type='submit'].primary.ant-btn, button[type='submit'].primary"
+        ).last
+        if await submit_continue.count() > 0 and await submit_continue.is_visible():
+            current_url = page.url
+            try:
+                await submit_continue.scroll_into_view_if_needed()
+                await submit_continue.click(force=True, timeout=5000)
+                logger.info(
+                    "已点击继续: submit.primary (text=%s)",
+                    (await submit_continue.inner_text()).strip(),
+                )
+                await self._wait_after_continue(page, current_url)
+                if self._is_home_or_portal(page.url):
+                    logger.error("点击继续后跳转到首页")
+                    return False
+                return True
+            except Exception as exc:
+                logger.debug("submit.primary 点击失败: %s", exc)
+
         continue_buttons = [
+            "button.primary.ant-btn:has-text('继续')",
+            "button.primary.ant-btn:has-text('继 续')",
+            "button.primary.ant-btn:has-text('繼 續')",
+            "button.ant-btn-danger.primary",
+            "button[type='submit'].primary.ant-btn",
+            "button[type='submit'].primary",
             "button.ant-btn-primary:has-text('继续')",
-            "button.ant-btn-primary:has-text('繼續')",
+            "button.ant-btn-primary:has-text('继 续')",
+            "button.ant-btn-primary:has-text('繼 續')",
             "button.ant-btn-primary:has-text('Continue')",
+            "button:has-text('继 续')",
+            "button:has-text('繼 續')",
             "button:has-text('继续')",
-            "button:has-text('繼續')",
             "button:has-text('Continue')",
             "button:has-text('下一步')",
             "button:has-text('Next')",
             "input[type='submit'][value*='继续' i]",
             "input[type='submit'][value*='Continue' i]",
-            "input[type='submit'][value*='Next' i]",
-            "input[type='button'][value*='继续' i]",
-            "input[type='button'][value*='Continue' i]",
         ]
-        for sel in continue_buttons:
-            btn = form.locator(sel).first
-            if await btn.count() == 0:
-                btn = page.locator(sel).first
-            if await btn.count() > 0 and await btn.is_visible():
+
+        scopes = [
+            page.locator("#uam-content, .content-wrapper, .formSection, form").first,
+            page.locator("body"),
+        ]
+
+        for scope in scopes:
+            if await scope.count() == 0:
+                continue
+            for sel in continue_buttons:
+                btn = scope.locator(sel).first
+                if await btn.count() == 0:
+                    btn = page.locator(sel).first
+                if await btn.count() == 0 or not await btn.is_visible():
+                    continue
+                txt = (await btn.inner_text()).strip()
+                if not continue_pattern.search(txt):
+                    continue
+                current_url = page.url
+                try:
+                    await btn.scroll_into_view_if_needed()
+                    await btn.click(force=True, timeout=5000)
+                    logger.info("已点击继续: %s (text=%s)", sel, txt)
+                    await self._wait_after_continue(page, current_url)
+                    if self._is_home_or_portal(page.url):
+                        logger.error("点击继续后跳转到首页")
+                        return False
+                    return True
+                except Exception as exc:
+                    logger.debug("点击继续失败 %s: %s", sel, exc)
+
+        role_btn = page.get_by_role("button", name=continue_pattern)
+        if await role_btn.count() > 0:
+            btn = role_btn.last
+            if await btn.is_visible():
                 current_url = page.url
                 await btn.scroll_into_view_if_needed()
-                await btn.click()
-                logger.info("已点击继续: %s", sel)
-                try:
-                    await page.wait_for_function(
-                        "(url) => window.location.href !== url",
-                        current_url,
-                        timeout=15000,
-                    )
-                except Exception:
-                    await self._wait_page_ready(page)
-                if self._is_home_or_portal(page.url):
-                    logger.error("点击继续后跳转到首页")
-                    return False
-                return True
+                await btn.click(force=True)
+                logger.info("已点击继续(role): %s", await btn.inner_text())
+                await self._wait_after_continue(page, current_url)
+                return not self._is_home_or_portal(page.url)
+
+        ok = await page.evaluate(
+            """() => {
+                const re = /继\\s*续|繼\\s*續|Continue|Next/i;
+                const btns = [...document.querySelectorAll('button, input[type=submit], input[type=button]')];
+                const btn = btns.find(b => re.test((b.innerText || b.value || '').trim()));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if ok:
+            current_url = page.url
+            logger.info("JS 已点击继续")
+            await self._wait_after_continue(page, current_url)
+            return not self._is_home_or_portal(page.url)
         return False
+
+    async def _wait_after_continue(self, page: "Page", previous_url: str) -> None:
+        """点击继续后等待进入下一步"""
+        try:
+            await page.wait_for_function(
+                """(prev) => {
+                    if (window.location.href !== prev) return true;
+                    const t = document.body ? document.body.innerText : '';
+                    return /填写用户资料|填寫用戶資料|步骤2|步驟2|s03/i.test(t)
+                        || /registration\\/s0[3-9]/i.test(window.location.href);
+                }""",
+                previous_url,
+                timeout=20000,
+            )
+        except Exception:
+            await self._wait_page_ready(page)
+        await page.wait_for_timeout(800)
+
+    async def _click_account_profile_continue(self, page: "Page") -> bool:
+        """账户资料填写完成后点击继续"""
+        if not await self._is_account_profile_step(page):
+            return False
+        logger.info("账户资料填写完成，点击「继续」进入下一步…")
+        return await self._click_continue(page)
 
     async def _click_next_if_exists(self, page: "Page") -> bool:
         """兼容旧调用，统一走 _click_continue"""
@@ -2105,41 +2542,41 @@ class IcrisRegistrationBot:
                 await self._wait_for_account_profile_step(page, timeout_ms=90000)
                 await self._wait_registration_vue(page, timeout=60000)
 
-                # Step 2: 账户资料（s02）
+                # Step 2: 账户资料（s02）— 填写后自动点继续
                 if await self._is_account_profile_step(page):
                     logger.info("=== 填写账户资料步骤 ===")
-                    filled = await self._fill_user_profile_step(page, data)
-                    if filled == 0:
-                        logger.warning("账户资料未填写任何字段，请检查页面语言与 DOM")
-                    if await self._click_continue(page):
-                        await self._wait_registration_vue(page, timeout=60000)
-                        await self._log_page(page, "账户资料继续后")
-                    else:
-                        logger.warning("账户资料填写后未找到「继续」按钮")
+                    await self._fill_user_profile_step(page, data)
                 else:
                     logger.warning("条款通过后未进入账户资料页, url=%s", page.url)
 
-                # Step 3+: 其余多步表单
+                # Step 3: 用户资料（s03）— 填写后自动点继续
+                await self._wait_for_user_info_form(page, timeout_ms=90000)
+                if await self._is_user_info_step(page):
+                    logger.info("=== 填写用户资料步骤 ===")
+                    await self._fill_user_info_step(page, data)
+                else:
+                    logger.warning("账户资料继续后未进入用户资料页, url=%s", page.url)
+
+                # Step 4+: 其余多步表单
                 max_steps = 6
                 for step in range(max_steps):
                     if self._is_home_or_portal(page.url):
-                        logger.error("步骤 %d 检测到跳转首页，停止", step + 2)
+                        logger.error("步骤 %d 检测到跳转首页，停止", step + 4)
                         break
-                    if await self._is_account_profile_step(page):
-                        filled = await self._fill_user_profile_step(page, data)
+                    if await self._is_user_info_step(page):
+                        await self._fill_user_info_step(page, data)
+                    elif await self._is_account_profile_step(page):
+                        await self._fill_user_profile_step(page, data)
                     else:
-                        logger.info("处理注册表单步骤 %d", step + 2)
+                        logger.info("处理注册表单步骤 %d", step + 4)
                         filled = await self._fill_registration_form(page, data)
-
-                    if filled == 0 and step > 0:
-                        break
-
-                    if await self._click_continue(page):
-                        await self._wait_registration_vue(page, timeout=60000)
-                        if not await self._ensure_on_registration(page, f"步骤{step + 2}后"):
+                        if filled == 0 and step > 0:
                             break
-                        continue
-                    break
+                        if not await self._click_continue(page):
+                            break
+                    await self._wait_registration_vue(page, timeout=60000)
+                    if not await self._ensure_on_registration(page, f"步骤{step + 4}后"):
+                        break
 
                 submit_btns = page.locator(
                     "form input[type='submit'], form button[type='submit']"

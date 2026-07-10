@@ -13,12 +13,14 @@ from src.email.imap_client import EmailClient, IcrisAccount
 from src.llm.openai_client import LLMClient
 from src.materials.packager import collect_materials_from_dict, load_mock_data, package_materials
 from src.wework.client import WeWorkClient
+from src.dingtalk.client import DingTalkClient
 
 logger = logging.getLogger(__name__)
 
 
 class StepName(str, Enum):
     WEWORK_CONTACT = "wework"
+    DINGTALK_CONTACT = "dingtalk"
     COLLECT_MATERIALS = "collect"
     CONFIRM_MATERIALS = "confirm"
     PACKAGE = "package"
@@ -50,6 +52,7 @@ class RegistrationWorkflow:
 
     llm: LLMClient = field(default_factory=LLMClient)
     wework: WeWorkClient = field(default_factory=WeWorkClient)
+    dingtalk: DingTalkClient = field(default_factory=DingTalkClient)
     email_client: EmailClient = field(default_factory=EmailClient)
 
     def step_wework_contact(self, ctx: WorkflowContext) -> WorkflowContext:
@@ -66,6 +69,24 @@ class RegistrationWorkflow:
             self.wework.push_mock_customer_message(ctx.chat_id, q)
             answer = self.llm.answer_material_question(q)
             self.wework.send_group_text(ctx.chat_id, f"【回复】{answer}")
+            ctx.log(f"客户问: {q}")
+            ctx.log(f"已回复: {answer[:80]}...")
+
+        return ctx
+
+    def step_dingtalk_contact(self, ctx: WorkflowContext) -> WorkflowContext:
+        """① 钉钉群对接客户，发送材料清单"""
+        ctx.log("=== 步骤① 钉钉群对接客户 ===")
+        self.dingtalk.send_material_checklist(ctx.chat_id)
+
+        # Mock 客户提问
+        mock_questions = [
+            "香港公司注册地址可以用大陆地址吗？",
+            "董事一定要是香港居民吗？",
+        ]
+        for q in mock_questions:
+            answer = self.llm.answer_material_question(q)
+            self.dingtalk.send_group_text(ctx.chat_id, f"【回复】{answer}")
             ctx.log(f"客户问: {q}")
             ctx.log(f"已回复: {answer[:80]}...")
 
@@ -167,6 +188,7 @@ class RegistrationWorkflow:
         ctx = ctx or WorkflowContext()
         steps = [
             self.step_wework_contact,
+            self.step_dingtalk_contact,
             self.step_collect_materials,
             self.step_confirm_materials,
             self.step_package,
@@ -185,6 +207,7 @@ class RegistrationWorkflow:
         ctx = ctx or WorkflowContext()
         step_map = {
             StepName.WEWORK_CONTACT: self.step_wework_contact,
+            StepName.DINGTALK_CONTACT: self.step_dingtalk_contact,
             StepName.COLLECT_MATERIALS: self.step_collect_materials,
             StepName.CONFIRM_MATERIALS: self.step_confirm_materials,
             StepName.PACKAGE: self.step_package,

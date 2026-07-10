@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     wework_token: str = ""
     wework_encoding_aes_key: str = ""
 
+    # 钉钉
+    dingtalk_app_key: str = ""
+    dingtalk_app_secret: str = ""
+
     # 邮箱
     email_imap_host: str = "imap.example.com"
     email_imap_port: int = 993
@@ -57,6 +61,10 @@ class Settings(BaseSettings):
     @property
     def wework_configured(self) -> bool:
         return bool(self.wework_corp_id and self.wework_corp_secret and self.wework_agent_id)
+
+    @property
+    def dingtalk_configured(self) -> bool:
+        return bool(self.dingtalk_app_key and self.dingtalk_app_secret)
 
     @property
     def email_configured(self) -> bool:
