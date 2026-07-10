@@ -24,7 +24,7 @@ from src.workflow.steps import StepName, WorkflowContext
 
 STEP_CHOICES = {
     "wework": StepName.WEWORK_CONTACT,
-    "dingtalk": StepName.DINGTALK_CONTACT,
+    "feishu": StepName.FEISHU_CONTACT,
     "collect": StepName.COLLECT_MATERIALS,
     "confirm": StepName.CONFIRM_MATERIALS,
     "package": StepName.PACKAGE,
@@ -36,7 +36,7 @@ STEP_CHOICES = {
 
 STEP_DESCRIPTIONS = {
     "wework": "① 企微群对接客户，发送材料清单，回答材料问题",
-    "dingtalk": "① 钉钉群对接客户，发送材料清单，监听 /资料 和 /start 指令",
+    "feishu": "① 飞书群对接客户，发送材料清单，监听 /资料 和 /start 指令",
     "collect": "② 搜集客户材料",
     "confirm": "② 和客户确认材料",
     "package": "③ 打包材料文件夹",
@@ -149,34 +149,105 @@ def cmd_run(args: argparse.Namespace) -> None:
     print("\n[OK] 执行完成")
 
 
-def cmd_dingtalk_bot(_args: argparse.Namespace) -> None:
-    """启动钉钉机器人，监听群内指令"""
-    from src.dingtalk.client import DingTalkClient, DingTalkMessage
+def cmd_wework_bot(_args: argparse.Namespace) -> None:
+    """启动企业微信机器人，监听群内指令"""
+    from src.wework.client import WeWorkClient, WeWorkMessage
     from src.agent.registration_agent import RegistrationAgent
     from src.workflow.steps import WorkflowContext
+    from config.settings import settings
 
     print("=" * 60)
-    print("钉钉群机器人 - 香港公司工商注册")
+    print("企业微信群机器人 - 香港公司工商注册")
     print("=" * 60)
 
     agent = RegistrationAgent()
-    client = agent.workflow.dingtalk
+    client = agent.workflow.wework
 
     # 注册 /资料 指令：发送材料清单
-    def cmd_docs(msg: DingTalkMessage) -> None:
+    def cmd_docs(msg: WeWorkMessage) -> None:
         print(f"[指令] /资料 来自 {msg.sender_name} (群: {msg.chat_id})")
         client.send_material_checklist(msg.chat_id)
         client.send_group_text(
             msg.chat_id,
-            f"@{msg.sender_name} 以上是香港公司注册所需材料清单，请准备后发送 /start 开始注册流程。",
+            "以上是香港公司注册所需材料清单，请准备后发送 /start 开始注册流程。",
         )
 
     # 注册 /start 指令：开始注册流程
-    def cmd_start(msg: DingTalkMessage) -> None:
+    def cmd_start(msg: WeWorkMessage) -> None:
         print(f"[指令] /start 来自 {msg.sender_name} (群: {msg.chat_id})")
         client.send_group_text(
             msg.chat_id,
-            f"@{msg.sender_name} 收到！正在启动注册流程...\n\n"
+            "收到！正在启动注册流程...\n\n"
+            "请确保已准备好材料清单中的文件，流程将依次执行：\n"
+            "1. 发送材料清单\n"
+            "2. 搜集客户材料\n"
+            "3. 确认材料\n"
+            "4. 打包材料\n"
+            "5. ICRIS 账号注册\n"
+            "6. 读取邮箱\n"
+            "7. 登录 ICRIS 填表\n"
+            "8. 通知同事",
+        )
+        ctx = WorkflowContext(chat_id=msg.chat_id, customer_id=msg.sender_id)
+        agent.workflow.run_all(ctx)
+        summary_lines = [f"  - {m}" for m in ctx.messages[-5:]]
+        client.send_group_text(
+            msg.chat_id,
+            "注册流程已完成！\n\n最后几步:\n" + "\n".join(summary_lines),
+        )
+
+    # 注册 /help 指令
+    def cmd_help(msg: WeWorkMessage) -> None:
+        print(f"[指令] /help 来自 {msg.sender_name}")
+        client.send_group_text(
+            msg.chat_id,
+            "香港公司工商注册机器人\n\n"
+            "可用指令：\n"
+            "/资料  — 发送香港公司注册所需材料清单\n"
+            "/start — 开始注册流程\n"
+            "/help  — 显示此帮助信息",
+        )
+
+    client.register_command("/资料", cmd_docs)
+    client.register_command("/docs", cmd_docs)
+    client.register_command("/start", cmd_start)
+    client.register_command("/开始注册", cmd_start)
+    client.register_command("/help", cmd_help)
+    client.register_command("/帮助", cmd_help)
+
+    print(f"[企微] 已注册指令: /资料, /start, /help")
+    print(f"[企微] Mock 模式: {client._mock_mode}")
+    client.start_webhook_server(port=settings.wework_webhook_port, blocking=True)
+
+
+def cmd_feishu_bot(_args: argparse.Namespace) -> None:
+    """启动飞书机器人，监听群内指令"""
+    from src.feishu.client import FeishuClient, FeishuMessage
+    from src.agent.registration_agent import RegistrationAgent
+    from src.workflow.steps import WorkflowContext
+
+    print("=" * 60)
+    print("飞书群机器人 - 香港公司工商注册")
+    print("=" * 60)
+
+    agent = RegistrationAgent()
+    client = agent.workflow.feishu
+
+    # 注册 /资料 指令：发送材料清单
+    def cmd_docs(msg: FeishuMessage) -> None:
+        print(f"[指令] /资料 来自 {msg.sender_name} (群: {msg.chat_id})")
+        client.send_material_checklist(msg.chat_id)
+        client.send_group_text(
+            msg.chat_id,
+            f"以上是香港公司注册所需材料清单，请准备后发送 /start 开始注册流程。",
+        )
+
+    # 注册 /start 指令：开始注册流程
+    def cmd_start(msg: FeishuMessage) -> None:
+        print(f"[指令] /start 来自 {msg.sender_name} (群: {msg.chat_id})")
+        client.send_group_text(
+            msg.chat_id,
+            "收到！正在启动注册流程...\n\n"
             "请确保已准备好材料清单中的文件，流程将依次执行：\n"
             "1. 发送材料清单\n"
             "2. 搜集客户材料\n"
@@ -193,20 +264,19 @@ def cmd_dingtalk_bot(_args: argparse.Namespace) -> None:
         summary_lines = [f"  - {m}" for m in ctx.messages[-5:]]
         client.send_group_text(
             msg.chat_id,
-            f"@{msg.sender_name} 注册流程已完成！\n\n最后几步:\n" + "\n".join(summary_lines),
+            "注册流程已完成！\n\n最后几步:\n" + "\n".join(summary_lines),
         )
 
     # 注册 /help 指令
-    def cmd_help(msg: DingTalkMessage) -> None:
+    def cmd_help(msg: FeishuMessage) -> None:
         print(f"[指令] /help 来自 {msg.sender_name}")
-        client.send_group_markdown(
+        client.send_group_text(
             msg.chat_id,
-            "可用指令",
             "**香港公司工商注册机器人**\n\n"
-            "可用指令：\n\n"
-            "- **/资料**  — 发送香港公司注册所需材料清单\n"
-            "- **/start** — 开始注册流程\n"
-            "- **/help**  — 显示此帮助信息",
+            "可用指令：\n"
+            "/资料  — 发送香港公司注册所需材料清单\n"
+            "/start — 开始注册流程\n"
+            "/help  — 显示此帮助信息",
         )
 
     client.register_command("/资料", cmd_docs)
@@ -216,9 +286,9 @@ def cmd_dingtalk_bot(_args: argparse.Namespace) -> None:
     client.register_command("/help", cmd_help)
     client.register_command("/帮助", cmd_help)
 
-    print(f"[钉钉] 已注册指令: /资料, /start, /help")
-    print(f"[钉钉] Mock 模式: {client._mock_mode}")
-    client.start_stream_listener(blocking=True)
+    print(f"[飞书] 已注册指令: /资料, /start, /help")
+    print(f"[飞书] Mock 模式: {client._mock_mode}")
+    client.start_ws_listener(blocking=True)
 
 
 def main() -> None:
@@ -236,8 +306,11 @@ def main() -> None:
     steps_parser = sub.add_parser("steps", help="列出所有可用步骤")
     steps_parser.set_defaults(func=cmd_steps)
 
-    dingtalk_parser = sub.add_parser("dingtalk-bot", help="启动钉钉群机器人（监听 /资料 /start 指令）")
-    dingtalk_parser.set_defaults(func=cmd_dingtalk_bot)
+    wework_parser = sub.add_parser("wework-bot", help="启动企业微信群机器人（监听 /资料 /start 指令）")
+    wework_parser.set_defaults(func=cmd_wework_bot)
+
+    feishu_parser = sub.add_parser("feishu-bot", help="启动飞书群机器人（监听 /资料 /start 指令）")
+    feishu_parser.set_defaults(func=cmd_feishu_bot)
 
     # 兼容直接 python main.py [--step ...] 用法
     parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), dest="_step")
@@ -250,8 +323,10 @@ def main() -> None:
         cmd_run(args)
     elif args.command == "steps":
         cmd_steps(args)
-    elif args.command == "dingtalk-bot":
-        cmd_dingtalk_bot(args)
+    elif args.command == "wework-bot":
+        cmd_wework_bot(args)
+    elif args.command == "feishu-bot":
+        cmd_feishu_bot(args)
     elif args._step or args._full or len(sys.argv) == 1:
         # 默认 run
         run_args = argparse.Namespace(

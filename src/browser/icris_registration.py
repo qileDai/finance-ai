@@ -490,6 +490,168 @@ class IcrisRegistrationBot:
                 return True
         return await self._is_simplified_chinese_active(page)
 
+    async def _is_traditional_chinese_active(self, page: "Page") -> bool:
+        state = await self._page_language_state(page)
+        if state == "traditional":
+            return True
+        if state == "simplified":
+            return False
+        jian = page.locator("a").filter(has_text=re.compile(r"^简$"))
+        if await jian.count() > 0 and await jian.first.is_visible():
+            return True
+        return False
+
+    async def _wait_language_traditional(self, page: "Page", timeout_ms: int = 15000) -> bool:
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const text = document.body ? document.body.innerText : '';
+                    if (/用户类别|拟订用的服务|公司注册处|首页/.test(text)) return false;
+                    return /用戶類別|擬訂用的服務|公司註冊處|首頁/.test(text);
+                }""",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            return await self._is_traditional_chinese_active(page)
+
+    async def _find_fan_link_info(self, page: "Page") -> dict | None:
+        """定位页头「繁」语言链接元数据"""
+        return await page.evaluate(
+            """() => {
+                const items = [];
+                for (const el of document.querySelectorAll('a, button, span, li')) {
+                    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, '');
+                    if (t !== '繁') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0 || r.top > 260) continue;
+                    const link = el.closest('a') || (el.tagName === 'A' ? el : null);
+                    const target = link || el;
+                    items.push({
+                        tag: target.tagName,
+                        href: target.href || target.getAttribute('href') || '',
+                        onclick: target.getAttribute('onclick') || '',
+                        top: r.top,
+                        left: r.left,
+                        id: target.id || '',
+                        cls: (target.className || '').slice(0, 80),
+                    });
+                }
+                items.sort((a, b) => a.top - b.top || a.left - b.left);
+                return items[0] || null;
+            }"""
+        )
+
+    async def _activate_fan_link(self, page: "Page", info: dict) -> str:
+        """尝试多种方式触发「繁」切换，返回使用的方法名"""
+        href = (info.get("href") or "").strip()
+        if href and not href.lower().startswith("javascript"):
+            await page.goto(href, wait_until="commit", timeout=60000)
+            return f"goto:{href[:80]}"
+
+        result = await page.evaluate(
+            """() => {
+                for (const el of document.querySelectorAll('a, button, span, li')) {
+                    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, '');
+                    if (t !== '繁') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0 || r.top > 260) continue;
+                    const target = el.closest('a') || el;
+                    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    if (typeof target.click === 'function') target.click();
+                    return { ok: true, tag: target.tagName, href: target.href || '' };
+                }
+                return { ok: false };
+            }"""
+        )
+        if result and result.get("ok"):
+            return f"js-click:{result.get('tag')}"
+
+        loc = page.locator("a").filter(has_text=re.compile(r"^繁$")).first
+        if await loc.count() == 0:
+            loc = page.get_by_text("繁", exact=True).first
+        await loc.scroll_into_view_if_needed()
+        await loc.click(force=True, timeout=5000)
+        return "playwright-force-click"
+
+    def _url_with_traditional_locale(self, url: str) -> str:
+        parsed = urlparse(url)
+        qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        for key in ("locale", "lang", "request_locale", "language"):
+            if key in qs:
+                qs[key] = "zh_TW"
+                break
+        else:
+            qs["locale"] = "zh_TW"
+        new_query = urlencode(qs)
+        return parsed._replace(query=new_query).geturl()
+
+    async def _fallback_traditional_locale_url(self, page: "Page") -> bool:
+        """回退：通过 URL 参数 / Cookie 强制繁体"""
+        try:
+            await page.context.add_cookies(
+                [
+                    {
+                        "name": "locale",
+                        "value": "zh_TW",
+                        "domain": "www.e-services.cr.gov.hk",
+                        "path": "/",
+                    },
+                    {
+                        "name": "lang",
+                        "value": "zh_TW",
+                        "domain": ".e-services.cr.gov.hk",
+                        "path": "/",
+                    },
+                ]
+            )
+        except Exception as e:
+            logger.debug("设置繁体 locale Cookie 失败: %s", e)
+
+        locale_url = self._url_with_traditional_locale(page.url)
+        if locale_url != page.url:
+            logger.info("回退：通过 URL 参数切换繁体 %s", locale_url[:120])
+            await page.goto(locale_url, wait_until="commit", timeout=60000)
+            await page.wait_for_timeout(1500)
+            if await self._wait_language_traditional(page, timeout_ms=10000):
+                return True
+        return await self._is_traditional_chinese_active(page)
+
+    async def _ensure_traditional_chinese(self, page: "Page") -> bool:
+        """点击页头右上角「繁」切换为繁体中文；已是繁体则跳过"""
+        if await self._is_traditional_chinese_active(page):
+            logger.info("页面已是繁体中文，跳过语言切换")
+            return True
+
+        info = await self._find_fan_link_info(page)
+        if not info:
+            logger.warning("未找到页头「繁」链接 (state=%s)", await self._page_language_state(page))
+            return await self._fallback_traditional_locale_url(page)
+
+        logger.info(
+            "找到「繁」入口: tag=%s href=%s class=%s",
+            info.get("tag"),
+            (info.get("href") or "")[:100],
+            info.get("cls"),
+        )
+
+        for attempt in range(1, 4):
+            try:
+                method = await self._activate_fan_link(page, info)
+                logger.info("已触发「繁」切换 (尝试 %d/3, 方式=%s)", attempt, method)
+                if await self._wait_language_traditional(page, timeout_ms=12000):
+                    logger.info("语言已切换为繁体中文")
+                    return True
+                await page.wait_for_timeout(800)
+            except Exception as e:
+                logger.warning("「繁」切换尝试 %d 失败: %s", attempt, e)
+                await page.wait_for_timeout(500)
+
+        logger.warning("点击「繁」后页面仍为简体 (state=%s)", await self._page_language_state(page))
+        return await self._fallback_traditional_locale_url(page)
+
     async def _navigate_to_registration(self, page: "Page") -> "Page | None":
         """
         进入注册页流程，成功返回当前 Page（可能是新标签页），失败返回 None。
@@ -1243,6 +1405,94 @@ class IcrisRegistrationBot:
                             return True
                         except Exception:
                             continue
+        return False
+
+    async def _click_first_visible_select_option(self, page: "Page") -> bool:
+        """点击当前可见下拉列表中的第一项（跳过「请选择」等占位项）"""
+        skip_re = re.compile(r"^请选择$|^請選擇$|^select$", re.I)
+        dropdown_selectors = [
+            ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+            ".rc-select-dropdown:not(.rc-select-dropdown-hidden)",
+            "[class*='select-dropdown']:not([class*='hidden'])",
+        ]
+        for dd_sel in dropdown_selectors:
+            dropdown = page.locator(dd_sel).last
+            if await dropdown.count() == 0:
+                continue
+            option_selectors = [
+                ".ant-select-item-option:not(.ant-select-item-option-disabled)",
+                ".ant-select-item:not(.ant-select-item-disabled)",
+                ".rc-select-item-option:not(.rc-select-item-option-disabled)",
+                "[role='option']",
+                "li",
+            ]
+            for opt_sel in option_selectors:
+                options = dropdown.locator(opt_sel)
+                for i in range(await options.count()):
+                    opt = options.nth(i)
+                    if not await opt.is_visible():
+                        continue
+                    txt = (await opt.inner_text()).strip()
+                    if not txt or skip_re.search(txt):
+                        continue
+                    try:
+                        content = opt.locator(
+                            ".ant-select-item-option-content, .rc-select-item-option-content"
+                        ).first
+                        target = content if await content.count() > 0 else opt
+                        await target.scroll_into_view_if_needed()
+                        await target.click(force=True, timeout=3000)
+                        await page.wait_for_timeout(500)
+                        logger.info("已选择下拉首项: %s", txt[:40])
+                        return True
+                    except Exception:
+                        try:
+                            await opt.click(force=True, timeout=3000)
+                            await page.wait_for_timeout(500)
+                            logger.info("已选择下拉首项: %s", txt[:40])
+                            return True
+                        except Exception:
+                            continue
+        return False
+
+    async def _select_ant_dropdown_first_option_by_label(
+        self,
+        page: "Page",
+        label_pattern: str,
+    ) -> bool:
+        """Ant Design Select：按表单项标签打开下拉并选择第一项"""
+        for attempt in range(3):
+            if not await self._open_labeled_select(page, label_pattern):
+                await page.wait_for_timeout(400)
+                continue
+            await page.wait_for_timeout(700)
+            try:
+                await page.wait_for_selector(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden), "
+                    ".rc-select-dropdown:not(.rc-select-dropdown-hidden)",
+                    timeout=4000,
+                )
+            except Exception:
+                pass
+            if await self._click_first_visible_select_option(page):
+                logger.info("已选择下拉首项 [%s]", label_pattern)
+                return True
+            try:
+                await page.keyboard.press("ArrowDown")
+                await page.wait_for_timeout(200)
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(500)
+                section = await self._get_ant_form_item_by_label(page, label_pattern)
+                selected = section.locator(".ant-select-selection-item").first
+                if await selected.count() > 0:
+                    txt = (await selected.inner_text()).strip()
+                    if txt and not re.search(r"请选择|請選擇", txt):
+                        logger.info("键盘已选择下拉首项 [%s] → %s", label_pattern, txt[:40])
+                        return True
+            except Exception:
+                pass
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
         return False
 
     async def _open_labeled_select(self, page: "Page", label_pattern: str) -> bool:
@@ -2160,7 +2410,7 @@ class IcrisRegistrationBot:
                 logger.warning("当前不在用户资料步骤, url=%s", page.url)
                 return 0
 
-        await self._ensure_simplified_chinese(page)
+        await self._ensure_traditional_chinese(page)
         if not await self._wait_for_user_info_form(page):
             logger.warning("用户资料表单未就绪, url=%s", page.url)
         await page.wait_for_timeout(800)
@@ -2222,12 +2472,19 @@ class IcrisRegistrationBot:
             (r"室.*楼.*座|室.*樓.*座", addr["room"], "室/楼/座"),
             (r"大厦|大廈", addr["building"], "大厦"),
             (r"街道|屋苑|地段|村", addr["street"], "街道"),
-            (r"区.*市.*省|區.*市.*省|邮递|郵遞", addr["region"], "区/市/省"),
         ]:
             ok = await self._fill_by_placeholder(page, pat, val)
             if not ok:
                 ok = await self._fill_enabled_field_by_label(page, pat, val)
             await _inc(ok, name)
+
+        # 区/市/省/州/邮递区号 — 下拉选第一项
+        await _inc(
+            await self._select_ant_dropdown_first_option_by_label(
+                page, r"区.*市.*省|區.*市.*省|邮递|郵遞"
+            ),
+            "区/市/省(首项)",
+        )
 
         # 国家/地区 → 中国
         await _inc(
@@ -2255,12 +2512,12 @@ class IcrisRegistrationBot:
             )
         await _inc(ok, "联络电话")
 
-        # 通讯语言 → 中文
+        # 通讯语言 → 繁体中文
         await _inc(
             await self._select_ant_dropdown_by_label(
-                page, r"通讯语言|通訊語言", r"中文|简体|繁体|簡體|繁體"
+                page, r"通讯语言|通訊語言", r"繁体中文|繁體中文|繁体|繁體"
             ),
-            "通讯语言=中文",
+            "通讯语言=繁体中文",
         )
 
         # 按常见 id/name 再填一次（Vue 表单兜底）
