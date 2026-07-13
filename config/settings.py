@@ -38,18 +38,21 @@ class Settings(BaseSettings):
 
     # 浏览器
     browser_headless: bool = False
-    browser_slow_mo: int = 100
+    browser_slow_mo: int = 0
     browser_channel: str = ""  # chrome / msedge / chromium，留空则自动检测
     browser_no_proxy: bool = True  # 绕过系统代理，避免 ERR_PROXY_CONNECTION_FAILED
-    browser_keep_open_seconds: int = 60  # 结束或出错后保持浏览器打开的秒数
+    browser_keep_open_seconds: int = 15
+    # Chrome CDP（连接用户已打开的 Chrome，绕过 disable-devtool 检测）
+    chrome_use_existing: bool = False
+    chrome_cdp_url: str = "http://127.0.0.1:9222"
 
     # 验证码识别
-    # auto=优先2Captcha→OCR回退 | 2captcha=仅打码平台 | audio | ocr | manual
     captcha_mode: str = "auto"
     captcha_manual_timeout: int = 180
     twocaptcha_api_key: str = ""
-    twocaptcha_max_variants: int = 5  # 并行提交的 GIF 帧变体数
-    twocaptcha_timeout: int = 120  # 单次 2Captcha 任务超时（秒）
+    twocaptcha_max_variants: int = 1  # 1=最快（单图）；3~5 提高准确率但更慢
+    twocaptcha_timeout: int = 60  # 单次 2Captcha 任务超时（秒）
+    twocaptcha_poll_interval: float = 1.0  # 轮询间隔（秒），首查不等待
     captcha_save_debug: bool = True
     # Ollama 本地视觉模型（免费，推荐 qwen2.5vl:7b）
     ollama_base_url: str = "http://localhost:11434"

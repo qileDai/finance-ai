@@ -214,13 +214,19 @@ def _create_task(client: httpx.Client, api_key: str, png_bytes: bytes, length: i
 
 
 def _poll_task(client: httpx.Client, api_key: str, task_id: str, timeout: int) -> str:
+    from config.settings import settings
+
     deadline = time.time() + timeout
+    interval = max(0.8, float(getattr(settings, "twocaptcha_poll_interval", 1.0)))
+    first_poll = True
     while time.time() < deadline:
-        time.sleep(3)
+        if not first_poll:
+            time.sleep(interval)
+        first_poll = False
         resp = client.post(
             API_RESULT,
             json={"clientKey": api_key, "taskId": task_id},
-            timeout=30,
+            timeout=15,
         )
         data = resp.json()
         if data.get("errorId", 1) != 0:
@@ -237,6 +243,46 @@ def _poll_task(client: httpx.Client, api_key: str, task_id: str, timeout: int) -
             raise RuntimeError("2Captcha 返回空结果")
 
     raise TimeoutError("2Captcha 识别超时")
+
+
+def solve_2captcha_fast(
+    image_bytes: bytes,
+    api_key: str,
+    timeout: int | None = None,
+    min_len: int = 5,
+    max_len: int = 5,
+) -> tuple[str, str] | None:
+    """最快路径：只提交 1 张图，立即轮询，成功即返回 (source, code)"""
+    from config.settings import settings
+
+    if not api_key or not image_bytes:
+        return None
+
+    length = max_len or min_len or 5
+    task_timeout = timeout or settings.twocaptcha_timeout
+    variants = prepare_image_variants(image_bytes)
+    if not variants:
+        return None
+
+    # 优先原始 GIF（ICRIS 动画验证码识别率已足够，且体积最小）
+    label, img_bytes = variants[0]
+    for item in variants:
+        if item[0] in ("raw_gif", "raw"):
+            label, img_bytes = item
+            break
+
+    try:
+        with _http_client() as client:
+            task_id = _create_task(client, api_key, img_bytes, length)
+            logger.info("2Captcha 快速任务 %s (%s, %d bytes)", task_id, label, len(img_bytes))
+            text = _poll_task(client, api_key, task_id, timeout=task_timeout)
+            code = _normalize_2captcha_text(text, length)
+            if code:
+                return f"2captcha:{label}", code
+            logger.warning("2Captcha 快速结果无效: %r", text)
+    except Exception as e:
+        logger.warning("2Captcha 快速识别失败: %s", e)
+    return None
 
 
 def _normalize_2captcha_text(text: str, length: int) -> str | None:
@@ -311,6 +357,8 @@ def solve_2captcha_voted(
                 src, code = result
                 candidates.append((src, code))
                 logger.info("2Captcha [%s]: %s", src, code)
+                if limit <= 1:
+                    return candidates
 
     return candidates
 

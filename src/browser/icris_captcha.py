@@ -37,7 +37,7 @@ async def _scroll_to_captcha_section(page: "Page") -> None:
         return
 
     await captcha_inp.scroll_into_view_if_needed()
-    await page.wait_for_timeout(400)
+    await page.wait_for_timeout(150)
 
     # 将验证码区域置于视口中上部，避免被底部栏遮挡
     await page.evaluate(
@@ -49,7 +49,7 @@ async def _scroll_to_captcha_section(page: "Page") -> None:
             window.scrollTo({ top: Math.max(0, offset), behavior: 'instant' });
         }"""
     )
-    await page.wait_for_timeout(500)
+    await page.wait_for_timeout(200)
 
     # 等待 GIF 验证码 src 加载完成
     try:
@@ -74,7 +74,7 @@ async def _scroll_to_captcha_section(page: "Page") -> None:
     ).first
     if await captcha_img.count() > 0:
         await captcha_img.scroll_into_view_if_needed()
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(200)
 
     logger.info("已滚动至图形验证码区域")
 
@@ -173,7 +173,7 @@ async def _reload_captcha(page: "Page") -> None:
     ).first
     if await reload_link.count() > 0 and await reload_link.is_visible():
         await reload_link.click()
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(600)
         logger.info("已刷新验证码")
 
 
@@ -289,7 +289,7 @@ async def fill_captcha(page: "Page", llm_client=None) -> bool:
         return bool(code)
 
     for attempt in range(1, MAX_CAPTCHA_RETRIES + 1):
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(200)
         await _scroll_to_captcha_section(page)
 
         code: str | None = None

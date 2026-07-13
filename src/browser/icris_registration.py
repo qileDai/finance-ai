@@ -13,13 +13,18 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 from config.settings import settings
 from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
-from src.browser.launcher import create_browser_context, launch_browser
+from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
+
+_PAGE_PAUSE_MS = 80
+_POLL_MS = 100
+_FORM_PAUSE_MS = 120
+_SPIN_TIMEOUT_MS = 45000
 
 REGISTRATION_BASE = (
     "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s01.do"
@@ -136,29 +141,133 @@ class IcrisRegistrationBot:
     def __init__(self, llm: LLMClient | None = None) -> None:
         self.llm = llm or LLMClient()
         self.dry_run = settings.dry_run
+        self._locale: str | None = None
 
     async def _log_page(self, page: "Page", label: str) -> None:
         logger.info("[%s] URL: %s", label, page.url)
 
-    async def _wait_registration_vue(self, page: "Page", timeout: int = 90000) -> bool:
-        """等待注册条款页 Vue 挂载（checkbox / 验证码 / URL hash）"""
+    async def _is_spinning(self, page: "Page") -> bool:
+        try:
+            return bool(
+                await page.evaluate(
+                    "() => !!document.querySelector('.ant-spin-spinning')"
+                )
+            )
+        except Exception:
+            return False
+
+    async def _get_validation_errors(self, page: "Page") -> list[str]:
+        try:
+            errs = await page.evaluate(
+                """() => {
+                    const out = [];
+                    for (const el of document.querySelectorAll(
+                        '.ant-form-item-explain-error, .ant-message-error'
+                    )) {
+                        const t = (el.innerText || '').trim();
+                        if (t) out.push(t);
+                    }
+                    return [...new Set(out)].slice(0, 8);
+                }"""
+            )
+            return errs or []
+        except Exception:
+            return []
+
+    async def _wait_spin_clear(self, page: "Page", timeout_ms: int | None = None) -> bool:
+        """等待全页 loading 结束；超时则 Esc 尝试恢复（防卡死）"""
+        if page.is_closed():
+            return False
+        limit = timeout_ms or _SPIN_TIMEOUT_MS
+        if not await self._is_spinning(page):
+            return True
+        logger.info("等待页面 loading…")
+        try:
+            await page.wait_for_function(
+                "() => !document.querySelector('.ant-spin-spinning')",
+                timeout=limit,
+            )
+            return True
+        except Exception:
+            pass
+        if not await self._is_spinning(page):
+            return True
+        logger.warning("loading 超时 %dms，尝试 Esc 恢复", limit)
+        errors = await self._get_validation_errors(page)
+        if errors:
+            logger.warning("校验错误: %s", errors[:4])
+        for _ in range(2):
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
+            if not await self._is_spinning(page):
+                return True
+        return not await self._is_spinning(page)
+
+    async def _wait_registration_vue(self, page: "Page", timeout: int = 45000) -> bool:
+        """等待注册条款页 Vue 挂载（checkbox / 验证码 / 步骤文案）"""
+        await self._wait_spin_clear(page, timeout_ms=min(30000, timeout))
         try:
             await page.wait_for_function(
                 """() => {
-                    if (window.location.href.includes('#')) return true;
-                    if (document.querySelector('input[type=checkbox], #checkCode')) return true;
+                    const href = window.location.href;
+                    const body = document.body?.innerText || '';
+                    if (/\/registration\\/s0[1-9]/i.test(href)) {
+                        if (/验证码|驗證碼|条款|條款|接受|Accept|注册|註冊/i.test(body)) return true;
+                    }
+                    if (href.includes('#')) return true;
+                    if (document.querySelector(
+                        'input[type=checkbox], #checkCode, img[src^="data:image"]'
+                    )) return true;
+                    if (document.querySelector('.ant-form, #uam-content, .formSection')) {
+                        if (/registration|注册|註冊/i.test(body)) return true;
+                    }
                     return Array.from(document.querySelectorAll('form')).some(
                         (f) => /registration/i.test(f.getAttribute('action') || '')
                     );
                 }""",
                 timeout=timeout,
             )
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(_PAGE_PAUSE_MS)
             return True
         except Exception:
             return False
 
-    async def _wait_page_ready(self, page: "Page", timeout: int = 60000) -> None:
+    async def _registration_page_probe(self, page: "Page") -> dict[str, Any]:
+        """诊断注册页 DOM 状态（Vue 检测失败时）"""
+        try:
+            return await page.evaluate(
+                """() => {
+                    const body = document.body?.innerText || '';
+                    return {
+                        href: window.location.href,
+                        spinning: !!document.querySelector('.ant-spin-spinning'),
+                        checkCode: !!document.querySelector('#checkCode'),
+                        checkbox: !!document.querySelector('input[type=checkbox]'),
+                        captchaImg: !!document.querySelector('img[src^="data:image"]'),
+                        formCount: document.querySelectorAll('form').length,
+                        bodySample: body.slice(0, 200),
+                    };
+                }"""
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _registration_terms_ready(self, page: "Page") -> bool:
+        """条款页是否可交互（比 _registration_terms_visible 更宽松）"""
+        if await self._registration_terms_visible(page):
+            return True
+        if not self._is_registration_page(page.url):
+            return False
+        probe = await self._registration_page_probe(page)
+        if probe.get("checkCode") or probe.get("checkbox") or probe.get("captchaImg"):
+            return True
+        sample = probe.get("bodySample") or ""
+        return bool(re.search(r"验证码|驗證碼|条款|條款|接受|Accept", sample))
+
+    async def _wait_page_ready(self, page: "Page", timeout: int = 25000) -> None:
         """
         等待页面可操作。政府站点 pdf.mjs 会阻塞 domcontentloaded，
         注册流程页改用 commit + 等待 Vue 条款表单。
@@ -177,7 +286,40 @@ class IcrisRegistrationBot:
             await page.wait_for_load_state("domcontentloaded", timeout=min(15000, timeout))
         except Exception:
             logger.debug("domcontentloaded 超时，继续（政府站点常见）")
-        await page.wait_for_timeout(800)
+        await self._wait_spin_clear(page, timeout_ms=min(20000, timeout))
+        await page.wait_for_timeout(_PAGE_PAUSE_MS)
+
+    async def _wait_portal_session(self, page: "Page", timeout_ms: int = 20000) -> bool:
+        """等待门户 home.do 就绪（替代固定轮询）"""
+        try:
+            await page.wait_for_url("**/e-services.cr.gov.hk/**/home.do**", timeout=timeout_ms)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const href = window.location.href;
+                    if (!href.includes('e-services.cr.gov.hk')) return false;
+                    if (href.includes('www.cr.gov.hk') && !href.includes('e-services')) return false;
+                    return /home\\.do|systemclock=/i.test(href)
+                        || document.querySelector('header, .header, #header');
+                }""",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            return "e-services.cr.gov.hk" in page.url and not self._is_cr_public_site(page.url)
+
+    async def _wait_systemclock_in_url(self, page: "Page", timeout_ms: int = 15000) -> str | None:
+        """等待 URL 出现 systemclock 参数"""
+        try:
+            await page.wait_for_function(
+                "() => /[?&]systemclock=\\d+/.test(window.location.href)",
+                timeout=timeout_ms,
+            )
+        except Exception:
+            pass
+        return self._extract_systemclock(page.url)
 
     async def _registration_terms_visible(self, page: "Page") -> bool:
         if not self._is_registration_page(page.url) or self._is_cr_public_site(page.url):
@@ -195,19 +337,29 @@ class IcrisRegistrationBot:
     async def _open_registration_with_clock(
         self, page: "Page", systemclock: str
     ) -> "Page | None":
-        """用门户 session 的 systemclock 打开注册条款页"""
+        """用门户 session 的 systemclock 打开注册条款页（导航阶段不切换语言）"""
         reg_url = build_registration_url(systemclock)
         for attempt in range(1, 3):
-            logger.info("使用门户 systemclock 打开注册页 (尝试 %d/2): %s", attempt, reg_url)
-            await page.goto(reg_url, wait_until="commit", timeout=60000)
-            if not await self._wait_registration_vue(page, timeout=60000):
-                logger.warning("注册页 Vue 未挂载 (尝试 %d/2)", attempt)
+            logger.info("打开注册页 (尝试 %d/2): %s", attempt, reg_url[:100])
+            await page.goto(reg_url, wait_until="commit", timeout=45000)
+            vue_ok = await self._wait_registration_vue(page, timeout=45000)
+            if not vue_ok:
+                probe = await self._registration_page_probe(page)
+                logger.warning(
+                    "注册页 Vue 未挂载 (尝试 %d/2) probe=%s",
+                    attempt,
+                    {k: probe.get(k) for k in ("spinning", "checkCode", "checkbox", "bodySample")},
+                )
+                if self._is_registration_page(page.url) and await self._registration_terms_ready(page):
+                    logger.info("URL 已在 registration，按条款页就绪继续")
+                    await self._log_page(page, "注册页加载")
+                    return page
                 if attempt < 2:
-                    await page.reload(wait_until="commit", timeout=60000)
+                    await page.reload(wait_until="commit", timeout=45000)
                 continue
-            await self._ensure_simplified_chinese(page)
+            await self._wait_spin_clear(page, timeout_ms=20000)
             await self._log_page(page, "注册页加载")
-            if await self._registration_terms_visible(page):
+            if await self._registration_terms_ready(page):
                 return page
             logger.warning("注册页已加载但条款控件未就绪 (尝试 %d/2)", attempt)
         return None
@@ -225,29 +377,29 @@ class IcrisRegistrationBot:
             for loc in candidates:
                 if await loc.count() > 0:
                     return loc.first
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(_POLL_MS)
         return None
 
     async def _click_portal_register(self, page: "Page") -> "Page | None":
         """点击门户「立即登记」，成功则返回注册页 Page"""
-        register_btn = await self._wait_portal_register_control(page, timeout=15000)
+        register_btn = await self._wait_portal_register_control(page, timeout=12000)
         if register_btn is None:
             return None
 
         logger.info("点击「立即登记」")
         try:
-            async with page.context.expect_page(timeout=8000) as new_page_info:
+            async with page.context.expect_page(timeout=6000) as new_page_info:
                 await register_btn.click()
             new_page = await new_page_info.value
-            await new_page.wait_for_load_state("commit", timeout=30000)
+            await new_page.wait_for_load_state("commit", timeout=20000)
             page = new_page
             logger.info("立即登记在新标签页打开")
         except Exception:
             await register_btn.click()
 
         try:
-            await page.wait_for_url("**/registration/**", timeout=30000)
-            await self._wait_page_ready(page)
+            await page.wait_for_url("**/registration/**", timeout=20000)
+            await self._wait_spin_clear(page, timeout_ms=20000)
             await self._log_page(page, "立即登记后")
             if self._is_registration_page(page.url):
                 return page
@@ -414,9 +566,12 @@ class IcrisRegistrationBot:
 
     async def _ensure_simplified_chinese(self, page: "Page") -> bool:
         """点击页头右上角「简」切换为简体中文；已是简体则跳过"""
+        if self._locale == "simplified":
+            return True
         state = await self._page_language_state(page)
         if state == "simplified" or await self._is_simplified_chinese_active(page):
             logger.info("页面已是简体中文，跳过语言切换")
+            self._locale = "simplified"
             return True
 
         info = await self._find_jian_link_info(page)
@@ -437,8 +592,9 @@ class IcrisRegistrationBot:
                 logger.info("已触发「简」切换 (尝试 %d/3, 方式=%s)", attempt, method)
                 if await self._wait_language_simplified(page, timeout_ms=12000):
                     logger.info("语言已切换为简体中文")
+                    self._locale = "simplified"
                     return True
-                await page.wait_for_timeout(800)
+                await page.wait_for_timeout(_FORM_PAUSE_MS)
             except Exception as e:
                 logger.warning("「简」切换尝试 %d 失败: %s", attempt, e)
                 await page.wait_for_timeout(500)
@@ -659,11 +815,7 @@ class IcrisRegistrationBot:
         logger.info("进入电子服务门户: %s", PORTAL_URL)
         for attempt in range(1, 3):
             try:
-                await page.goto(
-                    PORTAL_URL,
-                    wait_until="commit",
-                    timeout=90000,
-                )
+                await page.goto(PORTAL_URL, wait_until="commit", timeout=45000)
                 break
             except Exception as e:
                 logger.warning("门户页加载 (尝试 %d/2): %s", attempt, e)
@@ -675,18 +827,9 @@ class IcrisRegistrationBot:
                 if attempt >= 2:
                     logger.error("无法打开门户页: %s", e)
                     return None
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(1500)
 
-        try:
-            await page.wait_for_url("**/e-services.cr.gov.hk/**/home.do**", timeout=30000)
-        except Exception:
-            pass
-
-        for _ in range(40):
-            if "e-services.cr.gov.hk" in page.url and not self._is_cr_public_site(page.url):
-                break
-            await page.wait_for_timeout(500)
-        else:
+        if not await self._wait_portal_session(page, timeout_ms=20000):
             await self._log_page(page, "门户加载失败")
             return None
 
@@ -696,36 +839,36 @@ class IcrisRegistrationBot:
             return None
 
         await self._dismiss_portal_overlays(page)
-        await self._ensure_simplified_chinese(page)
 
-        # 等待 systemclock 出现（门户 Vue 渲染后 URL 会带上 clock）
-        for _ in range(20):
-            if self._extract_systemclock(page.url):
-                break
-            await page.wait_for_timeout(500)
+        systemclock = await self._wait_systemclock_in_url(page, timeout_ms=12000)
+        if not systemclock:
+            await page.wait_for_timeout(800)
+            systemclock = self._extract_systemclock(page.url)
 
-        systemclock = self._extract_systemclock(page.url)
-
-        # 优先直接打开注册页：久等「立即登记」会导致 systemclock 会话过期
         if systemclock:
             opened = await self._open_registration_with_clock(page, systemclock)
             if opened:
                 return opened
             logger.warning("systemclock 直链未加载条款页，刷新门户会话后重试")
-            await page.goto(PORTAL_URL, wait_until="commit", timeout=90000)
-            for _ in range(20):
-                if self._extract_systemclock(page.url):
-                    break
-                await page.wait_for_timeout(500)
-            systemclock = self._extract_systemclock(page.url)
+            await page.goto(PORTAL_URL, wait_until="commit", timeout=45000)
+            await self._wait_portal_session(page, timeout_ms=15000)
+            systemclock = await self._wait_systemclock_in_url(page, timeout_ms=12000)
             if systemclock:
                 opened = await self._open_registration_with_clock(page, systemclock)
                 if opened:
                     return opened
 
         clicked = await self._click_portal_register(page)
-        if clicked and await self._registration_terms_visible(clicked):
+        if clicked and await self._registration_terms_ready(clicked):
             return clicked
+
+        if self._is_registration_page(page.url):
+            await self._wait_spin_clear(page, timeout_ms=30000)
+            if await self._registration_terms_ready(page):
+                logger.info("已在 registration URL，继续流程: %s", page.url[:120])
+                return page
+            probe = await self._registration_page_probe(page)
+            logger.warning("registration URL 但条款未就绪: %s", probe)
 
         logger.error("未能进入注册页，当前 URL: %s", page.url)
         return None
@@ -808,7 +951,11 @@ class IcrisRegistrationBot:
                         timeout=15000,
                     )
                 except Exception:
-                    await self._wait_page_ready(page)
+                    pass
+
+                if not await self._wait_spin_clear(page, timeout_ms=30000):
+                    logger.warning("接受条款后 loading 未结束")
+                    return False
 
                 await self._log_page(page, "接受条款后")
                 if self._is_home_or_portal(page.url):
@@ -1071,12 +1218,309 @@ class IcrisRegistrationBot:
         await page.wait_for_timeout(400)
 
     def _normalize_form_label(self, text: str) -> str:
-        return re.sub(r"[\s\*:：]+", "", (text or "").strip())
+        return re.sub(r"[\s/／\*:：]+", "", (text or "").strip())
+
+    async def _ant_select_surround_text(self, page: "Page", index: int) -> str:
+        """获取第 index 个 ant-select 附近的标签/占位符文字"""
+        try:
+            return await page.evaluate(
+                """(idx) => {
+                    const sel = document.querySelectorAll('.ant-select')[idx];
+                    if (!sel) return '';
+                    const parts = [];
+                    const ph = sel.querySelector('.ant-select-selection-placeholder');
+                    if (ph) parts.push(ph.innerText.trim());
+                    const picked = sel.querySelector('.ant-select-selection-item');
+                    if (picked) parts.push(picked.innerText.trim());
+                    let p = sel.parentElement;
+                    for (let i = 0; i < 10 && p; i++) {
+                        const lbl = p.querySelector(
+                            ':scope > label, :scope > .ant-form-item-label, '
+                            + ':scope > .rowTitle, :scope > .col-form-label'
+                        );
+                        if (lbl && lbl.innerText.trim()) parts.push(lbl.innerText.trim());
+                        const prev = p.previousElementSibling;
+                        if (prev) {
+                            const t = prev.innerText.trim();
+                            if (t && t.length < 120) parts.push(t);
+                        }
+                        p = p.parentElement;
+                    }
+                    return parts.join(' | ');
+                }""",
+                index,
+            )
+        except Exception:
+            return ""
+
+    async def _wait_for_ant_selects(
+        self, page: "Page", min_count: int = 1, timeout_ms: int = 15000
+    ) -> None:
+        try:
+            await page.wait_for_function(
+                f"() => document.querySelectorAll('.ant-select').length >= {min_count}",
+                timeout=timeout_ms,
+            )
+        except Exception:
+            pass
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+
+    async def _log_ant_selects(self, page: "Page", prefix: str = "") -> None:
+        count = await page.locator(".ant-select").count()
+        rows = []
+        for i in range(min(count, 12)):
+            ctx = (await self._ant_select_surround_text(page, i))[:100]
+            rows.append({"i": i, "context": ctx})
+        logger.info("%s ant-select 列表 (%d): %s", prefix, count, rows)
+
+    async def _select_ant_select_by_keywords(
+        self, page: "Page", keywords: list[str], option: str
+    ) -> bool:
+        """
+        按标签/rowTitle/占位符定位下拉并选择（兼容 strut-address 表格布局）。
+        """
+        if not option:
+            return False
+        opt_re = re.compile(re.escape(option), re.I)
+        kw_norm = [self._normalize_form_label(k) for k in keywords if k]
+
+        await page.evaluate(
+            """() => {
+                const w = document.querySelector('#formWrapper, .formWrapper, main');
+                if (w) w.scrollTop = w.scrollHeight;
+                window.scrollTo(0, document.body.scrollHeight);
+            }"""
+        )
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+
+        opened = await page.evaluate(
+            """([keywords, option]) => {
+                const norm = s => (s || '').replace(/[\\s/／:*：]/g, '');
+                const kws = keywords.map(k => norm(k));
+                const esc = option.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                const optRe = new RegExp(esc, 'i');
+
+                const titleEls = [...document.querySelectorAll(
+                    '.rowTitle, th, label, .ant-form-item-label, .control-label'
+                )];
+
+                const pickNative = (sel) => {
+                    const opt = [...sel.options].find(o => optRe.test((o.textContent || '').trim()));
+                    if (!opt) return false;
+                    sel.value = opt.value;
+                    sel.dispatchEvent(new Event('input', { bubbles: true }));
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                };
+
+                const openAnt = (selectEl) => {
+                    const trigger = selectEl.querySelector('.ant-select-selector, .ant-select-arrow')
+                        || selectEl;
+                    trigger.scrollIntoView({ block: 'center' });
+                    trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    trigger.click();
+                };
+
+                for (const title of titleEls) {
+                    const tt = norm((title.innerText || '').trim());
+                    if (!kws.some(k => k && tt.includes(k))) continue;
+
+                    const containers = [
+                        title.closest('tr'),
+                        title.closest('.ant-row, .row, .form-group, fieldset, .content, .ant-form-item'),
+                        title.parentElement,
+                        title.parentElement?.parentElement,
+                    ].filter(Boolean);
+
+                    for (const container of containers) {
+                        let select = container.querySelector('.ant-select, [role=combobox], select');
+                        if (!select) {
+                            const td = title.closest('td');
+                            const next = td?.nextElementSibling;
+                            if (next) select = next.querySelector('.ant-select, [role=combobox], select');
+                        }
+                        if (!select) continue;
+                        if (select.tagName === 'SELECT') {
+                            if (pickNative(select)) return { mode: 'native', label: title.innerText.trim() };
+                        } else {
+                            openAnt(select);
+                            return { mode: 'ant', label: title.innerText.trim() };
+                        }
+                    }
+                }
+
+                // 回退：扫描全部 ant-select / combobox 的上下文
+                const all = [...document.querySelectorAll('.ant-select, [role=combobox]')];
+                for (let i = 0; i < all.length; i++) {
+                    const sel = all[i];
+                    const parts = [];
+                    const ph = sel.querySelector('.ant-select-selection-placeholder');
+                    if (ph) parts.push(ph.innerText.trim());
+                    let p = sel.parentElement;
+                    for (let d = 0; d < 8 && p; d++) {
+                        const lbl = p.querySelector(':scope > label, :scope > .rowTitle, :scope > .ant-form-item-label');
+                        if (lbl) parts.push(lbl.innerText.trim());
+                        p = p.parentElement;
+                    }
+                    const ctx = norm(parts.join(' | '));
+                    if (!kws.some(k => k && ctx.includes(k))) continue;
+                    if (sel.tagName === 'SELECT') {
+                        if (pickNative(sel)) return { mode: 'native', label: parts.join(' | ') };
+                    } else {
+                        openAnt(sel);
+                        return { mode: 'ant', label: parts.join(' | '), index: i };
+                    }
+                }
+                return { mode: 'none' };
+            }""",
+            [keywords, option],
+        )
+
+        if opened.get("mode") == "native":
+            logger.info("已选原生下拉 [%s] → %s", opened.get("label", ""), option)
+            return True
+        if opened.get("mode") != "ant":
+            await self._log_ant_selects(page, "未匹配")
+            logger.warning("未找到匹配下拉: %s → %s", keywords, option)
+            return False
+
+        logger.info("已打开下拉 [%s] → 选择 %s", opened.get("label", ""), option)
+
+        for attempt in range(3):
+            try:
+                dd = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden)"
+                ).last
+                try:
+                    await dd.wait_for(state="visible", timeout=4000)
+                except Exception:
+                    pass
+
+                search = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) input"
+                ).last
+                if await search.count() > 0 and await search.is_visible():
+                    await search.fill("")
+                    await search.type(option, delay=35)
+                    await page.wait_for_timeout(500)
+
+                opt = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                    ".ant-select-item-option"
+                ).filter(has_text=opt_re).first
+                if await opt.count() > 0:
+                    await opt.click(force=True, timeout=3000)
+                else:
+                    role_opt = page.get_by_role("option", name=opt_re)
+                    if await role_opt.count() > 0:
+                        await role_opt.first.click(force=True, timeout=3000)
+                    else:
+                        await page.keyboard.press("Enter")
+
+                await page.wait_for_timeout(400)
+                verified = await page.evaluate(
+                    """([keywords, option]) => {
+                        const norm = s => (s || '').replace(/[\\s/／:*：]/g, '');
+                        const kws = keywords.map(k => norm(k));
+                        const esc = option.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                        const optRe = new RegExp(esc, 'i');
+                        const titleEls = [...document.querySelectorAll('.rowTitle, th, label, .ant-form-item-label')];
+                        for (const title of titleEls) {
+                            const tt = norm((title.innerText || '').trim());
+                            if (!kws.some(k => k && tt.includes(k))) continue;
+                            const row = title.closest('tr, .ant-form-item, .content, .row') || title.parentElement;
+                            if (!row) continue;
+                            const txt = row.innerText || '';
+                            if (optRe.test(txt)) return true;
+                        }
+                        return optRe.test(document.body.innerText || '');
+                    }""",
+                    [keywords, option],
+                )
+                if verified:
+                    logger.info("已选下拉 [%s] → %s", keywords[0], option)
+                    return True
+            except Exception as exc:
+                logger.debug("下拉选项点击失败 (尝试 %d): %s", attempt + 1, exc)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            await page.wait_for_timeout(200)
+
+        logger.warning("未能选择下拉 %s → %s", keywords, option)
+        return await self._select_dropdown_by_rowtitle_playwright(page, keywords, option)
+
+    async def _select_dropdown_by_rowtitle_playwright(
+        self, page: "Page", keywords: list[str], option: str
+    ) -> bool:
+        """Playwright 回退：按 rowTitle/label 所在表格行定位下拉"""
+        opt_re = re.compile(re.escape(option), re.I)
+        kw_res = [re.compile(re.escape(k), re.I) for k in keywords if k]
+        titles = page.locator(".rowTitle, th, label, .ant-form-item-label, .control-label")
+
+        for i in range(await titles.count()):
+            txt = (await titles.nth(i).inner_text()).strip()
+            if not any(r.search(txt) for r in kw_res):
+                continue
+
+            row = titles.nth(i).locator("xpath=ancestor::tr[1]")
+            scope = row if await row.count() > 0 else titles.nth(i).locator(
+                "xpath=ancestor::*[contains(@class,'content') or contains(@class,'row') or contains(@class,'form-group')][1]"
+            )
+            if await scope.count() == 0:
+                scope = titles.nth(i).locator("xpath=..")
+
+            trigger = scope.locator(
+                ".ant-select-selector, .ant-select, [role=combobox], select"
+            ).first
+            if await trigger.count() == 0:
+                trigger = titles.nth(i).locator(
+                    "xpath=following-sibling::td[1] | following-sibling::div[1]"
+                ).locator(".ant-select-selector, .ant-select, [role=combobox], select").first
+
+            if await trigger.count() == 0:
+                continue
+
+            try:
+                tag = await trigger.evaluate("el => el.tagName")
+                await trigger.scroll_into_view_if_needed()
+                if tag == "SELECT":
+                    await trigger.select_option(label=option)
+                else:
+                    await trigger.click(force=True, timeout=5000)
+                    await page.wait_for_timeout(400)
+                    search = page.locator(
+                        ".ant-select-dropdown:not(.ant-select-dropdown-hidden) input"
+                    ).last
+                    if await search.count() > 0:
+                        await search.fill(option)
+                        await page.wait_for_timeout(400)
+                    opt = page.locator(
+                        ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option"
+                    ).filter(has_text=opt_re).first
+                    if await opt.count() > 0:
+                        await opt.click(force=True)
+                    else:
+                        await page.get_by_role("option", name=opt_re).first.click(
+                            force=True, timeout=3000
+                        )
+                await page.wait_for_timeout(400)
+                if opt_re.search(await scope.inner_text()):
+                    logger.info("rowTitle 已选 [%s] → %s", txt[:30], option)
+                    return True
+            except Exception as exc:
+                logger.debug("rowTitle 选择失败 [%s]: %s", txt[:30], exc)
+            await page.keyboard.press("Escape")
+
+        return False
 
     async def _get_ant_form_item_by_label(self, page: "Page", label_pattern: str):
-        """按 .ant-form-item-label 文字定位表单项"""
+        """按 .ant-form-item-label 文字定位表单项（优先最短/最精确标签）"""
         regex = re.compile(label_pattern, re.I)
         items = page.locator(".ant-form-item")
+        best = None
+        best_len = 9999
         for i in range(await items.count()):
             item = items.nth(i)
             label = item.locator(".ant-form-item-label, label")
@@ -1085,7 +1529,12 @@ class IcrisRegistrationBot:
             txt = (await label.first.inner_text()).strip()
             norm = self._normalize_form_label(txt)
             if regex.search(txt) or regex.search(norm):
-                return item
+                n = len(norm)
+                if n < best_len:
+                    best = item
+                    best_len = n
+        if best is not None:
+            return best
         return await self._get_labeled_section(page, label_pattern)
 
     async def _verify_user_category_individual(self, page: "Page") -> bool:
@@ -1588,6 +2037,31 @@ class IcrisRegistrationBot:
                 if await self._verify_dropdown_selected(page, label_pattern, option_pattern):
                     logger.info("已选择下拉 [%s] → %s", label_pattern, option_pattern)
                     return True
+            # 策略 2b：输入关键字筛选（如 香港仔 / English）
+            search = re.sub(r"[\^$()\[\]]", "", option_pattern.split("|")[0])
+            if search and len(search) <= 24:
+                try:
+                    await page.keyboard.type(search, delay=60)
+                    await page.wait_for_timeout(600)
+                    if await self._click_visible_select_option(page, option_pattern):
+                        if await self._verify_dropdown_selected(
+                            page, label_pattern, option_pattern
+                        ):
+                            logger.info(
+                                "搜索已选择下拉 [%s] → %s", label_pattern, option_pattern
+                            )
+                            return True
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_timeout(500)
+                    if await self._verify_dropdown_selected(
+                        page, label_pattern, option_pattern
+                    ):
+                        logger.info(
+                            "Enter 已选择下拉 [%s] → %s", label_pattern, option_pattern
+                        )
+                        return True
+                except Exception as exc:
+                    logger.debug("搜索下拉选择失败: %s", exc)
             await page.keyboard.press("Escape")
             await page.wait_for_timeout(300)
 
@@ -2119,7 +2593,7 @@ class IcrisRegistrationBot:
         await self._wait_registration_vue(page, timeout=30000)
         if not await self._wait_for_account_form_ready(page):
             logger.warning("账户资料表单控件未就绪, url=%s", page.url)
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         filled = 0
         username, password = derive_icris_credentials(data)
@@ -2265,15 +2739,17 @@ class IcrisRegistrationBot:
                 """() => {
                     const t = document.body ? document.body.innerText : '';
                     if (!/填写用户资料|填寫用戶資料/.test(t)) return false;
-                    const enabled = document.querySelectorAll(
-                        "input:not([disabled]):not([type='hidden']):not([type='checkbox']):not([type='radio']), "
-                        + "select:not([disabled]), textarea:not([disabled])"
+                    const inputs = document.querySelectorAll(
+                        "input:not([disabled]):not([type='hidden'])"
                     );
-                    return enabled.length >= 2;
+                    const selects = document.querySelectorAll(
+                        '.ant-select, [role=combobox], select:not([disabled])'
+                    );
+                    return inputs.length >= 2 || selects.length >= 1;
                 }""",
                 timeout=timeout_ms,
             )
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(_FORM_PAUSE_MS)
             return True
         except Exception:
             return await self._is_user_info_step(page)
@@ -2413,7 +2889,16 @@ class IcrisRegistrationBot:
         await self._ensure_traditional_chinese(page)
         if not await self._wait_for_user_info_form(page):
             logger.warning("用户资料表单未就绪, url=%s", page.url)
-        await page.wait_for_timeout(800)
+        try:
+            await page.wait_for_function(
+                """() => /郵遞區號|邮递区号|通訊語言|通讯语言|區.*市.*省/.test(
+                    document.body ? document.body.innerText : ''
+                )""",
+                timeout=20000,
+            )
+        except Exception:
+            pass
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         applicant = data.get("applicant", {})
         given, surname = split_applicant_english_name(applicant.get("name_en", ""))
@@ -2463,11 +2948,27 @@ class IcrisRegistrationBot:
                 name,
             )
 
-        # 非香港地址 + 中国地址栏
-        await _inc(
-            await self._select_radio_in_section(page, r"地址", r"非香港地址|非香港"),
-            "非香港地址",
-        )
+        # 本地地址（香港仔为 HK 地区选项）
+        if not await self._select_radio_in_section(page, r"地址", r"本地地址|本地"):
+            await _inc(
+                await self._select_radio_in_section(page, r"地址", r"非香港地址|非香港"),
+                "非香港地址",
+            )
+        else:
+            await _inc(True, "本地地址")
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const sels = [...document.querySelectorAll('select')];
+                    if (sels.some(s => s.options && s.options.length > 1)) return true;
+                    return document.querySelectorAll('.ant-select, [role=combobox]').length > 0;
+                }""",
+                timeout=15000,
+            )
+        except Exception:
+            pass
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+
         for pat, val, name in [
             (r"室.*楼.*座|室.*樓.*座", addr["room"], "室/楼/座"),
             (r"大厦|大廈", addr["building"], "大厦"),
@@ -2478,21 +2979,26 @@ class IcrisRegistrationBot:
                 ok = await self._fill_enabled_field_by_label(page, pat, val)
             await _inc(ok, name)
 
-        # 区/市/省/州/邮递区号 — 下拉选第一项
+        # 区/市/省/州/邮递区号 → 香港仔
         await _inc(
-            await self._select_ant_dropdown_first_option_by_label(
-                page, r"区.*市.*省|區.*市.*省|邮递|郵遞"
+            await self._select_ant_select_by_keywords(
+                page,
+                ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
+                "香港仔",
             ),
-            "区/市/省(首项)",
+            "区/市/省=香港仔",
         )
 
-        # 国家/地区 → 中国
-        await _inc(
-            await self._select_ant_dropdown_by_label(
-                page, r"国家|地區|地区", r"CHN|中國|中国"
-            ),
-            "国家/地区=中国",
-        )
+        # 国家/地区（仅非香港地址时可能出现）
+        if await page.locator(".ant-select").count() > 1:
+            country_ok = await self._select_ant_select_by_keywords(
+                page, ["国家", "國家", "国家/地区", "國家/地區"], "中国"
+            )
+            if not country_ok:
+                country_ok = await self._select_ant_select_by_keywords(
+                    page, ["国家", "國家", "国家/地区", "國家/地區"], "中國"
+                )
+            await _inc(country_ok, "国家/地区")
 
         # 电邮 + 确认电邮
         for pat, name in [
@@ -2512,12 +3018,12 @@ class IcrisRegistrationBot:
             )
         await _inc(ok, "联络电话")
 
-        # 通讯语言 → 繁体中文
+        # 通讯语言 → English
         await _inc(
-            await self._select_ant_dropdown_by_label(
-                page, r"通讯语言|通訊語言", r"繁体中文|繁體中文|繁体|繁體"
+            await self._select_ant_select_by_keywords(
+                page, ["通訊語言", "通讯语言"], "English"
             ),
-            "通讯语言=繁体中文",
+            "通讯语言=English",
         )
 
         # 按常见 id/name 再填一次（Vue 表单兜底）
@@ -2601,28 +3107,49 @@ class IcrisRegistrationBot:
         if not self._is_registration_page(page.url):
             return False
 
+        await self._wait_spin_clear(page, timeout_ms=15000)
+
         continue_pattern = re.compile(r"继\s*续|繼\s*續|Continue|Next|下一步", re.I)
 
-        # s02 页面继续按钮：button[type=submit].primary（文字「继 续」）
-        submit_continue = page.locator(
-            "button[type='submit'].primary.ant-btn, button[type='submit'].primary"
-        ).last
-        if await submit_continue.count() > 0 and await submit_continue.is_visible():
+        async def _try_click(btn, *, require_text: bool = True) -> bool:
+            if await btn.count() == 0 or not await btn.is_visible():
+                return False
+            try:
+                txt = (await btn.inner_text()).strip()
+            except Exception:
+                txt = (await btn.get_attribute("value") or "").strip()
+            if require_text and txt and not continue_pattern.search(txt):
+                return False
+            try:
+                if await btn.is_disabled():
+                    logger.warning("继续按钮不可用: %s", txt or await btn.get_attribute("class"))
+                    return False
+            except Exception:
+                pass
             current_url = page.url
             try:
-                await submit_continue.scroll_into_view_if_needed()
-                await submit_continue.click(force=True, timeout=5000)
-                logger.info(
-                    "已点击继续: submit.primary (text=%s)",
-                    (await submit_continue.inner_text()).strip(),
-                )
-                await self._wait_after_continue(page, current_url)
+                await btn.scroll_into_view_if_needed()
+                try:
+                    await btn.click(timeout=8000)
+                except Exception:
+                    await btn.click(force=True, timeout=8000)
+                logger.info("已点击继续: %s", txt or "(submit)")
+                if not await self._wait_after_continue(page, current_url):
+                    return False
                 if self._is_home_or_portal(page.url):
                     logger.error("点击继续后跳转到首页")
                     return False
                 return True
             except Exception as exc:
-                logger.debug("submit.primary 点击失败: %s", exc)
+                logger.debug("点击继续失败: %s", exc)
+                return False
+
+        # s02 页面继续按钮：button[type=submit].primary（文字「继 续」）
+        submit_continue = page.locator(
+            "button[type='submit'].primary.ant-btn, button[type='submit'].primary"
+        ).last
+        if await _try_click(submit_continue, require_text=False):
+            return True
 
         continue_buttons = [
             "button.primary.ant-btn:has-text('继续')",
@@ -2657,40 +3184,20 @@ class IcrisRegistrationBot:
                 btn = scope.locator(sel).first
                 if await btn.count() == 0:
                     btn = page.locator(sel).first
-                if await btn.count() == 0 or not await btn.is_visible():
-                    continue
-                txt = (await btn.inner_text()).strip()
-                if not continue_pattern.search(txt):
-                    continue
-                current_url = page.url
-                try:
-                    await btn.scroll_into_view_if_needed()
-                    await btn.click(force=True, timeout=5000)
-                    logger.info("已点击继续: %s (text=%s)", sel, txt)
-                    await self._wait_after_continue(page, current_url)
-                    if self._is_home_or_portal(page.url):
-                        logger.error("点击继续后跳转到首页")
-                        return False
+                if await _try_click(btn):
                     return True
-                except Exception as exc:
-                    logger.debug("点击继续失败 %s: %s", sel, exc)
 
         role_btn = page.get_by_role("button", name=continue_pattern)
         if await role_btn.count() > 0:
             btn = role_btn.last
-            if await btn.is_visible():
-                current_url = page.url
-                await btn.scroll_into_view_if_needed()
-                await btn.click(force=True)
-                logger.info("已点击继续(role): %s", await btn.inner_text())
-                await self._wait_after_continue(page, current_url)
+            if await _try_click(btn):
                 return not self._is_home_or_portal(page.url)
 
         ok = await page.evaluate(
             """() => {
                 const re = /继\\s*续|繼\\s*續|Continue|Next/i;
                 const btns = [...document.querySelectorAll('button, input[type=submit], input[type=button]')];
-                const btn = btns.find(b => re.test((b.innerText || b.value || '').trim()));
+                const btn = btns.find(b => re.test((b.innerText || b.value || '').trim()) && !b.disabled);
                 if (!btn) return false;
                 btn.click();
                 return true;
@@ -2699,26 +3206,33 @@ class IcrisRegistrationBot:
         if ok:
             current_url = page.url
             logger.info("JS 已点击继续")
-            await self._wait_after_continue(page, current_url)
+            if not await self._wait_after_continue(page, current_url):
+                return False
             return not self._is_home_or_portal(page.url)
         return False
 
-    async def _wait_after_continue(self, page: "Page", previous_url: str) -> None:
-        """点击继续后等待进入下一步"""
+    async def _wait_after_continue(self, page: "Page", previous_url: str) -> bool:
+        """点击继续后等待步骤切换且 loading 结束"""
         try:
             await page.wait_for_function(
                 """(prev) => {
-                    if (window.location.href !== prev) return true;
+                    const href = window.location.href;
+                    if (href !== prev) return true;
                     const t = document.body ? document.body.innerText : '';
-                    return /填写用户资料|填寫用戶資料|步骤2|步驟2|s03/i.test(t)
-                        || /registration\\/s0[3-9]/i.test(window.location.href);
+                    return /填写用户资料|填寫用戶資料|用户类别|用戶類別|账户资料|帳戶資料|步骤|步驟/i.test(t)
+                        || /registration\\/s0[2-9]/i.test(href);
                 }""",
                 previous_url,
-                timeout=20000,
+                timeout=30000,
             )
         except Exception:
-            await self._wait_page_ready(page)
-        await page.wait_for_timeout(800)
+            logger.debug("继续后步骤切换等待超时 url=%s", page.url)
+
+        if not await self._wait_spin_clear(page, timeout_ms=_SPIN_TIMEOUT_MS):
+            logger.error("继续后 loading 未结束，可能表单校验失败")
+            return False
+        await page.wait_for_timeout(_PAGE_PAUSE_MS)
+        return True
 
     async def _click_account_profile_continue(self, page: "Page") -> bool:
         """账户资料填写完成后点击继续"""
@@ -2742,6 +3256,7 @@ class IcrisRegistrationBot:
 
         async with async_playwright() as p:
             browser = await launch_browser(p)
+            via_cdp = bool(settings.chrome_use_existing and browser.contexts)
             context = await create_browser_context(browser)
             page = await context.new_page()
             run_error: Exception | None = None
@@ -2796,8 +3311,8 @@ class IcrisRegistrationBot:
                     return
 
                 await self._ensure_simplified_chinese(page)
-                await self._wait_for_account_profile_step(page, timeout_ms=90000)
-                await self._wait_registration_vue(page, timeout=60000)
+                await self._wait_spin_clear(page, timeout_ms=20000)
+                await self._wait_for_account_profile_step(page, timeout_ms=45000)
 
                 # Step 2: 账户资料（s02）— 填写后自动点继续
                 if await self._is_account_profile_step(page):
@@ -2807,7 +3322,7 @@ class IcrisRegistrationBot:
                     logger.warning("条款通过后未进入账户资料页, url=%s", page.url)
 
                 # Step 3: 用户资料（s03）— 填写后自动点继续
-                await self._wait_for_user_info_form(page, timeout_ms=90000)
+                await self._wait_for_user_info_form(page, timeout_ms=45000)
                 if await self._is_user_info_step(page):
                     logger.info("=== 填写用户资料步骤 ===")
                     await self._fill_user_info_step(page, data)
@@ -2831,7 +3346,7 @@ class IcrisRegistrationBot:
                             break
                         if not await self._click_continue(page):
                             break
-                    await self._wait_registration_vue(page, timeout=60000)
+                    await self._wait_spin_clear(page, timeout_ms=20000)
                     if not await self._ensure_on_registration(page, f"步骤{step + 4}后"):
                         break
 
@@ -2852,7 +3367,7 @@ class IcrisRegistrationBot:
                     await page.wait_for_timeout(keep_open * 1000)
                 except Exception:
                     pass
-                await browser.close()
+                await close_browser_session(browser, external_cdp=via_cdp)
 
             if run_error:
                 raise run_error

@@ -70,6 +70,26 @@ def resolve_2captcha_only(
         return None, "low", []
 
     logger.info("正在调用 2Captcha API（密钥已配置）…")
+    try:
+        from src.browser.captcha_api import solve_2captcha_fast
+
+        fast = solve_2captcha_fast(
+            image_bytes,
+            settings.twocaptcha_api_key,
+            min_len=max_len,
+            max_len=max_len,
+        )
+        if fast:
+            src, code = fast
+            if code and len(code) >= max_len:
+                logger.info("2Captcha 快速识别: %s", code[:max_len])
+                return code[:max_len], "high", [(src, code[:max_len])]
+    except Exception as e:
+        logger.warning("2Captcha 快速路径失败: %s", e)
+
+    if settings.twocaptcha_max_variants <= 1:
+        return None, "low", []
+
     candidates = _solve_2captcha_voted(image_bytes, max_len)
     if not candidates:
         logger.error("2Captcha 全部变体均未返回有效结果")
