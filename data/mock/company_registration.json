@@ -55,13 +55,26 @@
   "br_certificate_years": 3,
   "applicant": {
     "title": "Mr",
-    "name_en": "CHAN Tai Man",
-    "name_cn": "陳大文",
-    "id_type": "HKID",
-    "id_number": "A123456(7)",
-    "email": "chan@abctech.hk",
+    "name_en": "DAI Qi Le",
+    "name_cn": "戴启乐",
+    "id_type": "PRC_ID",
+    "id_number": "362531199002111537",
+    "email": "daiqile@example.com",
     "phone": "91234567",
-    "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong"
+    "address": "江西省抚州市东乡区甘坑林场甘农分场红旗岗组033号"
+  },
+  "identity_proof": {
+    "id_type": "PRC_ID",
+    "id_type_label": "中華人民共和國身分證號碼",
+    "id_number": "362531199002111537",
+    "submission_method": "online",
+    "submission_label": "網上提交",
+    "online_document_method": "certified_copy",
+    "online_document_label": "身分證明文件的經核證真實副本",
+    "document_dir": "C:\\Users\\HUAWEI\\Desktop\\戴启乐资料",
+    "document_files": [
+      "C:\\Users\\HUAWEI\\Desktop\\戴启乐资料\\身份证.jpg"
+    ]
   },
   "password_hint": "Mother maiden name: Lee",
   "security_question": "What is your mother's maiden name?",

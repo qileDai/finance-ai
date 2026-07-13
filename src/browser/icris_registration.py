@@ -8,6 +8,7 @@ import re
 import secrets
 import string
 import time
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -2920,11 +2921,10 @@ class IcrisRegistrationBot:
                     logger.info("用户资料: %s", label)
                 await page.wait_for_timeout(250)
 
-        # 姓名（placeholder 为主）
+        # 姓名（placeholder 为主；中文姓名留空不填）
         for pat, val, name in [
             (r"英文姓氏|英文姓", surname, "英文姓氏"),
             (r"英文名字|英文名", given, "英文名字"),
-            (r"中文姓名|中文名", applicant.get("name_cn", ""), "中文姓名"),
         ]:
             ok = await self._fill_by_placeholder(page, pat, val)
             if not ok:
@@ -3030,7 +3030,6 @@ class IcrisRegistrationBot:
         id_map = [
             ("#engSurName, input[name*='engSur' i], input[id*='engSur' i]", surname, "text"),
             ("#engOtherName, input[name*='engOther' i], input[id*='engOther' i]", given, "text"),
-            ("#chiName, input[name*='chiName' i], input[id*='chiName' i]", applicant.get("name_cn", ""), "text"),
             ("#emailAddr, input[name*='email' i]:not([name*='confirm' i])", email, "text"),
             ("input[name*='confirm' i][name*='email' i], input[id*='confirmEmail' i]", email, "text"),
             ("#mobileNo, input[name*='mobile' i], input[id*='mobile' i], input[name*='phone' i]", phone, "text"),
@@ -3055,9 +3054,336 @@ class IcrisRegistrationBot:
 
         return filled
 
+    def _is_identity_proof_url(self, url: str) -> bool:
+        return bool(re.search(r"registration/s04", url.lower()))
+
+    async def _is_identity_proof_step(self, page: "Page") -> bool:
+        if self._is_identity_proof_url(page.url):
+            return True
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const t = document.body ? document.body.innerText : '';
+                    return /身分證明|身份证明/.test(t)
+                        && /證明文件|证明文件/.test(t)
+                        && /網上提交|网上提交|親身到公司註冊處|亲身到公司注册处/.test(t);
+                }"""
+            )
+        )
+
+    def _derive_identity_proof(self, data: dict[str, Any]) -> dict[str, Any]:
+        """从 mock 解析身份证明选项（默认：中国身份证 + 网上提交 + 经核证真实副本）"""
+        proof = data.get("identity_proof") or {}
+        applicant = data.get("applicant") or {}
+        id_type = str(proof.get("id_type") or applicant.get("id_type") or "PRC_ID").upper()
+        id_number = str(
+            proof.get("id_number") or applicant.get("id_number") or "362531199002111537"
+        )
+
+        type_labels = {
+            "HKID": r"香港身分證|香港身份証|香港身份证",
+            "PRC_ID": r"中華人民共和國身分證|中华人民共和国身份证|中國身分證|中国身份证",
+            "PASSPORT": r"護照號碼|护照号码|護照|护照",
+        }
+        id_type_pat = type_labels.get(id_type, type_labels["PRC_ID"])
+        if proof.get("id_type_label"):
+            id_type_pat = re.escape(str(proof["id_type_label"]))
+
+        submission = str(proof.get("submission_method") or "online").lower()
+        if submission in ("in_person", "onsite", "person"):
+            submission_pat = r"親身到公司註冊處|亲身到公司注册处|出示證明文件正本|出示证明文件正本"
+        else:
+            submission_pat = r"^網上提交$|^网上提交$|網上提交|网上提交"
+
+        online_method = str(proof.get("online_document_method") or "certified_copy").lower()
+        if online_method in ("digital", "digital_cert", "cert"):
+            online_pat = r"使用數碼證書|使用数码证书|數碼證書|数码证书"
+        else:
+            online_pat = (
+                r"經核證真實副本|经核证真实副本|身分證明文件的經核證|身份证明文件的经核证"
+            )
+        if proof.get("online_document_label"):
+            online_pat = re.escape(str(proof["online_document_label"]))
+
+        return {
+            "id_type": id_type,
+            "id_number": id_number,
+            "id_type_pat": id_type_pat,
+            "submission_pat": submission_pat,
+            "online_pat": online_pat,
+            "submission_method": submission,
+            "online_method": online_method,
+            "document_files": self._resolve_identity_document_files(proof),
+        }
+
+    def _resolve_identity_document_files(self, proof: dict[str, Any]) -> list[str]:
+        """解析身份证照片路径：优先 mock 配置，否则在桌面「戴启乐资料*」中查找"""
+        files: list[str] = []
+        for item in proof.get("document_files") or []:
+            p = Path(str(item)).expanduser()
+            if p.is_file():
+                files.append(str(p.resolve()))
+        if files:
+            return files
+
+        dirs: list[Path] = []
+        if proof.get("document_dir"):
+            dirs.append(Path(str(proof["document_dir"])).expanduser())
+        desktop = Path.home() / "Desktop"
+        if desktop.is_dir():
+            for d in sorted(desktop.glob("戴启乐资料*")):
+                if d.is_dir():
+                    dirs.append(d)
+
+        preferred_names = (
+            "身份证",
+            "身份证正面",
+            "身份证方面",
+            "身份证反面",
+            "身分證正面",
+            "身分證反面",
+        )
+        for d in dirs:
+            if not d.is_dir():
+                continue
+            for name in preferred_names:
+                for ext in (".jpg", ".jpeg", ".png", ".pdf", ".JPG", ".PNG"):
+                    cand = d / f"{name}{ext}"
+                    if cand.is_file() and str(cand.resolve()) not in files:
+                        files.append(str(cand.resolve()))
+            # 已找到「身份证.jpg」这类主图则不再堆叠其它
+            if any(Path(f).stem == "身份证" for f in files):
+                files = [f for f in files if Path(f).stem == "身份证"]
+                break
+            if files:
+                break
+
+        if not files:
+            logger.warning("未找到身份证照片（请检查桌面「戴启乐资料」文件夹）")
+        else:
+            logger.info("身份证明上传文件: %s", [Path(f).name for f in files])
+        return files
+
+    async def _upload_identity_documents(self, page: "Page", file_paths: list[str]) -> int:
+        """选择经核证真实副本后上传身份证照片"""
+        if not file_paths:
+            return 0
+        existing = [p for p in file_paths if Path(p).is_file()]
+        if not existing:
+            logger.warning("身份证照片文件不存在: %s", file_paths)
+            return 0
+
+        await page.wait_for_timeout(500)
+        # 等待上传控件出现
+        try:
+            await page.wait_for_selector(
+                "input[type='file'], .ant-upload, button:has-text('上載'), button:has-text('上传'), "
+                "button:has-text('選擇'), button:has-text('选择'), a:has-text('上載')",
+                timeout=8000,
+            )
+        except Exception:
+            logger.debug("上传控件等待超时，继续尝试定位 input[type=file]")
+
+        uploaded = 0
+        file_inputs = page.locator("input[type='file']")
+        count = await file_inputs.count()
+        if count > 0:
+            # 多个 input：正面/反面分别上传；单个 input：一次传全部（若支持 multiple）
+            if count >= len(existing):
+                for i, path in enumerate(existing):
+                    try:
+                        await file_inputs.nth(i).set_input_files(path)
+                        uploaded += 1
+                        logger.info("已上传身份证明文件[%d]: %s", i + 1, Path(path).name)
+                        await page.wait_for_timeout(800)
+                        await self._wait_spin_clear(page, timeout_ms=20000)
+                    except Exception as e:
+                        logger.warning("上传失败 [%s]: %s", Path(path).name, e)
+            else:
+                try:
+                    await file_inputs.first.set_input_files(existing)
+                    uploaded = len(existing)
+                    logger.info(
+                        "已批量上传身份证明文件: %s",
+                        [Path(p).name for p in existing],
+                    )
+                    await page.wait_for_timeout(1000)
+                    await self._wait_spin_clear(page, timeout_ms=30000)
+                except Exception as e:
+                    # 不支持 multiple 时逐个试
+                    logger.debug("批量上传失败，改为逐个: %s", e)
+                    for path in existing:
+                        try:
+                            await file_inputs.first.set_input_files(path)
+                            uploaded += 1
+                            logger.info("已上传: %s", Path(path).name)
+                            await page.wait_for_timeout(800)
+                            await self._wait_spin_clear(page, timeout_ms=20000)
+                        except Exception as exc:
+                            logger.warning("上传失败 [%s]: %s", Path(path).name, exc)
+            return uploaded
+
+        # 无隐藏 file input：点击上传按钮触发文件选择器
+        upload_btns = [
+            page.locator("button, a, span").filter(
+                has_text=re.compile(r"上載|上传|選擇檔案|选择文件|Browse|Upload|附加", re.I)
+            ).first,
+            page.locator(".ant-upload button, .ant-btn").filter(
+                has_text=re.compile(r"上載|上传|選擇|选择", re.I)
+            ).first,
+        ]
+        for btn in upload_btns:
+            if await btn.count() == 0 or not await btn.is_visible():
+                continue
+            try:
+                async with page.expect_file_chooser(timeout=5000) as fc_info:
+                    await btn.click()
+                chooser = await fc_info.value
+                await chooser.set_files(existing if len(existing) == 1 else existing[:1])
+                uploaded = 1
+                logger.info("通过文件选择器上传: %s", Path(existing[0]).name)
+                await page.wait_for_timeout(1000)
+                await self._wait_spin_clear(page, timeout_ms=30000)
+                # 若还有第二张，再点一次
+                if len(existing) > 1:
+                    try:
+                        async with page.expect_file_chooser(timeout=5000) as fc2:
+                            await btn.click()
+                        chooser2 = await fc2.value
+                        await chooser2.set_files(existing[1])
+                        uploaded += 1
+                        logger.info("通过文件选择器上传: %s", Path(existing[1]).name)
+                        await page.wait_for_timeout(1000)
+                        await self._wait_spin_clear(page, timeout_ms=30000)
+                    except Exception as e:
+                        logger.debug("第二张上传跳过: %s", e)
+                return uploaded
+            except Exception as e:
+                logger.debug("文件选择器上传失败: %s", e)
+
+        logger.warning("未找到可上传的文件控件")
+        return 0
+
+    async def _click_radio_by_text(self, page: "Page", text_pattern: str) -> bool:
+        """按可见文案点击 radio / ant-radio-wrapper"""
+        if await self._verify_option_selected(page, text_pattern, option_type="radio"):
+            logger.info("已选中 radio: %s", text_pattern)
+            return True
+        if await self._select_radio_in_section(page, r".*", text_pattern):
+            return True
+        opt_re = re.compile(text_pattern, re.I)
+        wrappers = page.locator(".ant-radio-wrapper, label").filter(has_text=opt_re)
+        for i in range(await wrappers.count()):
+            item = wrappers.nth(i)
+            if not await item.is_visible():
+                continue
+            txt = (await item.inner_text()).strip()
+            if not opt_re.search(txt):
+                continue
+            # 避免「網上提交」误点到整段说明
+            if len(txt) > 80 and not re.search(r"^網上提交|^网上提交", txt):
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                await item.click(timeout=3000)
+                await page.wait_for_timeout(300)
+                logger.info("已点击 radio: %s", txt[:40])
+                return True
+            except Exception:
+                inp = item.locator("input[type='radio']").first
+                if await inp.count() > 0:
+                    await inp.check(force=True)
+                    await page.wait_for_timeout(300)
+                    logger.info("已 force 选中 radio: %s", txt[:40])
+                    return True
+        return False
+
+    async def _fill_identity_proof_step(self, page: "Page", data: dict[str, Any]) -> int:
+        """填写身份证明（s04）：证件类型 / 号码 / 证明文件提交方式"""
+        if not await self._is_identity_proof_step(page):
+            logger.warning("当前不在身份证明步骤, url=%s", page.url)
+            return 0
+
+        await self._wait_spin_clear(page, timeout_ms=15000)
+        proof = self._derive_identity_proof(data)
+        logger.info(
+            "开始填写身份证明 (type=%s, submission=%s, url=%s)",
+            proof["id_type"],
+            proof["submission_method"],
+            page.url[:120],
+        )
+
+        filled = 0
+
+        if await self._click_radio_by_text(page, proof["id_type_pat"]):
+            filled += 1
+            await page.wait_for_timeout(400)
+
+        # 选择证件类型后可能出现号码输入框
+        id_ok = False
+        for pat in (
+            r"身分證號碼|身份证号码|護照號碼|护照号码|證件號碼|证件号码|身分證明|身份证明",
+            r"號碼|号码|Number",
+        ):
+            if await self._fill_by_placeholder(page, pat, proof["id_number"]):
+                id_ok = True
+                break
+            if await self._fill_enabled_field_by_label(page, pat, proof["id_number"]):
+                id_ok = True
+                break
+        if not id_ok:
+            for sel in (
+                "input[name*='idNo' i]",
+                "input[id*='idNo' i]",
+                "input[name*='idNum' i]",
+                "input[name*='passport' i]",
+                "input[placeholder*='號碼' i]",
+                "input[placeholder*='号码' i]",
+            ):
+                if await self._fill_native_input(page, sel, proof["id_number"]):
+                    id_ok = True
+                    break
+        if id_ok:
+            filled += 1
+            logger.info("身份证明号码已填写")
+        else:
+            logger.debug("未找到身份证明号码输入框（部分类型可能无需填写）")
+
+        if await self._click_radio_by_text(page, proof["submission_pat"]):
+            filled += 1
+            await page.wait_for_timeout(400)
+
+        if proof["submission_method"] not in ("in_person", "onsite", "person"):
+            if await self._click_radio_by_text(page, proof["online_pat"]):
+                filled += 1
+                logger.info("已选择网上提交子项: certified_copy/digital")
+                await page.wait_for_timeout(500)
+            else:
+                logger.warning("未能选择网上提交子项（数码证书/经核证副本）")
+
+            # 经核证真实副本 → 上传桌面身份证照片
+            if proof.get("online_method") not in ("digital", "digital_cert", "cert"):
+                n = await self._upload_identity_documents(
+                    page, list(proof.get("document_files") or [])
+                )
+                if n:
+                    filled += n
+                else:
+                    logger.warning("身份证明文件未上传成功")
+
+        logger.info("身份证明已填写 %d 项", filled)
+        if filled > 0:
+            if await self._click_continue(page):
+                await self._log_page(page, "身份证明继续后")
+            else:
+                logger.warning("身份证明填写后未能点击「继续」")
+        return filled
+
     async def _fill_registration_form(self, page: "Page", data: dict[str, Any]) -> int:
         if await self._is_user_info_step(page):
             return await self._fill_user_info_step(page, data)
+        if await self._is_identity_proof_step(page):
+            return await self._fill_identity_proof_step(page, data)
 
         if not self._is_registration_page(page.url):
             logger.warning("跳过填表：当前不在 registration 页面")
@@ -3329,25 +3655,35 @@ class IcrisRegistrationBot:
                 else:
                     logger.warning("账户资料继续后未进入用户资料页, url=%s", page.url)
 
-                # Step 4+: 其余多步表单
+                # Step 4: 身份证明（s04）
+                await self._wait_spin_clear(page, timeout_ms=20000)
+                if await self._is_identity_proof_step(page):
+                    logger.info("=== 填写身份证明步骤 ===")
+                    await self._fill_identity_proof_step(page, data)
+                else:
+                    logger.info("暂未进入身份证明页, url=%s", page.url)
+
+                # Step 5+: 其余多步表单
                 max_steps = 6
                 for step in range(max_steps):
                     if self._is_home_or_portal(page.url):
-                        logger.error("步骤 %d 检测到跳转首页，停止", step + 4)
+                        logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
                         break
-                    if await self._is_user_info_step(page):
+                    if await self._is_identity_proof_step(page):
+                        await self._fill_identity_proof_step(page, data)
+                    elif await self._is_user_info_step(page):
                         await self._fill_user_info_step(page, data)
                     elif await self._is_account_profile_step(page):
                         await self._fill_user_profile_step(page, data)
                     else:
-                        logger.info("处理注册表单步骤 %d", step + 4)
+                        logger.info("处理注册表单步骤 %d", step + 5)
                         filled = await self._fill_registration_form(page, data)
                         if filled == 0 and step > 0:
                             break
                         if not await self._click_continue(page):
                             break
                     await self._wait_spin_clear(page, timeout_ms=20000)
-                    if not await self._ensure_on_registration(page, f"步骤{step + 4}后"):
+                    if not await self._ensure_on_registration(page, f"步骤{step + 5}后"):
                         break
 
                 submit_btns = page.locator(
