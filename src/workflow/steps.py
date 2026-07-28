@@ -75,21 +75,16 @@ class RegistrationWorkflow:
         return ctx
 
     def step_feishu_contact(self, ctx: WorkflowContext) -> WorkflowContext:
-        """① 飞书群对接客户，发送材料清单"""
+        """① 飞书群对接客户，发送 ICRIS 填写模板"""
         ctx.log("=== 步骤① 飞书群对接客户 ===")
-        self.feishu.send_material_checklist(ctx.chat_id)
-
-        # Mock 客户提问
-        mock_questions = [
-            "香港公司注册地址可以用大陆地址吗？",
-            "董事一定要是香港居民吗？",
-        ]
-        for q in mock_questions:
-            answer = self.llm.answer_material_question(q)
-            self.feishu.send_group_text(ctx.chat_id, f"【回复】{answer}")
-            ctx.log(f"客户问: {q}")
-            ctx.log(f"已回复: {answer[:80]}...")
-
+        chat_id = ctx.chat_id or self.feishu.resolve_target_chat_id() or "mock_chat_001"
+        ctx.chat_id = chat_id
+        self.feishu.send_icris_register_form(chat_id)
+        self.feishu.send_group_text(
+            chat_id,
+            "请按模板填写后，@机器人 发送 /开始注册 + 整段内容。",
+        )
+        ctx.log("已发送 ICRIS 账号注册填写模板")
         return ctx
 
     def step_collect_materials(self, ctx: WorkflowContext) -> WorkflowContext:
@@ -124,8 +119,12 @@ class RegistrationWorkflow:
     def step_icris_register(self, ctx: WorkflowContext) -> WorkflowContext:
         """④ ICRIS 账号注册（浏览器填写，不提交）"""
         from src.browser.icris_registration import IcrisRegistrationBot
+        from src.materials.packager import load_mock_data
 
         ctx.log("=== 步骤④ ICRIS 账号注册（Mock 填写，不提交）===")
+        if not ctx.company_data:
+            ctx.company_data = load_mock_data()
+            ctx.log("未提供资料，使用 mock 数据")
         bot = IcrisRegistrationBot(self.llm)
         asyncio.run(bot.run(ctx.company_data))
         ctx.log("ICRIS 注册表单已填写（未提交）")

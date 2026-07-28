@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # 飞书
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+    feishu_chat_id: str = ""  # 目标群 chat_id（oc_xxx），优先使用
+    feishu_chat_name: str = "1032044电器（深圳）有限公司"  # 按名称查找群
+    # 群自定义机器人 Webhook（只负责往群里发消息；收指令仍需应用机器人）
+    feishu_webhook_url: str = ""
+
+    @property
+    def feishu_webhook_configured(self) -> bool:
+        return bool((self.feishu_webhook_url or "").strip())
 
     # 邮箱
     email_imap_host: str = "imap.example.com"

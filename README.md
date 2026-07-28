@@ -123,3 +123,6 @@ ICRIS 验证码为 `data:image/gif` + 输入框 `#checkCode`，需 **ddddocr** �
 - ICRIS 网站表单结构可能变化，浏览器自动化使用多策略选择器
 - 验证码识别优先 ddddocr，失败时回退 LLM 视觉模型
 - **请勿将 `.env` 提交到版本控制**
+
+python main.py feishu-bot
+python main.py --step register
