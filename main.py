@@ -452,6 +452,35 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         archive.close()
 
 
+def _resolve_mock_from_id(router, roomid: str, from_id: str) -> str:
+    """Mock 时优先使用真实外部联系人 wm ID，便于 kf 自动回复"""
+    if from_id and from_id.startswith("wm"):
+        return from_id
+    members = router.state_machine.external.external_userids_in_group(roomid)
+    if members:
+        chosen = members[0]
+        if from_id and from_id != "mock_external_user":
+            print(f"[Mock] from-id 非 wm 开头，改用群内外部成员: {chosen}")
+        else:
+            print(f"[Mock] 自动选用群 {roomid} 的外部成员: {chosen}")
+        return chosen
+    return from_id
+
+
+def _print_mock_send_context(router, roomid: str, *, from_id: str | None = None) -> None:
+    from config.settings import settings
+
+    ext = router.state_machine.external
+    print(f"[Mock] 目标群 roomid={roomid}（仅该群，不波及其他群）")
+    print(f"[Mock] 发送模式={settings.wework_external_send_mode_resolved}")
+    print(f"[Mock] 微信客服已配置={settings.wework_kf_configured}")
+    members = ext.external_userids_in_group(roomid)
+    if members:
+        print(f"[Mock] 群内外部成员 {len(members)} 人: {', '.join(members[:3])}{'…' if len(members) > 3 else ''}")
+    plan = ext.describe_send_plan(roomid, to_external_userid=from_id if from_id and from_id.startswith("wm") else None)
+    print(f"[Mock] 发送计划: {plan}")
+
+
 def cmd_wework_external_mock(args: argparse.Namespace) -> None:
     """Mock 注入外部群消息或模拟建群"""
     from config.settings import settings
@@ -460,9 +489,16 @@ def cmd_wework_external_mock(args: argparse.Namespace) -> None:
     router = MessageRouter()
     roomid = args.roomid
     if args.create_group:
-        print(f"[Mock] 模拟建群事件 roomid={roomid}")
-        router.simulate_group_create(roomid)
-        print("[Mock] 完成。欢迎语与表单链接已尝试发送。")
+        _print_mock_send_context(router, roomid)
+        print(f"[Mock] 模拟建群事件 force={args.force}")
+        router.simulate_group_create(roomid, force=args.force)
+        mode = settings.wework_external_send_mode_resolved
+        if mode == "kf":
+            print("[Mock] 完成。已尝试对【当前群】外部成员 kf 自动私聊（无需群主确认）。")
+        elif mode == "mass":
+            print("[Mock] 完成。已创建【当前群】企业群发任务，需群主在企微确认。")
+        else:
+            print("[Mock] 完成。欢迎语已尝试发送到【当前群】。")
         return
 
     if args.file:
@@ -479,8 +515,10 @@ def cmd_wework_external_mock(args: argparse.Namespace) -> None:
         print("请提供 --text、--file 或 --create-group")
         raise SystemExit(1)
 
-    print(f"[Mock] 模式: {settings.wework_external_mode_resolved}")
-    router.inject_mock_message(roomid, args.text, from_id=args.from_id or "mock_external_user")
+    from_id = _resolve_mock_from_id(router, roomid, args.from_id or "mock_external_user")
+    _print_mock_send_context(router, roomid, from_id=from_id)
+    print(f"[Mock] 存档模式: {settings.wework_external_mode_resolved}")
+    router.inject_mock_message(roomid, args.text, from_id=from_id)
     print("[Mock] 消息已注入；若 bot 在同进程外，请确保先启动 wework-external-bot")
     print("[Mock] 注：inject 在本进程内直接处理，无需 bot 运行")
     # inject_mock_message 已在当前进程处理
@@ -537,6 +575,11 @@ def main() -> None:
         "--create-group",
         action="store_true",
         help="模拟 change_external_chat create 事件（触发欢迎语）",
+    )
+    ext_mock.add_argument(
+        "--force",
+        action="store_true",
+        help="建群欢迎已发送过时仍强制重发",
     )
     ext_mock.set_defaults(func=cmd_wework_external_mock)
 

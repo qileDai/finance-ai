@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     wework_archive_sdk_path: str = ""
     wework_default_group_owner_userid: str = ""
     wework_external_mode: str = "auto"  # auto | mock | live
+    # 外部群消息发送：mass=企业群发(需群主确认) | kf=微信客服私聊(自动) | auto=优先 kf/webhook
+    wework_external_send_mode: str = "auto"
+    # 微信客服（kf 模式必填，Secret 在管理后台「微信客服」获取，非应用 Secret）
+    wework_kf_secret: str = ""
+    wework_kf_open_kfid: str = ""
+    # 可选：群 Webhook（仅内部群支持，外部客户群不可用）
+    wework_external_group_webhook_url: str = ""
 
     # H5 材料收集表单
     collect_form_base_url: str = ""
@@ -127,6 +134,25 @@ class Settings(BaseSettings):
         mode = (self.wework_external_mode or "auto").strip().lower()
         if mode == "auto":
             return "live" if self.wework_archive_configured else "mock"
+        return mode
+
+    @property
+    def wework_kf_configured(self) -> bool:
+        return bool(
+            self.wework_corp_id
+            and (self.wework_kf_secret or "").strip()
+            and (self.wework_kf_open_kfid or "").strip()
+        )
+
+    @property
+    def wework_external_send_mode_resolved(self) -> str:
+        mode = (self.wework_external_send_mode or "auto").strip().lower()
+        if mode == "auto":
+            if self.wework_kf_configured:
+                return "kf"
+            if (self.wework_external_group_webhook_url or "").strip():
+                return "webhook"
+            return "mass"
         return mode
 
     @property

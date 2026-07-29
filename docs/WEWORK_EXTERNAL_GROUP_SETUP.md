@@ -186,6 +186,59 @@ WEWORK_EXTERNAL_MODE=live
 
 ---
 
+## 六点五、消息发送模式（重要）
+
+**企微官方限制：外部客户群没有「API 直发进群、无需确认」的接口。**
+
+原先使用的 `add_msg_template`（企业群发）创建任务后，**群主必须在企微里点确认**，消息才会出现在群里。
+
+本项目支持三种发送策略（`.env` 中 `WEWORK_EXTERNAL_SEND_MODE`）：
+
+| 模式 | 行为 | 是否需要群主确认 | 消息出现在 |
+|------|------|------------------|------------|
+| `kf` | 微信客服 `kf/send_msg` | **否（自动）** | 客户微信「客服会话」（私聊，不在群里） |
+| `mass` | 企业群发 `add_msg_template` | **是** | 外部客户群 |
+| `webhook` | 群 Webhook | **否** | 仅**内部群**（外部客户群不支持） |
+| `auto` | 优先 kf → webhook → mass | 视情况 | — |
+
+### 推荐：微信客服自动回复（无需群主确认）
+
+> **重要**：外部客户群**没有**「消息直接出现在群里且无需确认」的官方 API。  
+> `kf` 模式 = 自动私聊该群内的外部客户（消息在**微信客服会话**，不在群聊里）。  
+> `mass` 模式 = 消息出现在**群聊**，但需群主点确认。  
+> 带 `--roomid` 时，两种模式都**只作用于该群**，不会波及其他群。
+
+1. 管理后台 → **微信客服** → 创建客服账号，记下 `open_kfid`（`wk` 开头）
+2. **微信客服 → API** → 将自建应用加入「可调用接口的应用」
+3. 获取微信客服专用 Secret（不是应用 Secret）
+4. `.env` 配置：
+
+```env
+WEWORK_EXTERNAL_SEND_MODE=kf
+WEWORK_KF_SECRET=微信客服Secret
+WEWORK_KF_OPEN_KFID=wkxxxxxxxx
+WEWORK_DEFAULT_GROUP_OWNER_USERID=YingTaiJiTuanDengXianSheng
+```
+
+5. 客户需先进入该客服（扫码或从群名片），之后对该群 `--roomid` 的操作会自动私聊该群外部成员
+6. Mock 测试会自动选用群内外部成员 `wm` ID：
+
+```powershell
+python main.py wework-external-mock --roomid "wrXXXX" --create-group --force
+python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册需要什么材料？"
+```
+
+命令会打印 `[Mock] 发送计划: ...` 说明是 kf 自动还是 mass 需确认。
+
+### 若必须在「群里」自动出现消息
+
+官方仅两种方式：
+
+1. **入群欢迎语**（管理后台 → 客户联系 → 入群欢迎语）：群主在手机群设置里开启一次，新人入群自动发（不支持 AI 自由回复）
+2. **群自动回复小助理**：群主开启后，客户 `@小助理 + 关键词` 触发（需管理员预配规则）
+
+---
+
 ## 七、故障排查
 
 | 现象 | 检查项 |
@@ -195,6 +248,9 @@ WEWORK_EXTERNAL_MODE=live
 | 客户说话无回复 | 是否为 live 模式；存档 Secret/私钥/SDK；OpenAI Key |
 | Mock 正常 live 不行 | SDK 路径；存档席位；RSA 密钥是否配对 |
 | 能收不能发 | `WEWORK_DEFAULT_GROUP_OWNER_USERID`；客户群 API 权限；群主是否在可见范围 |
+| API 成功但群里无消息 | 当前为 `mass` 模式，需群主在【服务通知】确认；或改 `WEWORK_EXTERNAL_SEND_MODE=kf` |
+| 消息发到群主所有群 | 已修复：群发必须带 `chat_id_list`；sender 自动取当前群群主 |
+| kf 模式发送失败 | 客户是否已联系过该客服；`WEWORK_KF_SECRET/OPEN_KFID` 是否正确 |
 | 重复回复 | 正常；系统用 msgid 幂等，不应重复（若重复检查存档 seq） |
 
 ---
@@ -205,6 +261,7 @@ WEWORK_EXTERNAL_MODE=live
 |------|------|
 | `python main.py wework-external-bot` | 启动外部群 bot |
 | `python main.py wework-external-mock --roomid X --create-group` | 模拟建群 |
+| `python main.py wework-external-mock --roomid X --create-group --force` | 强制重发欢迎语 |
 | `python main.py wework-external-mock --roomid X --text "问题"` | 模拟客户消息 |
 
 ---

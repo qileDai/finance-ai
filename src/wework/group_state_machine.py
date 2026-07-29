@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from config.settings import settings
+from config.settings import PROJECT_ROOT, settings
 from src.llm.openai_client import LLMClient
 from src.materials.aggregator import aggregate_company_data, is_ready_for_confirm
 from src.materials.checklist import format_progress_text
@@ -69,34 +69,51 @@ class GroupStateMachine:
             base = f"http://127.0.0.1:{settings.wework_external_callback_port}"
         return f"{base}/collect/form/{token}"
 
-    def _safe_send(self, roomid: str, content: str) -> None:
+    def _safe_send(
+        self,
+        roomid: str,
+        content: str,
+        *,
+        to_external_userid: str | None = None,
+    ) -> None:
         try:
-            self.external.send_group_text(roomid, content, sender_userid=self._owner(roomid))
+            self.external.send_group_text(
+                roomid,
+                content,
+                sender_userid=self._owner(roomid),
+                to_external_userid=to_external_userid,
+            )
         except Exception as e:
             logger.warning("群 %s 发消息失败（材料已入库）: %s", roomid, e)
 
-    def handle_group_created(self, roomid: str) -> None:
+    def handle_group_created(self, roomid: str, *, force: bool = False) -> None:
         detail = self.external.get_group_chat(roomid) or {}
         name = str(detail.get("name") or "")
         owner = str(detail.get("owner") or self.external.default_owner_userid or "")
 
         existing = self.store.get_group(roomid)
-        if existing and existing.get("status") == GROUP_STATUS_WELCOMED and existing.get("welcomed_at"):
-            logger.info("群 %s 已欢迎过，跳过", roomid)
+        if (
+            not force
+            and existing
+            and existing.get("status") == GROUP_STATUS_WELCOMED
+            and existing.get("welcomed_at")
+        ):
+            logger.info("群 %s 已欢迎过，跳过（加 force=True 可重发）", roomid)
             return
 
         self.store.ensure_form_token(roomid)
         self.store.upsert_group(roomid, name=name, owner_userid=owner, status=GROUP_STATUS_INIT)
 
         try:
-            self.external.send_group_text(roomid, WELCOME_HINT, sender_userid=owner or None)
-            self.external.send_material_checklist(roomid, sender_userid=owner or None)
             form_url = self._form_url(roomid)
-            self.external.send_group_text(
-                roomid,
-                f"在线填写资料：{form_url}\n（也可在本群直接上传证件图片/PDF）",
-                sender_userid=owner or None,
+            checklist_path = PROJECT_ROOT / "templates" / "material_checklist.md"
+            checklist = checklist_path.read_text(encoding="utf-8")
+            welcome_bundle = (
+                f"{WELCOME_HINT}\n\n"
+                f"---\n\n{checklist}\n\n"
+                f"---\n\n在线填写资料：{form_url}\n（也可在本群直接上传证件图片/PDF）"
             )
+            self.external.send_group_text(roomid, welcome_bundle, sender_userid=owner or None)
         except Exception as e:
             logger.exception("群 %s 欢迎语发送失败: %s", roomid, e)
             return
@@ -133,7 +150,11 @@ class GroupStateMachine:
             return
 
         if text in ("/填表", "/form"):
-            self._safe_send(roomid, f"请填写注册资料：{self._form_url(roomid)}")
+            self._safe_send(
+                roomid,
+                f"请填写注册资料：{self._form_url(roomid)}",
+                to_external_userid=from_id if from_id.startswith("wm") else None,
+            )
             self.store.mark_message_processed(msgid)
             return
 
@@ -214,7 +235,12 @@ class GroupStateMachine:
         try:
             answer = self.llm.answer_material_question(combined)
             reply = f"【AI 助手】{answer}"
-            self.external.send_group_text(roomid, reply, sender_userid=owner)
+            self.external.send_group_text(
+                roomid,
+                reply,
+                sender_userid=owner,
+                to_external_userid=batch.from_id if batch.from_id.startswith("wm") else None,
+            )
             self.store.insert_ai_reply(roomid, trigger_msgid, reply, model=settings.openai_model)
             self.store.set_group_status(roomid, GROUP_STATUS_QA)
         except Exception as e:

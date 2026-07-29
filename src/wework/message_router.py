@@ -116,7 +116,7 @@ class MessageRouter:
         )
         logger.info("[Mock] 已注入消息到群 %s: %s", roomid, text[:80])
 
-    def simulate_group_create(self, roomid: str) -> None:
+    def simulate_group_create(self, roomid: str, *, force: bool = False) -> None:
         """Mock 模拟建群事件"""
         evt = ExternalChatEvent(
             event="change_external_chat",
@@ -124,4 +124,5 @@ class MessageRouter:
             chat_id=roomid,
             raw={},
         )
-        self.route_external_chat_event(evt)
+        if is_group_create_event(evt):
+            self.state_machine.handle_group_created(evt.chat_id, force=force)
