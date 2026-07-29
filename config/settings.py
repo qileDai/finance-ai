@@ -26,6 +26,27 @@ class Settings(BaseSettings):
     wework_encoding_aes_key: str = ""
     wework_webhook_port: int = 8080
 
+    # 企业微信外部群（客户群 + 会话存档）
+    wework_external_callback_token: str = ""
+    wework_external_callback_aes_key: str = ""
+    wework_external_callback_port: int = 8081
+    wework_archive_secret: str = ""
+    wework_archive_private_key_path: str = ""
+    wework_archive_poll_interval: int = 3
+    wework_archive_sdk_path: str = ""
+    wework_default_group_owner_userid: str = ""
+    wework_external_mode: str = "auto"  # auto | mock | live
+
+    # H5 材料收集表单
+    collect_form_base_url: str = ""
+    collect_form_jwt_secret: str = ""
+
+    # 对象存储（可选，未配置则使用 data/materials/ 本地存储）
+    oss_endpoint: str = ""
+    oss_bucket: str = ""
+    oss_access_key: str = ""
+    oss_secret_key: str = ""
+
     # 飞书
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
@@ -77,6 +98,40 @@ class Settings(BaseSettings):
     @property
     def wework_webhook_configured(self) -> bool:
         return self.wework_configured and bool(self.wework_token and self.wework_encoding_aes_key)
+
+    @property
+    def wework_external_callback_token_resolved(self) -> str:
+        return (self.wework_external_callback_token or self.wework_token or "").strip()
+
+    @property
+    def wework_external_callback_aes_key_resolved(self) -> str:
+        return (self.wework_external_callback_aes_key or self.wework_encoding_aes_key or "").strip()
+
+    @property
+    def wework_external_callback_configured(self) -> bool:
+        return self.wework_configured and bool(
+            self.wework_external_callback_token_resolved
+            and self.wework_external_callback_aes_key_resolved
+        )
+
+    @property
+    def wework_archive_configured(self) -> bool:
+        return bool(
+            self.wework_corp_id
+            and self.wework_archive_secret
+            and self.wework_archive_private_key_path
+        )
+
+    @property
+    def wework_external_mode_resolved(self) -> str:
+        mode = (self.wework_external_mode or "auto").strip().lower()
+        if mode == "auto":
+            return "live" if self.wework_archive_configured else "mock"
+        return mode
+
+    @property
+    def oss_configured(self) -> bool:
+        return bool(self.oss_endpoint and self.oss_bucket and self.oss_access_key)
 
     @property
     def feishu_configured(self) -> bool:

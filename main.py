@@ -374,6 +374,121 @@ def cmd_feishu_push(_args: argparse.Namespace) -> None:
     print(f"已向群发送 ICRIS 填写模板（via {via}）")
 
 
+def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
+    """启动企业微信外部群机器人（客户群回调 + 存档 + AI 回复）"""
+    import logging
+
+    from config.settings import settings
+    from src.storage.db import ExternalGroupStore
+    from src.wework.archive_client import ArchiveClient
+    from src.web.collect_server import UnifiedWebServer, CALLBACK_PATH, ADMIN_PATH, FORM_PREFIX
+    from src.wework.message_router import MessageRouter
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    print("=" * 60)
+    print("企业微信外部群机器人 - Phase 1")
+    print("=" * 60)
+
+    mode = settings.wework_external_mode_resolved
+    store = ExternalGroupStore()
+    router = MessageRouter()
+    archive = ArchiveClient(store=store)
+    port = settings.wework_external_callback_port
+
+    print(f"[外部群] 运行模式: {mode}")
+    print(f"[外部群] 企微已配置: {settings.wework_configured}")
+    print(f"[外部群] 回调已配置: {settings.wework_external_callback_configured}")
+    print(f"[外部群] 存档已配置: {settings.wework_archive_configured}")
+    print(f"[外部群] 回调端口: {port}")
+    print(f"[外部群] 回调路径: {CALLBACK_PATH}")
+    print(f"[外部群] 表单路径: {FORM_PREFIX}{{token}}")
+    print(f"[外部群] 管理后台: {ADMIN_PATH}")
+    print(f"[外部群] 表单公网地址: {settings.collect_form_base_url or '(使用本机 8081)'}")
+    print(f"[外部群] 存档轮询间隔: {settings.wework_archive_poll_interval}s")
+    print(f"[外部群] 默认群主: {settings.wework_default_group_owner_userid or '(未配置)'}")
+
+    groups = store.list_groups()
+    print(f"[外部群] 已注册群数: {len(groups)}")
+    for g in groups[:10]:
+        print(f"  - {g.get('name') or '(无名)'} ({g.get('roomid')}) status={g.get('status')}")
+
+    if mode == "mock":
+        print(
+            "\n[外部群] 当前为 mock 模式（存档未配置或 WEWORK_EXTERNAL_MODE=mock）。\n"
+            "  - 建群欢迎语：需企微回调可达，或另开终端执行 simulate\n"
+            "  - 客户消息测试：python main.py wework-external-mock --roomid <群ID> --text \"问题\"\n"
+            "  - 模拟建群：python main.py wework-external-mock --roomid <群ID> --create-group\n"
+            "  - 模拟文件：python main.py wework-external-mock --roomid <群ID> --file path/to/id.jpg\n"
+        )
+    elif mode == "live":
+        if not settings.wework_archive_configured:
+            print("\n[外部群] 警告: live 模式但存档 Secret/私钥未配置，无法收客户群消息")
+        elif not archive.sdk_available:
+            print(
+                "\n[外部群] 警告: 未找到 Finance SDK（vendor/wework-sdk/），"
+                "请将企微存档 SDK 放到该目录并配置 WEWORK_ARCHIVE_SDK_PATH"
+            )
+        else:
+            print("[外部群] 存档 SDK: 已找到")
+
+    if not settings.wework_external_callback_configured:
+        print(
+            "\n[外部群] 提示: 回调 Token/AESKey 未配置，Webhook 无法验签。"
+            "请在 .env 配置 WEWORK_EXTERNAL_CALLBACK_TOKEN 与 WEWORK_EXTERNAL_CALLBACK_AES_KEY"
+        )
+
+    archive.start_polling(router, blocking=False)
+    web = UnifiedWebServer(router=router, port=port)
+    print(f"\n[外部群] 开始监听… 回调 URL: https://<域名>{CALLBACK_PATH}")
+    print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
+    print("[外部群] 按 Ctrl+C 退出\n")
+    try:
+        web.start(blocking=True)
+    finally:
+        archive.close()
+
+
+def cmd_wework_external_mock(args: argparse.Namespace) -> None:
+    """Mock 注入外部群消息或模拟建群"""
+    from config.settings import settings
+    from src.wework.message_router import MessageRouter
+
+    router = MessageRouter()
+    roomid = args.roomid
+    if args.create_group:
+        print(f"[Mock] 模拟建群事件 roomid={roomid}")
+        router.simulate_group_create(roomid)
+        print("[Mock] 完成。欢迎语与表单链接已尝试发送。")
+        return
+
+    if args.file:
+        from pathlib import Path
+
+        if not Path(args.file).is_file():
+            print(f"文件不存在: {args.file}")
+            raise SystemExit(1)
+        router.inject_mock_file(roomid, args.file, from_id=args.from_id or "mock_external_user")
+        print("[Mock] 文件已注入并尝试分类入库")
+        return
+
+    if not args.text:
+        print("请提供 --text、--file 或 --create-group")
+        raise SystemExit(1)
+
+    print(f"[Mock] 模式: {settings.wework_external_mode_resolved}")
+    router.inject_mock_message(roomid, args.text, from_id=args.from_id or "mock_external_user")
+    print("[Mock] 消息已注入；若 bot 在同进程外，请确保先启动 wework-external-bot")
+    print("[Mock] 注：inject 在本进程内直接处理，无需 bot 运行")
+    # inject_mock_message 已在当前进程处理
+    import time
+    time.sleep(6)  # 等待防抖 flush
+    print("[Mock] 处理完成（含 AI 防抖等待）")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="香港公司工商注册智能体",
@@ -404,6 +519,27 @@ def main() -> None:
     )
     feishu_push.set_defaults(func=cmd_feishu_push)
 
+    ext_bot = sub.add_parser(
+        "wework-external-bot",
+        help="启动企业微信外部群机器人（客户群欢迎语 + AI 问答 + 转人工）",
+    )
+    ext_bot.set_defaults(func=cmd_wework_external_bot)
+
+    ext_mock = sub.add_parser(
+        "wework-external-mock",
+        help="Mock：注入客户群消息或模拟建群（开发联调）",
+    )
+    ext_mock.add_argument("--roomid", required=True, help="客户群 chat_id / roomid")
+    ext_mock.add_argument("--text", default="", help="模拟客户发送的文本")
+    ext_mock.add_argument("--file", default="", help="模拟客户上传的文件路径")
+    ext_mock.add_argument("--from-id", default="mock_external_user", help="模拟外部联系人 ID")
+    ext_mock.add_argument(
+        "--create-group",
+        action="store_true",
+        help="模拟 change_external_chat create 事件（触发欢迎语）",
+    )
+    ext_mock.set_defaults(func=cmd_wework_external_mock)
+
     # 兼容直接 python main.py [--step ...] 用法
     parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), dest="_step")
     parser.add_argument("--chat-id", default="mock_chat_001", dest="_chat_id")
@@ -421,6 +557,10 @@ def main() -> None:
         cmd_feishu_bot(args)
     elif args.command == "feishu-push":
         cmd_feishu_push(args)
+    elif args.command == "wework-external-bot":
+        cmd_wework_external_bot(args)
+    elif args.command == "wework-external-mock":
+        cmd_wework_external_mock(args)
     elif args._step or args._full or len(sys.argv) == 1:
         # 默认 run
         run_args = argparse.Namespace(
