@@ -3574,9 +3574,15 @@ class IcrisRegistrationBot:
     async def run(self, data: dict[str, Any]) -> None:
         """执行注册流程：打开浏览器 → 验证码 → 条款 → 填写表单（不提交）"""
         try:
-            from playwright.async_api import async_playwright
+            from src.browser.launcher import import_async_playwright
+
+            async_playwright = import_async_playwright()
+        except RuntimeError:
+            raise
         except ImportError as e:
-            raise RuntimeError("请先安装 Playwright: pip install playwright") from e
+            raise RuntimeError(
+                "请先安装 Playwright: pip install playwright && playwright install chromium"
+            ) from e
 
         keep_open = max(10, settings.browser_keep_open_seconds)
 

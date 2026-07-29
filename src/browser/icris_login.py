@@ -140,10 +140,14 @@ class IcrisLoginBot:
 
     async def run(self, account: IcrisAccount, data: dict[str, Any]) -> None:
         try:
-            from playwright.async_api import async_playwright
+            from src.browser.launcher import import_async_playwright
+
+            async_playwright = import_async_playwright()
+        except RuntimeError:
+            raise
         except ImportError as e:
             raise RuntimeError(
-                "请先安装 Playwright: pip install playwright"
+                "请先安装 Playwright: pip install playwright && playwright install chromium"
             ) from e
 
         async with async_playwright() as p:

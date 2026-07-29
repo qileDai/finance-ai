@@ -20,6 +20,29 @@ USER_AGENT = (
 )
 
 
+def import_async_playwright():
+    """导入 Playwright；Windows 上 greenlet DLL 失败时给出可操作的修复提示。"""
+    try:
+        from playwright.async_api import async_playwright
+
+        return async_playwright
+    except ImportError as e:
+        msg = str(e).lower()
+        if "greenlet" in msg or "dll load failed" in msg:
+            import sys
+
+            hint = (
+                "Playwright 依赖 greenlet 原生模块加载失败。"
+                "Windows 请执行: pip install msvc-runtime"
+            )
+            if sys.version_info >= (3, 14):
+                hint += "（Python 3.14 需 msvc-runtime；仍失败请改用 Python 3.11–3.12）"
+            raise RuntimeError(hint) from e
+        raise RuntimeError(
+            "请先安装 Playwright: pip install playwright && playwright install chromium"
+        ) from e
+
+
 def _try_launch_cdp_chrome() -> bool:
     """尝试启动带 remote-debugging-port 的 Chrome（Windows）"""
     import os

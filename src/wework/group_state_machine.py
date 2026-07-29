@@ -233,7 +233,17 @@ class GroupStateMachine:
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         owner = self._owner(roomid)
         try:
-            answer = self.llm.answer_material_question(combined)
+            context = ""
+            if settings.rag_enabled:
+                try:
+                    from src.rag.hybrid_retriever import HybridRetriever
+                    from src.rag.prompt import format_hits_for_prompt
+
+                    hits = HybridRetriever().retrieve(combined, top_k=settings.rag_top_k)
+                    context = format_hits_for_prompt(hits)
+                except Exception as e:
+                    logger.warning("RAG 检索失败，回退纯 LLM: %s", e)
+            answer = self.llm.answer_material_question(combined, context=context)
             reply = f"【AI 助手】{answer}"
             self.external.send_group_text(
                 roomid,

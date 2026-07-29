@@ -38,9 +38,16 @@ class LLMClient:
         system = (
             "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"
             "用简洁专业的中文回答客户关于注册材料的问题。"
-            "若问题超出材料范围，建议客户联系专员。"
         )
-        user = f"背景信息:\n{context}\n\n客户问题: {question}" if context else question
+        if context.strip():
+            system += (
+                "请优先依据下方「检索片段」作答；片段中未提及的内容不要编造。"
+                "若检索片段不足以回答，请明确说明并建议客户联系专员。"
+            )
+            user = f"检索片段:\n{context.strip()}\n\n客户问题: {question}"
+        else:
+            system += "若问题超出材料范围，建议客户联系专员。"
+            user = question
         return self.chat(system, user)
 
     def confirm_materials_summary(self, materials: dict[str, Any]) -> str:

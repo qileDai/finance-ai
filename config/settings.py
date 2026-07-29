@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     dry_run: bool = True
     notify_colleague_open_id: str = ""
 
+    # RAG 知识检索（SQLite FTS5 + Qdrant）
+    rag_enabled: bool = True
+    rag_db_path: str = "data/rag.db"
+    rag_knowledge_dir: str = "docs/knowledge"
+    rag_embedding_model: str = "text-embedding-3-small"
+    rag_top_k: int = 6
+    rag_rrf_k: int = 60
+    qdrant_url: str = "http://127.0.0.1:6333"
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "finance_knowledge"
+
     @property
     def wework_configured(self) -> bool:
         return bool(self.wework_corp_id and self.wework_corp_secret and self.wework_agent_id)

@@ -64,9 +64,18 @@ def cmd_steps(_args: argparse.Namespace) -> None:
 
 
 def check_captcha_deps(step: str | None) -> None:
-    """浏览器注册/登录步骤检查验证码依赖"""
+    """浏览器注册/登录步骤检查验证码与 Playwright 依赖"""
     if step not in ("register", "login", None):
         return
+
+    try:
+        from src.browser.launcher import import_async_playwright
+
+        import_async_playwright()
+    except RuntimeError as e:
+        print(f"[警告] Playwright 不可用: {e}")
+    except Exception as e:
+        print(f"[警告] Playwright 检查失败: {e}")
 
     from config.settings import settings
 
@@ -527,6 +536,79 @@ def cmd_wework_external_mock(args: argparse.Namespace) -> None:
     print("[Mock] 处理完成（含 AI 防抖等待）")
 
 
+def cmd_rag_ingest(args: argparse.Namespace) -> None:
+    try:
+        from src.rag.pipeline import RagPipeline
+    except ImportError as e:
+        print(f"[RAG] 依赖缺失: {e}")
+        print("[RAG] 请执行: pip install -r requirements.txt")
+        sys.exit(1)
+    from config.settings import PROJECT_ROOT, settings
+
+    pipeline = RagPipeline()
+    if args.file:
+        path = Path(args.file)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if not path.is_file():
+            print(f"[RAG] 文件不存在: {path}")
+            sys.exit(1)
+        changed = pipeline.ingest_file(path)
+        print(f"[RAG] {'已入库' if changed else '跳过（未变更）'}: {path}")
+        return
+
+    directory = Path(settings.rag_knowledge_dir)
+    if not directory.is_absolute():
+        directory = PROJECT_ROOT / directory
+    result = pipeline.ingest_directory(directory)
+    print(f"[RAG] 入库完成: 新增/更新 {result.ingested}，跳过 {result.skipped}")
+    if result.errors:
+        print("[RAG] 错误:")
+        for err in result.errors:
+            print(f"  - {err}")
+        sys.exit(1)
+
+
+def cmd_rag_query(args: argparse.Namespace) -> None:
+    from config.settings import settings
+    from src.llm.openai_client import LLMClient
+    from src.rag.prompt import format_hits_for_prompt
+
+    query = args.query.strip()
+    if not query:
+        print("[RAG] 请提供查询问题")
+        sys.exit(1)
+
+    try:
+        from src.rag.hybrid_retriever import HybridRetriever
+    except ImportError as e:
+        print(f"[RAG] 依赖缺失: {e}")
+        print("[RAG] 请执行: pip install -r requirements.txt")
+        sys.exit(1)
+
+    retriever = HybridRetriever()
+    hits = retriever.retrieve(query, top_k=settings.rag_top_k)
+    if not hits:
+        print("[RAG] 未命中任何片段")
+    else:
+        print(f"[RAG] 命中 {len(hits)} 条:\n")
+        for i, hit in enumerate(hits, start=1):
+            channels = ", ".join(f"{k}={v:.3f}" for k, v in hit.channels.items())
+            print(f"--- #{i} score={hit.score:.4f} ({channels}) ---")
+            print(f"来源: {hit.source_path}")
+            preview = hit.text[:300] + ("…" if len(hit.text) > 300 else "")
+            print(preview)
+            print()
+
+    if args.answer:
+        context = format_hits_for_prompt(hits)
+        llm = LLMClient()
+        answer = llm.answer_material_question(query, context=context)
+        print("=" * 60)
+        print("LLM 回答:")
+        print(answer)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="香港公司工商注册智能体",
@@ -583,6 +665,15 @@ def main() -> None:
     )
     ext_mock.set_defaults(func=cmd_wework_external_mock)
 
+    rag_ingest = sub.add_parser("rag-ingest", help="入库 docs/knowledge/ 知识文档到 RAG")
+    rag_ingest.add_argument("--file", default="", help="仅入库指定文件")
+    rag_ingest.set_defaults(func=cmd_rag_ingest)
+
+    rag_query = sub.add_parser("rag-query", help="RAG 检索调试（可选 --answer 走 LLM）")
+    rag_query.add_argument("query", help="查询问题")
+    rag_query.add_argument("--answer", action="store_true", help="检索后调用 LLM 生成回答")
+    rag_query.set_defaults(func=cmd_rag_query)
+
     # 兼容直接 python main.py [--step ...] 用法
     parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), dest="_step")
     parser.add_argument("--chat-id", default="mock_chat_001", dest="_chat_id")
@@ -604,6 +695,10 @@ def main() -> None:
         cmd_wework_external_bot(args)
     elif args.command == "wework-external-mock":
         cmd_wework_external_mock(args)
+    elif args.command == "rag-ingest":
+        cmd_rag_ingest(args)
+    elif args.command == "rag-query":
+        cmd_rag_query(args)
     elif args._step or args._full or len(sys.argv) == 1:
         # 默认 run
         run_args = argparse.Namespace(
