@@ -710,6 +710,142 @@ def cmd_rag_query(args: argparse.Namespace) -> None:
         print(answer)
 
 
+def cmd_agent_query(args: argparse.Namespace) -> None:
+    from config.settings import settings
+    from src.agent.orchestrator import TaskOrchestrator
+    from src.agent.models import AgentContext
+
+    query = args.query.strip()
+    if not query:
+        print("[Agent] 请提供查询问题")
+        sys.exit(1)
+
+    scope = getattr(args, "scope", "") or settings.rag_scope
+    result = TaskOrchestrator().run_qa(
+        AgentContext(question=query, scope=scope),
+    )
+
+    print(f"[Agent] run_id={result.run_id}")
+    print(f"  action={result.action.value} mode={result.answer_mode.value} confidence={result.confidence}")
+    if result.silent_reason:
+        print(f"  silent_reason={result.silent_reason}")
+    print(f"  retrieval_score={result.retrieval_score} answer_score={result.answer_score}")
+    print(f"  retries={result.retries} citations={result.citations}")
+    print()
+
+    for step in result.trace:
+        print(f"--- {step.step} attempt={step.attempt} ---")
+        for k, v in step.data.items():
+            print(f"  {k}: {v}")
+        print()
+
+    if result.hits:
+        print(f"[Agent] 检索命中 {len(result.hits)} 条:")
+        for i, hit in enumerate(result.hits[:5], start=1):
+            print(f"  #{i} score={hit.score:.4f} kind={hit.chunk_kind} step={hit.step_title[:40]}")
+        print()
+
+    print("=" * 60)
+    if result.action.value == "silent":
+        print("最终回答: （静默，不发送客户）")
+    else:
+        print("最终回答:")
+        print(result.answer)
+
+
+def cmd_agent_eval(args: argparse.Namespace) -> None:
+    import re
+
+    from config.settings import settings
+    from src.agent.models import AnswerMode
+    from src.agent.orchestrator import TaskOrchestrator
+    from src.agent.models import AgentContext
+    from src.rag.hybrid_retriever import HybridRetriever, is_primary_source
+
+    scope = getattr(args, "scope", "") or "hk"
+    no_llm = getattr(args, "no_llm", False)
+    if no_llm:
+        settings.agent_enable_llm_judge = False
+
+    GOLDEN = [
+        ("进群怎么打招呼", "hk"),
+        ("香港注册需要什么资料", "hk"),
+        ("开户面签要注意什么", "hk"),
+    ]
+    CAUTION_MARKERS = ("面签注意事项", "被制裁国家", "仅需要面签人员", "不要拍照")
+    NUMBERED_RE = re.compile(r"[1-9][、.)．]")
+
+    retriever = HybridRetriever()
+    orchestrator = TaskOrchestrator()
+    failed = 0
+
+    print(f"[Agent-Eval] scope={scope} llm_judge={settings.agent_enable_llm_judge}\n")
+
+    print("--- 检索 golden ---")
+    for query, expect_region in GOLDEN:
+        hits = retriever.retrieve(query, scope=scope)
+        if not hits:
+            print(f"FAIL  无命中: {query}")
+            failed += 1
+            continue
+        top = hits[0]
+        ok = (expect_region != "hk" or top.region != "cn") and is_primary_source(top.source_path)
+        print(f"{'OK' if ok else 'WARN'}  {query} → step={top.step_title[:40]} kind={top.chunk_kind}")
+        if not ok:
+            failed += 1
+
+    print("\n--- 端到端 QA golden（知识库模式）---")
+    caution_query = "开户面签要注意什么"
+    result = orchestrator.run_qa(AgentContext(question=caution_query, scope=scope))
+    merged_hits = "\n".join(h.text for h in result.hits[:3])
+    missing = [m for m in CAUTION_MARKERS if m not in merged_hits and m not in result.answer]
+    numbered = len(NUMBERED_RE.findall(result.answer))
+
+    if result.answer_mode != AnswerMode.KNOWLEDGE:
+        print(f"WARN  {caution_query} → mode={result.answer_mode.value}（期望 knowledge）")
+        failed += 1
+    elif result.action.value != "reply":
+        print(f"WARN  {caution_query} → action={result.action.value}")
+        failed += 1
+    elif missing:
+        print(f"FAIL  {caution_query} → 缺少要点: {missing}")
+        failed += 1
+    elif numbered < 3 and result.answer_score < 0.6:
+        print(f"WARN  {caution_query} → 编号要点不足 numbered={numbered}")
+        failed += 1
+    else:
+        print(
+            f"OK    {caution_query} → mode={result.answer_mode.value} "
+            f"confidence={result.confidence} numbered={numbered}"
+        )
+
+    print("\n--- 三级策略：无关问题应静默 ---")
+    off_topic = "帮我订一张明天去北京的机票"
+    off_result = orchestrator.run_qa(AgentContext(question=off_topic, scope=scope))
+    if off_result.action.value == "silent" and not off_result.answer.strip():
+        print(f"OK    {off_topic} → silent reason={off_result.silent_reason[:40]}")
+    else:
+        print(f"WARN  {off_topic} → action={off_result.action.value} answer_len={len(off_result.answer)}")
+        failed += 1
+
+    print(f"\n--- bad cases (confidence < 0.5) ---")
+    try:
+        from src.storage.db import ExternalGroupStore
+
+        bad = ExternalGroupStore().list_low_confidence_runs(limit=5)
+        if bad:
+            for row in bad:
+                print(f"  {row.get('question', '')[:40]} conf={row.get('confidence')} action={row.get('action')}")
+        else:
+            print("  （暂无 agent_runs 低分记录）")
+    except Exception as e:
+        print(f"  跳过 bad case 查询: {e}")
+
+    print(f"\n[Agent-Eval] 完成，异常项: {failed}")
+    if failed:
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="香港公司工商注册智能体",
@@ -792,6 +928,30 @@ def main() -> None:
     )
     rag_query.set_defaults(func=cmd_rag_query)
 
+    agent_query = sub.add_parser("agent-query", help="QA Agent Loop 调试（检索+打分+纠错）")
+    agent_query.add_argument("query", help="查询问题")
+    agent_query.add_argument(
+        "--scope",
+        choices=["hk", "cn", "all"],
+        default="",
+        help="检索范围（默认 RAG_SCOPE）",
+    )
+    agent_query.set_defaults(func=cmd_agent_query)
+
+    agent_eval = sub.add_parser("agent-eval", help="Agent 端到端 golden 回归")
+    agent_eval.add_argument(
+        "--scope",
+        choices=["hk", "cn", "all"],
+        default="",
+        help="检索范围（默认 RAG_SCOPE）",
+    )
+    agent_eval.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="禁用 LLM judge，仅用规则分",
+    )
+    agent_eval.set_defaults(func=cmd_agent_eval)
+
     # 兼容直接 python main.py [--step ...] 用法
     parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), dest="_step")
     parser.add_argument("--chat-id", default="mock_chat_001", dest="_chat_id")
@@ -820,6 +980,10 @@ def main() -> None:
         cmd_rag_status(args)
     elif args.command == "rag-query":
         cmd_rag_query(args)
+    elif args.command == "agent-query":
+        cmd_agent_query(args)
+    elif args.command == "agent-eval":
+        cmd_agent_eval(args)
     elif args._step or args._full or len(sys.argv) == 1:
         # 默认 run
         run_args = argparse.Namespace(

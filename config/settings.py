@@ -118,6 +118,23 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""
     qdrant_collection: str = "finance_knowledge"
 
+    # QA Agent Loop（检索/回答打分 + 自我纠错）
+    agent_max_retries: int = 2
+    agent_retrieval_threshold: float = 0.55
+    agent_retrieval_llm_threshold: float = 0.45
+    agent_answer_faithfulness_threshold: float = 0.7
+    agent_answer_completeness_threshold: float = 0.6
+    agent_answer_llm_threshold: float = 0.65
+    agent_abstain_on_low_confidence: bool = True
+    agent_escalate_to_human: bool = False
+    agent_enable_llm_judge: bool = True
+    agent_llm_judge_always: bool = False
+    agent_log_runs: bool = True
+    agent_silent_on_no_answer: bool = True
+    agent_contextual_fallback: bool = True
+    agent_context_history_limit: int = 10
+    agent_abstain_message_to_customer: bool = False
+
     def rag_primary_source_list(self) -> list[str]:
         return [p.strip() for p in (self.rag_primary_sources or "").split(",") if p.strip()]
 

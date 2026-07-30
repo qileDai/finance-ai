@@ -176,20 +176,75 @@ class GroupStateMachine:
             except Exception as e:
                 logger.warning("群 %s 自动发清单失败: %s", roomid, e)
 
-    def _generate_ai_answer(self, combined: str) -> str:
-        context = ""
-        if settings.rag_enabled:
-            try:
-                from src.rag.hybrid_retriever import HybridRetriever
-                from src.rag.prompt import format_hits_for_prompt
+    def _save_agent_run(self, roomid: str, combined: str, result) -> None:
+        from config.settings import settings
+        import json
 
-                hits = HybridRetriever().retrieve(
-                    combined, top_k=settings.rag_top_k, scope="hk",
-                )
-                context = format_hits_for_prompt(hits)
-            except Exception as e:
-                logger.warning("RAG 检索失败，回退纯 LLM: %s", e)
-        return self.llm.answer_material_question(combined, context=context)
+        if not settings.agent_log_runs or not roomid:
+            return
+        trace_data = [
+            {"step": t.step, "attempt": t.attempt, "data": t.data}
+            for t in result.trace
+        ]
+        self.store.insert_agent_run(
+            run_id=result.run_id,
+            roomid=roomid,
+            question=combined,
+            final_answer=result.answer,
+            retrieval_score=result.retrieval_score,
+            answer_score=result.answer_score,
+            confidence=result.confidence,
+            action=result.action.value,
+            retries=result.retries,
+            trace_json=json.dumps(trace_data, ensure_ascii=False),
+        )
+
+    def _build_agent_context(self, combined: str, roomid: str):
+        from config.settings import settings
+        from src.agent.models import AgentContext
+
+        history: list[str] = []
+        group_meta: dict[str, str] = {}
+        if roomid and not roomid.startswith("kf:"):
+            limit = settings.agent_context_history_limit
+            history = self.store.get_recent_messages(roomid, limit=limit)
+            group = self.store.get_group(roomid) or {}
+            if group.get("name"):
+                group_meta["name"] = str(group["name"])
+            if group.get("status"):
+                group_meta["status"] = str(group["status"])
+        return AgentContext(
+            question=combined,
+            roomid=roomid,
+            scope="hk",
+            history=history,
+            group_meta=group_meta,
+        )
+
+    def _generate_ai_answer(self, combined: str, *, roomid: str = "") -> tuple[str, object | None]:
+        from config.settings import settings
+        from src.agent.models import AgentAction
+        from src.agent.orchestrator import TaskOrchestrator
+
+        if not settings.rag_enabled:
+            if settings.agent_silent_on_no_answer:
+                return "", None
+            return self.llm.answer_material_question(combined), None
+
+        try:
+            orchestrator = TaskOrchestrator()
+            ctx = self._build_agent_context(combined, roomid)
+            result = orchestrator.run_qa(ctx)
+            self._save_agent_run(roomid, combined, result)
+            if result.action == AgentAction.HUMAN and roomid:
+                try:
+                    self._transfer_human(roomid, "")
+                except Exception:
+                    pass
+            return result.answer, result
+        except Exception as e:
+            logger.warning("QA Agent 失败，静默跳过: %s", e)
+            return "", None
 
     def handle_kf_incoming_text(
         self, external_userid: str, msgid: str, content: str,
@@ -225,10 +280,23 @@ class GroupStateMachine:
         combined = "\n".join(batch.texts)
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         try:
-            answer = self._generate_ai_answer(combined)
+            answer, qa_result = self._generate_ai_answer(combined, roomid=key)
+            from src.agent.models import AgentAction
+
+            if qa_result and qa_result.action == AgentAction.SILENT:
+                logger.info("kf 客户 %s 问题静默跳过，待人工: %s", external_userid, combined[:80])
+                return
+            if not (answer or "").strip():
+                logger.info("kf 客户 %s 无回答，跳过发送", external_userid)
+                return
             reply = f"【AI 助手】{answer}"
             self.external.send_kf_text(external_userid, reply)
-            self.store.insert_ai_reply(key, trigger_msgid, reply, model=settings.openai_model)
+            self.store.insert_ai_reply(
+                key, trigger_msgid, reply,
+                model=settings.openai_model,
+                run_id=qa_result.run_id if qa_result else "",
+                confidence=qa_result.confidence if qa_result else 0.0,
+            )
         except Exception as e:
             logger.exception("kf 客户 %s AI 回复失败: %s", external_userid, e)
         finally:
@@ -350,7 +418,15 @@ class GroupStateMachine:
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         owner = self._owner(roomid)
         try:
-            answer = self._generate_ai_answer(combined)
+            answer, qa_result = self._generate_ai_answer(combined, roomid=roomid)
+            from src.agent.models import AgentAction
+
+            if qa_result and qa_result.action == AgentAction.SILENT:
+                logger.info("群 %s 问题静默跳过，待人工: %s", roomid, combined[:80])
+                return
+            if not (answer or "").strip():
+                logger.info("群 %s 无回答，跳过发送", roomid)
+                return
             reply = f"【AI 助手】{answer}"
             self.external.send_group_text(
                 roomid,
@@ -358,7 +434,12 @@ class GroupStateMachine:
                 sender_userid=owner,
                 to_external_userid=batch.from_id if batch.from_id.startswith("wm") else None,
             )
-            self.store.insert_ai_reply(roomid, trigger_msgid, reply, model=settings.openai_model)
+            self.store.insert_ai_reply(
+                roomid, trigger_msgid, reply,
+                model=settings.openai_model,
+                run_id=qa_result.run_id if qa_result else "",
+                confidence=qa_result.confidence if qa_result else 0.0,
+            )
             self.store.set_group_status(roomid, GROUP_STATUS_QA)
         except Exception as e:
             logger.exception("群 %s AI 回复失败: %s", roomid, e)

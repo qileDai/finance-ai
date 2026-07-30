@@ -107,6 +107,23 @@ class ExternalGroupStore:
 
                 CREATE INDEX IF NOT EXISTS idx_group_materials_roomid
                     ON group_materials(roomid);
+
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY,
+                    roomid TEXT NOT NULL DEFAULT '',
+                    question TEXT NOT NULL DEFAULT '',
+                    final_answer TEXT NOT NULL DEFAULT '',
+                    retrieval_score REAL NOT NULL DEFAULT 0,
+                    answer_score REAL NOT NULL DEFAULT 0,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    action TEXT NOT NULL DEFAULT 'reply',
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    trace_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_roomid
+                    ON agent_runs(roomid);
                 """
             )
             self._migrate_columns(conn)
@@ -122,6 +139,14 @@ class ExternalGroupStore:
         for col, typedef in migrations.items():
             if col not in cols:
                 conn.execute(f"ALTER TABLE external_groups ADD COLUMN {col} {typedef}")
+
+        ai_cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_replies)")}
+        for col, typedef in {
+            "run_id": "TEXT NOT NULL DEFAULT ''",
+            "confidence": "REAL NOT NULL DEFAULT 0",
+        }.items():
+            if col not in ai_cols:
+                conn.execute(f"ALTER TABLE ai_replies ADD COLUMN {col} {typedef}")
 
     def upsert_group(
         self,
@@ -237,21 +262,100 @@ class ExternalGroupStore:
                 (msgid,),
             )
 
+    def get_recent_messages(self, roomid: str, *, limit: int = 10) -> list[str]:
+        """取群最近消息与 AI 回复，供上下文兜底。"""
+        with self._conn() as conn:
+            inbox_rows = conn.execute(
+                """
+                SELECT content FROM message_inbox
+                WHERE roomid = ? AND msgtype = 'text' AND content != ''
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (roomid, limit),
+            ).fetchall()
+            reply_rows = conn.execute(
+                """
+                SELECT reply_text FROM ai_replies
+                WHERE roomid = ? AND reply_text != ''
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (roomid, max(limit // 2, 3)),
+            ).fetchall()
+
+        messages: list[str] = []
+        for row in reversed(inbox_rows):
+            text = str(row["content"]).strip()
+            if text and text not in messages:
+                messages.append(text)
+        for row in reversed(reply_rows):
+            text = str(row["reply_text"]).strip()
+            if text and text not in messages:
+                messages.append(text)
+        return messages[-limit:]
+
     def insert_ai_reply(
         self,
         roomid: str,
         trigger_msgid: str,
         reply_text: str,
         model: str = "",
+        *,
+        run_id: str = "",
+        confidence: float = 0.0,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO ai_replies (roomid, trigger_msgid, reply_text, model, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO ai_replies
+                    (roomid, trigger_msgid, reply_text, model, run_id, confidence, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (roomid, trigger_msgid, reply_text, model, _utc_now()),
+                (roomid, trigger_msgid, reply_text, model, run_id, confidence, _utc_now()),
             )
+
+    def insert_agent_run(
+        self,
+        run_id: str,
+        roomid: str,
+        question: str,
+        final_answer: str,
+        retrieval_score: float,
+        answer_score: float,
+        confidence: float,
+        action: str,
+        retries: int,
+        trace_json: str,
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs (
+                    id, roomid, question, final_answer,
+                    retrieval_score, answer_score, confidence,
+                    action, retries, trace_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id, roomid, question, final_answer,
+                    retrieval_score, answer_score, confidence,
+                    action, retries, trace_json, _utc_now(),
+                ),
+            )
+
+    def list_low_confidence_runs(self, *, limit: int = 20, threshold: float = 0.5) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_runs
+                WHERE confidence < ? OR action != 'reply'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (threshold, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_archive_seq(self) -> int:
         with self._conn() as conn:

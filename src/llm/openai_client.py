@@ -35,6 +35,141 @@ class LLMClient:
         )
         return response.choices[0].message.content or ""
 
+    def chat_json(self, system: str, user: str, temperature: float = 0.0) -> dict:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content or "{}"
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("LLM JSON 解析失败: %s", raw[:200])
+            return {}
+
+    def generate_answer(self, question: str, context: str) -> str:
+        system = (
+            "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"
+            "用简洁专业的中文回答客户问题。"
+            "请优先依据「检索片段」作答，片段未提及的内容不要编造。"
+            "若片段中有编号列表或注意事项，请完整保留要点。"
+        )
+        if re.search(r"注意|要注意|注意事项", question):
+            system += (
+                "客户询问注意事项，请优先完整列出检索片段中的「注意事项」条目"
+                "（含编号列表），不要只回答话术模板或资料清单。"
+            )
+        user = f"检索片段:\n{context.strip()}\n\n客户问题: {question}" if context.strip() else question
+        return self.chat(system, user)
+
+    def regenerate_answer(
+        self, question: str, context: str, prev_answer: str, feedback: str,
+    ) -> str:
+        system = (
+            "你是香港公司注册顾问助手。上次回答质量不足，请依据检索片段重写。"
+            "不要编造，完整覆盖注意事项与编号要点。"
+        )
+        user = (
+            f"检索片段:\n{context.strip()}\n\n"
+            f"客户问题: {question}\n\n"
+            f"上次回答:\n{prev_answer}\n\n"
+            f"改进建议: {feedback}\n\n"
+            "请输出修正后的完整回答。"
+        )
+        return self.chat(system, user, temperature=0.2)
+
+    def judge_retrieval_relevance(
+        self, question: str, hits: list,
+    ) -> list[float]:
+        from src.rag.prompt import format_hits_for_prompt
+
+        context = format_hits_for_prompt(hits)
+        system = (
+            "你是检索质量评估员。对每条检索片段与问题的相关程度打 1-5 分。"
+            '输出 JSON: {"scores": [分数列表，与片段顺序一致]}'
+        )
+        user = f"问题: {question}\n\n检索片段:\n{context}"
+        data = self.chat_json(system, user)
+        scores = data.get("scores", [])
+        if isinstance(scores, list) and scores:
+            return [float(s) for s in scores[: len(hits)]]
+        return []
+
+    def rewrite_query(self, question: str, hits: list, feedback: str) -> str:
+        from src.rag.prompt import format_hits_for_prompt
+
+        context = format_hits_for_prompt(hits[:3]) if hits else "（无命中）"
+        system = (
+            "你是检索查询优化助手。根据原问题和已有检索结果，输出更适合知识库检索的查询。"
+            'JSON 格式: {"expanded_query": "改写后的查询"}'
+        )
+        user = (
+            f"原问题: {question}\n"
+            f"检索反馈: {feedback}\n"
+            f"已有片段:\n{context}"
+        )
+        data = self.chat_json(system, user)
+        return str(data.get("expanded_query") or question).strip()
+
+    def generate_contextual_answer(
+        self,
+        question: str,
+        history: list[str] | None = None,
+        group_meta: dict[str, str] | None = None,
+    ) -> dict:
+        """无知识库命中时，结合群上下文用 LLM 兜底。"""
+        system = (
+            "你是香港公司注册顾问助手，仅回答香港公司注册、开户、材料收集相关问题。"
+            "当前无知识库检索片段，可结合对话上下文和通用注册常识简要回答。"
+            "若问题与注册无关、需个案政策确认、或信息不足以准确回答，"
+            '必须返回 can_answer=false。'
+            "不要编造具体银行政策、费用金额、审批时效。"
+            '输出 JSON: {"can_answer": true/false, "answer": "...", "reason": "..."}'
+        )
+        parts: list[str] = [f"客户问题: {question}"]
+        if history:
+            hist_text = "\n".join(f"- {h}" for h in history[-10:])
+            parts.append(f"近期对话:\n{hist_text}")
+        if group_meta:
+            meta = ", ".join(f"{k}={v}" for k, v in group_meta.items() if v)
+            if meta:
+                parts.append(f"群信息: {meta}")
+        data = self.chat_json(system, "\n\n".join(parts))
+        return {
+            "can_answer": bool(data.get("can_answer", False)),
+            "answer": str(data.get("answer") or "").strip(),
+            "reason": str(data.get("reason") or "").strip(),
+        }
+
+    def judge_answer_quality(
+        self, question: str, hits: list, answer: str,
+    ) -> dict:
+        from src.rag.prompt import format_hits_for_prompt
+
+        context = format_hits_for_prompt(hits) if hits else "（无检索片段）"
+        system = (
+            "你是回答质量评估员。评估回答是否忠实于检索片段、是否完整回答问题。"
+            "输出 JSON: "
+            '{"faithfulness":0-1,"completeness":0-1,"grounded":true/false,'
+            '"missing_points":["..."],"feedback":"重写建议"}'
+        )
+        user = (
+            f"问题: {question}\n\n检索片段:\n{context}\n\n回答:\n{answer}"
+        )
+        data = self.chat_json(system, user)
+        return {
+            "faithfulness": float(data.get("faithfulness", 0.5)),
+            "completeness": float(data.get("completeness", 0.5)),
+            "grounded": bool(data.get("grounded", True)),
+            "missing_points": list(data.get("missing_points") or []),
+            "feedback": str(data.get("feedback") or ""),
+        }
+
     def answer_material_question(self, question: str, context: str = "") -> str:
         system = (
             "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"
