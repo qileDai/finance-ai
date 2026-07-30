@@ -1,38 +1,37 @@
 # 知识库目录
 
-将香港公司注册相关的自定义文档放在此目录，供 RAG 检索使用。
+将香港公司注册相关的业务知识放在此目录，供 RAG 检索使用。
+
+## 主知识文件
+
+| 文件 | 说明 |
+|------|------|
+| **`注册.md`** | **唯一主知识源**（由 `ai注册.docx` 转换），含香港/国内各注册步骤话术与注意事项 |
+
+Bot 产品说明（群指令、非 RAG）见 [`docs/product/`](../product/)。
 
 ## 支持格式
 
 - `.md` / `.txt` — 推荐
 - `.pdf`
-- `.docx`
-
-## 建议组织方式
-
-按主题拆分文件，文件名尽量包含关键词，便于 FTS5 关键词检索，例如：
-
-- `注册地址说明.md`
-- `董事股东材料.md`
-- `ICRIS流程与时效.md`
+- `.docx`（默认排除，请维护 `注册.md`）
 
 ## 入库
 
-先启动 Qdrant（见项目文档），再执行：
-
 ```powershell
-python main.py rag-ingest
-```
-
-单文件重建：
-
-```powershell
-python main.py rag-ingest --file docs/knowledge/注册地址说明.md
+python main.py rag-ingest --file docs/knowledge/注册.md --verbose
+python main.py rag-status
 ```
 
 ## 检索调试
 
 ```powershell
-python main.py rag-query "香港公司注册地址可以用 PO Box 吗"
-python main.py rag-query "公司住哪里" --answer
+python main.py rag-query "开户面签要注意什么"
+python main.py rag-query "催资料怎么说" --answer
+python scripts/rag_golden_hk.py
 ```
+
+## 配置
+
+- `RAG_SCOPE=hk` — 外部群默认仅检索香港段落
+- `RAG_PRIMARY_SOURCES=docs/knowledge/注册.md`

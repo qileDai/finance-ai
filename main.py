@@ -133,6 +133,19 @@ def cmd_run(args: argparse.Namespace) -> None:
     check_captcha_deps(args.step if args.step else ("register" if not args.full else None))
 
     agent = RegistrationAgent()
+    roomid = getattr(args, "roomid", "") or ""
+
+    def _apply_company_data(ctx: WorkflowContext, *, for_steps: tuple[str, ...] | None = None) -> None:
+        if roomid:
+            from src.materials.aggregator import load_company_data_from_roomid
+
+            ctx.company_data = load_company_data_from_roomid(roomid)
+            ctx.chat_id = roomid
+            print(f"[数据] 已从群 DB 加载 roomid={roomid}")
+        elif for_steps is None or (args.step and args.step in for_steps):
+            from src.materials.packager import load_mock_data
+
+            ctx.company_data = load_mock_data()
 
     if args.step:
         step_enum = STEP_CHOICES.get(args.step)
@@ -141,18 +154,29 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f"可用: {', '.join(STEP_CHOICES.keys())}")
             sys.exit(1)
 
-        ctx = WorkflowContext(chat_id=args.chat_id)
+        ctx = WorkflowContext(chat_id=roomid or args.chat_id)
         if args.step in ("register", "login", "package", "confirm", "notify", "email"):
-            from src.materials.packager import load_mock_data
-            ctx.company_data = load_mock_data()
+            _apply_company_data(ctx, for_steps=("register", "login", "package", "confirm", "notify", "email"))
 
         ctx = agent.workflow.run_step(step_enum, ctx)
     elif args.full:
-        ctx = agent.run_full_pipeline(args.chat_id)
+        if roomid:
+            from src.materials.aggregator import load_company_data_from_roomid
+
+            company_data = load_company_data_from_roomid(roomid)
+            ctx = agent.run_full_pipeline(roomid, company_data=company_data)
+        else:
+            ctx = agent.run_full_pipeline(args.chat_id)
     else:
         print("\n[默认] 仅运行 ICRIS 账号注册（步骤④，Mock 数据，不提交）")
-        print("使用 --full 运行完整流程，--step <name> 运行指定步骤\n")
-        ctx = agent.run_registration_only()
+        print("使用 --full 运行完整流程，--step <name> 运行指定步骤")
+        print("使用 --roomid <群ID> 从 wework_external.db 加载真实材料\n")
+        ctx = WorkflowContext(chat_id=roomid or args.chat_id)
+        if roomid:
+            _apply_company_data(ctx)
+            ctx = agent.workflow.run_step(StepName.ICRIS_REGISTER, ctx)
+        else:
+            ctx = agent.run_registration_only()
 
     print_result(ctx)
     print("\n[OK] 执行完成")
@@ -414,9 +438,13 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     print(f"[外部群] 存档已配置: {settings.wework_archive_configured}")
     print(f"[外部群] 回调端口: {port}")
     print(f"[外部群] 回调路径: {CALLBACK_PATH}")
-    print(f"[外部群] 表单路径: {FORM_PREFIX}{{token}}")
+    if settings.collect_form_enabled:
+        print(f"[外部群] 材料收集: H5 在线表单")
+        print(f"[外部群] 表单路径: {FORM_PREFIX}{{token}}")
+        print(f"[外部群] 表单公网地址: {settings.collect_form_base_url or '(使用本机 8081)'}")
+    else:
+        print(f"[外部群] 材料收集: 群内粘贴（/填表 发模板，H5 已关闭）")
     print(f"[外部群] 管理后台: {ADMIN_PATH}")
-    print(f"[外部群] 表单公网地址: {settings.collect_form_base_url or '(使用本机 8081)'}")
     print(f"[外部群] 存档轮询间隔: {settings.wework_archive_poll_interval}s")
     print(f"[外部群] 默认群主: {settings.wework_default_group_owner_userid or '(未配置)'}")
 
@@ -451,6 +479,25 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         )
 
     archive.start_polling(router, blocking=False)
+
+    from src.wework.kf_worker import KfSyncWorker
+
+    kf_worker = KfSyncWorker(
+        store=store,
+        external=router.state_machine.external,
+        state_machine=router.state_machine,
+    )
+    if settings.wework_kf_sync_enabled and settings.wework_kf_configured:
+        print(f"[外部群] kf 入站同步: 已启用（间隔 {settings.wework_kf_poll_interval}s）")
+        kf_worker.start_polling(blocking=False)
+    else:
+        print("[外部群] kf 入站同步: 未启用（需 WEWORK_KF_* 且 WEWORK_KF_SYNC_ENABLED=true）")
+
+    if settings.wework_welcome_auto_checklist:
+        print("[外部群] 建群欢迎后自动发清单: 已启用")
+    else:
+        print("[外部群] 建群欢迎后自动发清单: 已关闭（客户需发 /资料）")
+
     web = UnifiedWebServer(router=router, port=port)
     print(f"\n[外部群] 开始监听… 回调 URL: https://<域名>{CALLBACK_PATH}")
     print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
@@ -459,6 +506,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         web.start(blocking=True)
     finally:
         archive.close()
+        kf_worker.stop_polling()
 
 
 def _resolve_mock_from_id(router, roomid: str, from_id: str) -> str:
@@ -553,8 +601,16 @@ def cmd_rag_ingest(args: argparse.Namespace) -> None:
         if not path.is_file():
             print(f"[RAG] 文件不存在: {path}")
             sys.exit(1)
-        changed = pipeline.ingest_file(path)
-        print(f"[RAG] {'已入库' if changed else '跳过（未变更）'}: {path}")
+        detail = pipeline.ingest_file_detail(path, force=getattr(args, "force", False))
+        if detail.changed:
+            print(f"[RAG] 已入库: {detail.source_path}")
+            print(f"  chunks: {detail.chunk_count}, 字符: {detail.char_total}")
+            if detail.region_stats:
+                print(f"  region: {detail.region_stats}")
+            if getattr(args, "verbose", False) and detail.preview:
+                print(f"  预览: {detail.preview}")
+        else:
+            print(f"[RAG] 跳过（未变更或已排除）: {detail.source_path}")
         return
 
     directory = Path(settings.rag_knowledge_dir)
@@ -567,6 +623,37 @@ def cmd_rag_ingest(args: argparse.Namespace) -> None:
         for err in result.errors:
             print(f"  - {err}")
         sys.exit(1)
+
+
+def cmd_rag_status(_args: argparse.Namespace) -> None:
+    try:
+        from src.rag.sqlite_index import RagSqliteIndex
+    except ImportError as e:
+        print(f"[RAG] 依赖缺失: {e}")
+        sys.exit(1)
+    from config.settings import settings
+
+    idx = RagSqliteIndex()
+    docs = idx.document_chunk_stats()
+    regions = idx.region_stats()
+    print("[RAG] 知识库状态")
+    print(f"  DB: {idx.db_path}")
+    print(f"  scope 默认: {settings.rag_scope}")
+    print(f"  主文档: {settings.rag_primary_sources}")
+    print(f"  top_k: {settings.rag_top_k}")
+    if not docs:
+        print("  （尚无入库文档，请执行 rag-ingest）")
+        return
+    print("\n  文档:")
+    for row in docs:
+        print(
+            f"    - {row['source_path']} | chunks={row['chunk_count']} "
+            f"| chars={row['char_total'] or 0} | {row['ingested_at']}"
+        )
+    if regions:
+        print("\n  region 分布:")
+        for region, count in sorted(regions.items()):
+            print(f"    - {region}: {count}")
 
 
 def cmd_rag_query(args: argparse.Namespace) -> None:
@@ -586,18 +673,32 @@ def cmd_rag_query(args: argparse.Namespace) -> None:
         print("[RAG] 请执行: pip install -r requirements.txt")
         sys.exit(1)
 
+    scope = getattr(args, "scope", "") or settings.rag_scope
     retriever = HybridRetriever()
-    hits = retriever.retrieve(query, top_k=settings.rag_top_k)
+    hits = retriever.retrieve(query, top_k=settings.rag_top_k, scope=scope)
     if not hits:
-        print("[RAG] 未命中任何片段")
+        print(f"[RAG] 未命中任何片段 (scope={scope})")
     else:
-        print(f"[RAG] 命中 {len(hits)} 条:\n")
+        print(f"[RAG] 命中 {len(hits)} 条 (scope={scope}):\n")
+        show_full = getattr(args, "full", False)
+        preview_limit = 600
         for i, hit in enumerate(hits, start=1):
             channels = ", ".join(f"{k}={v:.3f}" for k, v in hit.channels.items())
-            print(f"--- #{i} score={hit.score:.4f} ({channels}) ---")
+            region = f" region={hit.region}" if hit.region else ""
+            step = f" step={hit.step_title[:40]}" if hit.step_title else ""
+            kind = f" kind={hit.chunk_kind}" if hit.chunk_kind else ""
+            print(
+                f"--- #{i} score={hit.score:.4f} len={len(hit.text)} chars"
+                f" ({channels}){region}{step}{kind} ---"
+            )
             print(f"来源: {hit.source_path}")
-            preview = hit.text[:300] + ("…" if len(hit.text) > 300 else "")
-            print(preview)
+            if show_full:
+                print(hit.text)
+            else:
+                preview = hit.text[:preview_limit]
+                if len(hit.text) > preview_limit:
+                    preview += "…"
+                print(preview)
             print()
 
     if args.answer:
@@ -618,6 +719,11 @@ def main() -> None:
     run_parser = sub.add_parser("run", help="运行智能体（默认命令）")
     run_parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), help="仅运行指定步骤")
     run_parser.add_argument("--chat-id", default="mock_chat_001", help="企微群 ID")
+    run_parser.add_argument(
+        "--roomid",
+        default="",
+        help="外部客户群 roomid；指定时从 wework_external.db 加载真实材料（用于 register/package 等）",
+    )
     run_parser.add_argument("--full", action="store_true", help="运行完整流程")
     run_parser.set_defaults(func=cmd_run)
 
@@ -667,16 +773,29 @@ def main() -> None:
 
     rag_ingest = sub.add_parser("rag-ingest", help="入库 docs/knowledge/ 知识文档到 RAG")
     rag_ingest.add_argument("--file", default="", help="仅入库指定文件")
+    rag_ingest.add_argument("--verbose", action="store_true", help="输出首块预览")
+    rag_ingest.add_argument("--force", action="store_true", help="强制重新入库（忽略 content hash）")
     rag_ingest.set_defaults(func=cmd_rag_ingest)
+
+    rag_status = sub.add_parser("rag-status", help="查看 RAG 知识库入库状态")
+    rag_status.set_defaults(func=cmd_rag_status)
 
     rag_query = sub.add_parser("rag-query", help="RAG 检索调试（可选 --answer 走 LLM）")
     rag_query.add_argument("query", help="查询问题")
     rag_query.add_argument("--answer", action="store_true", help="检索后调用 LLM 生成回答")
+    rag_query.add_argument("--full", action="store_true", help="打印完整 chunk 文本")
+    rag_query.add_argument(
+        "--scope",
+        choices=["hk", "cn", "all"],
+        default="",
+        help="检索范围（默认 RAG_SCOPE）",
+    )
     rag_query.set_defaults(func=cmd_rag_query)
 
     # 兼容直接 python main.py [--step ...] 用法
     parser.add_argument("--step", "-s", choices=list(STEP_CHOICES.keys()), dest="_step")
     parser.add_argument("--chat-id", default="mock_chat_001", dest="_chat_id")
+    parser.add_argument("--roomid", default="", dest="_roomid", help="外部群 roomid，加载 DB 材料")
     parser.add_argument("--full", action="store_true", dest="_full")
 
     args = parser.parse_args()
@@ -697,6 +816,8 @@ def main() -> None:
         cmd_wework_external_mock(args)
     elif args.command == "rag-ingest":
         cmd_rag_ingest(args)
+    elif args.command == "rag-status":
+        cmd_rag_status(args)
     elif args.command == "rag-query":
         cmd_rag_query(args)
     elif args._step or args._full or len(sys.argv) == 1:
@@ -704,6 +825,7 @@ def main() -> None:
         run_args = argparse.Namespace(
             step=args._step,
             chat_id=args._chat_id,
+            roomid=getattr(args, "_roomid", "") or "",
             full=args._full,
         )
         cmd_run(run_args)

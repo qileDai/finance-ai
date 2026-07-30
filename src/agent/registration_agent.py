@@ -18,8 +18,14 @@ class RegistrationAgent:
     def __init__(self) -> None:
         self.workflow = RegistrationWorkflow()
 
-    def run_full_pipeline(self, chat_id: str = "mock_chat_001") -> WorkflowContext:
+    def run_full_pipeline(
+        self,
+        chat_id: str = "mock_chat_001",
+        company_data: dict | None = None,
+    ) -> WorkflowContext:
         ctx = WorkflowContext(chat_id=chat_id)
+        if company_data:
+            ctx.company_data = company_data
         return self.workflow.run_all(ctx)
 
     def run_registration_only(self) -> WorkflowContext:

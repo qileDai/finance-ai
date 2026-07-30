@@ -35,16 +35,21 @@ class Settings(BaseSettings):
     wework_archive_poll_interval: int = 3
     wework_archive_sdk_path: str = ""
     wework_default_group_owner_userid: str = ""
+    wework_welcome_advisor_phone: str = ""  # 建群欢迎语中的服务老师电话，空则显示【待补充】
+    wework_welcome_auto_checklist: bool = True  # 建群欢迎语后自动发送注册资料清单
     wework_external_mode: str = "auto"  # auto | mock | live
     # 外部群消息发送：mass=企业群发(需群主确认) | kf=微信客服私聊(自动) | auto=优先 kf/webhook
     wework_external_send_mode: str = "auto"
     # 微信客服（kf 模式必填，Secret 在管理后台「微信客服」获取，非应用 Secret）
     wework_kf_secret: str = ""
     wework_kf_open_kfid: str = ""
+    wework_kf_sync_enabled: bool = True  # 轮询 sync_msg 接收客服私聊并入智能回复
+    wework_kf_poll_interval: int = 3
     # 可选：群 Webhook（仅内部群支持，外部客户群不可用）
     wework_external_group_webhook_url: str = ""
 
     # H5 材料收集表单
+    collect_form_enabled: bool = False  # True 时才暴露 H5 链接与 /collect/form 路由
     collect_form_base_url: str = ""
     collect_form_jwt_secret: str = ""
 
@@ -103,11 +108,21 @@ class Settings(BaseSettings):
     rag_db_path: str = "data/rag.db"
     rag_knowledge_dir: str = "docs/knowledge"
     rag_embedding_model: str = "text-embedding-3-small"
-    rag_top_k: int = 6
+    rag_top_k: int = 8
     rag_rrf_k: int = 60
+    rag_scope: str = "hk"  # hk | cn | all
+    rag_primary_sources: str = "docs/knowledge/注册.md"
+    rag_primary_boost: float = 1.5
+    rag_exclude_patterns: str = "~$*,*.docx"
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: str = ""
     qdrant_collection: str = "finance_knowledge"
+
+    def rag_primary_source_list(self) -> list[str]:
+        return [p.strip() for p in (self.rag_primary_sources or "").split(",") if p.strip()]
+
+    def rag_exclude_pattern_list(self) -> list[str]:
+        return [p.strip() for p in (self.rag_exclude_patterns or "").split(",") if p.strip()]
 
     @property
     def wework_configured(self) -> bool:

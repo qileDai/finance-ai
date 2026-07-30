@@ -284,6 +284,51 @@ class WeWorkExternalClient:
             logger.info("已通过 appchat 即时发送到群 %s", chat_id)
         return data
 
+    def send_kf_text(self, external_userid: str, content: str) -> dict[str, Any]:
+        """向微信客服会话发送文本（客户私聊侧可见）"""
+        if self._mock_mode:
+            logger.info("[Mock 客服] → %s: %s", external_userid, content[:200])
+            self._mock_messages.append(
+                {"chat_id": f"kf:{external_userid}", "to": external_userid, "content": content}
+            )
+            return {"errcode": 0, "errmsg": "ok (mock)"}
+        return self._send_via_kf(external_userid, content)
+
+    def sync_kf_messages(
+        self,
+        *,
+        cursor: str = "",
+        token: str = "",
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """拉取微信客服消息（sync_msg）"""
+        if self._mock_mode:
+            return {
+                "errcode": 0,
+                "errmsg": "ok (mock)",
+                "msg_list": [],
+                "next_cursor": cursor,
+                "has_more": 0,
+            }
+        if not self.kf_open_kfid or not self.kf_secret:
+            raise RuntimeError("未配置 WEWORK_KF_OPEN_KFID / WEWORK_KF_SECRET")
+
+        access_token = self._get_kf_access_token()
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token={access_token}"
+        payload: dict[str, Any] = {
+            "cursor": cursor or "",
+            "token": token or "",
+            "limit": limit,
+            "voice_format": 0,
+            "open_kfid": self.kf_open_kfid,
+        }
+        resp = httpx.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errcode", 0) != 0:
+            raise RuntimeError(f"kf/sync_msg 失败: {data}")
+        return data
+
     def send_group_text(
         self,
         chat_id: str,

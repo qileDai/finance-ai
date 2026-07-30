@@ -100,3 +100,17 @@ def collect_attachment_paths(materials: dict[str, dict[str, Any]]) -> list[str]:
 
 def is_ready_for_confirm(materials: dict[str, dict[str, Any]]) -> bool:
     return progress_summary(materials)["complete"]
+
+
+def load_company_data_from_roomid(roomid: str) -> dict[str, Any]:
+    """从外部群 SQLite 加载材料并聚合为 company_data（供 CLI --roomid 使用）"""
+    from src.storage.db import ExternalGroupStore
+
+    store = ExternalGroupStore()
+    group = store.get_group(roomid)
+    if not group:
+        raise ValueError(f"群 {roomid} 不存在于 wework_external.db")
+    materials = store.get_materials(roomid)
+    if not materials:
+        raise ValueError(f"群 {roomid} 尚无材料记录")
+    return aggregate_company_data(materials)

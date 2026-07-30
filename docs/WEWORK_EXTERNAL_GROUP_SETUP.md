@@ -2,15 +2,18 @@
 
 本文说明如何在**外部客户群**中启用 Phase 1 能力：建群自动欢迎、材料清单推送、AI 文本问答、转人工。
 
+**全流程验证命令见：** [EXTERNAL_GROUP_VERIFICATION.md](EXTERNAL_GROUP_VERIFICATION.md)
+
 ---
 
 ## 一、能力说明
 
 | 功能 | 触发方式 |
 |------|----------|
-| 欢迎语 + 材料清单 | 企业成员创建客户群 → 企微回调 `change_external_chat` |
+| 欢迎语 | 企业成员创建客户群 → 发送赢态财务集团邓老师问候语（含联系电话） |
+| 注册资料清单 | 建群欢迎后**自动发送**（`WEWORK_WELCOME_AUTO_CHECKLIST=true`）；也可客户发 `/资料` |
 | AI 解答材料问题 | 客户在群内发文字 → **会话内容存档**拉取（live）或 Mock 注入 |
-| 重发清单 | 客户发送 `/资料` |
+| 客服私聊 AI | 客户在微信客服会话发消息 → **kf/sync_msg** 轮询 → 自动私聊回复 |
 | 转人工 | 客户发送 `转人工` |
 
 **不需要** 将应用发布到企业微信应用市场。
@@ -68,8 +71,11 @@ WEWORK_CORP_ID=wwxxxxxxxx
 WEWORK_CORP_SECRET=xxxxxxxx
 WEWORK_AGENT_ID=1000002
 WEWORK_DEFAULT_GROUP_OWNER_USERID=ZhangSan   # 群主 userid，发群消息用
+WEWORK_WELCOME_ADVISOR_PHONE=13800138000     # 欢迎语服务老师电话，空则显示【待补充】
+WEWORK_WELCOME_AUTO_CHECKLIST=true           # 建群后自动发资料清单
 
-OPENAI_API_KEY=sk-...
+WEWORK_KF_SYNC_ENABLED=true                  # kf 私聊入站智能回复
+WEWORK_KF_POLL_INTERVAL=3
 OPENAI_API_BASE=https://...
 OPENAI_MODEL=gpt-4o-mini
 
@@ -102,7 +108,8 @@ cd D:\projects\finance-ai
 ```
 企业成员创建客户群
     → 企微推送 change_external_chat(create) 到回调 URL
-    → 系统发送欢迎语 + 材料清单
+    → 系统发送赢态财务集团服务老师欢迎语
+    → 若 WEWORK_WELCOME_AUTO_CHECKLIST=true，紧接着自动发送注册资料清单
 客户在群内提问
     → live：存档 worker 拉取文本 → AI 回复发回群
     → mock：CLI 注入消息测试
@@ -115,11 +122,10 @@ cd D:\projects\finance-ai
 1. **启动 bot**（见上一节），确保回调 URL 公网可达
 2. 企业成员打开 **企业微信** → **客户联系** → **创建客户群**
 3. 拉入外部客户（微信联系人）
-4. 约 **30 秒内**，群内应收到：
-   - 欢迎说明
-   - 《香港公司注册材料清单》
-5. 客户在群内输入问题，例如：「董事一定要香港居民吗？」
-6. **live 模式**下，数秒内收到 `【AI 助手】` 开头的回复
+4. 约 **30 秒内**，群内应收到 **赢态财务集团邓老师** 欢迎问候（含联系电话），以及注册资料清单（默认自动发送）
+5. 若关闭了自动清单，客户可发送 **`/资料`** 获取材料清单；**`/填表`** 获取填写模板
+6. 客户在群内输入问题，例如：「董事一定要香港居民吗？」
+7. **live 模式**下，数秒内收到 `【AI 助手】` 开头的回复（kf 模式下回复在客服私聊，不在群里）
 
 ### 获取 roomid（群 ID）
 
@@ -221,7 +227,8 @@ WEWORK_DEFAULT_GROUP_OWNER_USERID=YingTaiJiTuanDengXianSheng
 ```
 
 5. 客户需先进入该客服（扫码或从群名片），之后对该群 `--roomid` 的操作会自动私聊该群外部成员
-6. Mock 测试会自动选用群内外部成员 `wm` ID：
+6. **kf 双向**：bot 启动后会轮询 `kf/sync_msg`（`WEWORK_KF_SYNC_ENABLED=true`），客户在客服私聊里提问也会收到 `【AI 助手】` 回复
+7. Mock 测试会自动选用群内外部成员 `wm` ID：
 
 ```powershell
 python main.py wework-external-mock --roomid "wrXXXX" --create-group --force
@@ -263,6 +270,7 @@ python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册
 | `python main.py wework-external-mock --roomid X --create-group` | 模拟建群 |
 | `python main.py wework-external-mock --roomid X --create-group --force` | 强制重发欢迎语 |
 | `python main.py wework-external-mock --roomid X --text "问题"` | 模拟客户消息 |
+| `python main.py run --step register --roomid wrXXX` | 从群 DB 加载材料跑 ICRIS 注册 |
 
 ---
 
@@ -280,21 +288,26 @@ python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册
 
 | 功能 | 用法 |
 |------|------|
-| H5 表单 | 欢迎语链接或 `/填表` → `http://<host>:8081/collect/form/<token>` |
+| 群内填表 | `/填表` 或 `/模板` → 发送粘贴模板，客户填好后粘贴到本群 |
 | 材料进度 | 群内 `/进度` 或 Mock 注入 |
 | 文件上传 | 群内发图片/PDF（live 存档）或 `--file path` |
 | 材料确认 | 必填齐全后发摘要，客户回复「确认」 |
 | 管理后台 | `http://127.0.0.1:8081/admin/groups` |
+| H5 表单（可选） | 设置 `COLLECT_FORM_ENABLED=true` 后，`/填表` 改为发在线链接 |
 
 ### Mock 验证全流程
 
+完整分环节命令见 [EXTERNAL_GROUP_VERIFICATION.md](EXTERNAL_GROUP_VERIFICATION.md)。快速脚本：
+
 ```powershell
-python main.py wework-external-mock --roomid wrTEST001 --create-group
+python main.py wework-external-mock --roomid wrTEST001 --create-group --force
+python main.py wework-external-mock --roomid wrTEST001 --text "/填表"
 python main.py wework-external-mock --roomid wrTEST001 --text "公司英文名=ABC Limited
 注册地址=香港中环
 联络邮箱=test@example.com
 董事资料=CHAN Tai Man"
 python main.py wework-external-mock --roomid wrTEST001 --file D:\path\to\id.jpg
+python main.py wework-external-mock --roomid wrTEST001 --text "/进度"
 python main.py wework-external-mock --roomid wrTEST001 --text "确认"
 ```
 
@@ -307,7 +320,13 @@ python main.py wework-external-mock --roomid wrTEST001 --text "确认"
 ### 配置
 
 ```env
-COLLECT_FORM_BASE_URL=https://your-domain.com
+# 默认关闭 H5，使用群内粘贴收集
+COLLECT_FORM_ENABLED=false
+
+# 若需启用 H5 在线表单：
+# COLLECT_FORM_ENABLED=true
+# COLLECT_FORM_BASE_URL=https://your-domain.com
+
 WEWORK_DEFAULT_GROUP_OWNER_USERID=群主userid
 ```
 
@@ -317,7 +336,7 @@ WEWORK_DEFAULT_GROUP_OWNER_USERID=群主userid
 
 开通客户联系、会话存档、API 权限
 存档拉取 + 解密 + 文本消息入库
-客户群创建事件 → 欢迎语 + 清单
+客户群创建事件 → 赢态欢迎语（/资料、/填表 按需获取清单与模板）
 AI 文本问答（复用 LLMClient）
 客户群 API 发消息回群
 基础状态机：WELCOMED / QA / HUMAN

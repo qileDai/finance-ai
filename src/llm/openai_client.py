@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from openai import OpenAI
@@ -44,6 +45,11 @@ class LLMClient:
                 "请优先依据下方「检索片段」作答；片段中未提及的内容不要编造。"
                 "若检索片段不足以回答，请明确说明并建议客户联系专员。"
             )
+            if re.search(r"注意|要注意|注意事项", question):
+                system += (
+                    "若客户询问注意事项，请优先完整列出检索片段中的「注意事项」条目"
+                    "（含编号列表），不要只回答话术模板或资料清单部分。"
+                )
             user = f"检索片段:\n{context.strip()}\n\n客户问题: {question}"
         else:
             system += "若问题超出材料范围，建议客户联系专员。"

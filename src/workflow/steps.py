@@ -90,7 +90,8 @@ class RegistrationWorkflow:
     def step_collect_materials(self, ctx: WorkflowContext) -> WorkflowContext:
         """② 搜集材料"""
         ctx.log("=== 步骤② 搜集客户材料 ===")
-        ctx.company_data = load_mock_data()
+        if not ctx.company_data:
+            ctx.company_data = load_mock_data()
         result = collect_materials_from_dict(ctx.company_data)
         if result["complete"]:
             ctx.log("材料已齐全")

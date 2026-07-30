@@ -14,6 +14,10 @@ class TextChunk:
     source_path: str
     title: str
     token_count: int = 0
+    region: str = ""
+    step_title: str = ""
+    step_id: str = ""
+    chunk_kind: str = "script"
 
 
 @dataclass
@@ -24,3 +28,7 @@ class RetrievedChunk:
     title: str
     score: float
     channels: dict[str, float] = field(default_factory=dict)
+    region: str = ""
+    step_title: str = ""
+    step_id: str = ""
+    chunk_kind: str = "script"

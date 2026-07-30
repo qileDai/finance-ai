@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -59,6 +61,9 @@ class RagSqliteIndex:
                     token_count INTEGER NOT NULL DEFAULT 0,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     qdrant_point_id TEXT NOT NULL,
+                    region TEXT NOT NULL DEFAULT '',
+                    step_title TEXT NOT NULL DEFAULT '',
+                    step_id TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE
                 );
 
@@ -71,6 +76,21 @@ class RagSqliteIndex:
                 );
                 """
             )
+            self._migrate_columns(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_region ON chunks(region)"
+            )
+
+    def _migrate_columns(self, conn: sqlite3.Connection) -> None:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(chunks)")}
+        for col, typedef in {
+            "region": "TEXT NOT NULL DEFAULT ''",
+            "step_title": "TEXT NOT NULL DEFAULT ''",
+            "step_id": "TEXT NOT NULL DEFAULT ''",
+            "chunk_kind": "TEXT NOT NULL DEFAULT 'script'",
+        }.items():
+            if col not in cols:
+                conn.execute(f"ALTER TABLE chunks ADD COLUMN {col} {typedef}")
 
     def get_document_by_path(self, source_path: str) -> sqlite3.Row | None:
         with self._conn() as conn:
@@ -117,12 +137,19 @@ class RagSqliteIndex:
     def insert_chunks(self, chunks: list[TextChunk]) -> None:
         with self._conn() as conn:
             for chunk in chunks:
+                meta = {
+                    "region": chunk.region,
+                    "step_title": chunk.step_title,
+                    "step_id": chunk.step_id,
+                    "chunk_kind": chunk.chunk_kind,
+                }
                 conn.execute(
                     """
                     INSERT INTO chunks (
                         id, doc_id, chunk_index, text, token_count,
-                        metadata_json, qdrant_point_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        metadata_json, qdrant_point_id, region, step_title, step_id,
+                        chunk_kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -130,8 +157,12 @@ class RagSqliteIndex:
                         chunk.chunk_index,
                         chunk.text,
                         chunk.token_count,
-                        "{}",
+                        json.dumps(meta, ensure_ascii=False),
                         chunk.chunk_id,
+                        chunk.region,
+                        chunk.step_title,
+                        chunk.step_id,
+                        chunk.chunk_kind or "script",
                     ),
                 )
                 conn.execute(
@@ -146,7 +177,9 @@ class RagSqliteIndex:
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
-                SELECT c.id, c.text, c.chunk_index, d.source_path, d.title
+                SELECT c.id, c.text, c.chunk_index, c.region, c.step_title, c.step_id,
+                       COALESCE(c.chunk_kind, 'script') AS chunk_kind,
+                       d.source_path, d.title
                 FROM chunks c
                 JOIN documents d ON d.id = c.doc_id
                 WHERE c.id IN ({placeholders})
@@ -155,6 +188,25 @@ class RagSqliteIndex:
             ).fetchall()
         return {str(r["id"]): r for r in rows}
 
+    def get_chunks_by_step_ids(self, step_ids: list[str]) -> list[sqlite3.Row]:
+        if not step_ids:
+            return []
+        placeholders = ",".join("?" * len(step_ids))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT c.id, c.text, c.chunk_index, c.region, c.step_title, c.step_id,
+                       COALESCE(c.chunk_kind, 'script') AS chunk_kind,
+                       d.source_path, d.title
+                FROM chunks c
+                JOIN documents d ON d.id = c.doc_id
+                WHERE c.step_id IN ({placeholders})
+                ORDER BY c.step_id, c.chunk_index
+                """,
+                step_ids,
+            ).fetchall()
+        return list(rows)
+
     def keyword_search(self, query: str, *, limit: int = 20) -> list[tuple[str, float]]:
         q = (query or "").strip()
         if not q:
@@ -162,8 +214,9 @@ class RagSqliteIndex:
         results: list[tuple[str, float]] = []
         seen: set[str] = set()
 
-        fts_query = _build_fts_query(q)
-        if fts_query:
+        for fts_query in _build_fts_queries(q):
+            if not fts_query:
+                continue
             with self._conn() as conn:
                 rows = conn.execute(
                     """
@@ -183,6 +236,8 @@ class RagSqliteIndex:
                 rank = float(row["rank"])
                 score = 1.0 / (1.0 + max(rank, 0.0))
                 results.append((chunk_id, score))
+                if len(results) >= limit:
+                    return results
 
         if len(results) < limit:
             with self._conn() as conn:
@@ -211,9 +266,42 @@ class RagSqliteIndex:
                 "SELECT * FROM documents ORDER BY source_path"
             ).fetchall()
 
+    def document_chunk_stats(self) -> list[dict[str, str | int]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT d.source_path, d.title, d.ingested_at,
+                       COUNT(c.id) AS chunk_count,
+                       SUM(c.token_count) AS char_total
+                FROM documents d
+                LEFT JOIN chunks c ON c.doc_id = d.id
+                GROUP BY d.id
+                ORDER BY d.source_path
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
 
-def _build_fts_query(q: str) -> str:
+    def region_stats(self) -> dict[str, int]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(NULLIF(region, ''), 'unknown') AS region, COUNT(*) AS n
+                FROM chunks
+                GROUP BY region
+                """
+            ).fetchall()
+        return {str(r["region"]): int(r["n"]) for r in rows}
+
+
+def _build_fts_queries(q: str) -> list[str]:
+    queries: list[str] = []
     tokens = [t for t in q.split() if t.strip()]
     if len(tokens) > 1:
-        return " OR ".join(f'"{token}"' for token in tokens)
-    return f'"{q}"'
+        queries.append(" OR ".join(f'"{token}"' for token in tokens))
+    else:
+        queries.append(f'"{q}"')
+        if len(q) >= 4 and not re.search(r"\s", q):
+            bigrams = [q[i : i + 2] for i in range(len(q) - 1)]
+            if bigrams:
+                queries.append(" OR ".join(f'"{bg}"' for bg in bigrams[:16]))
+    return queries

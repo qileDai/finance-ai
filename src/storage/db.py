@@ -84,6 +84,14 @@ class ExternalGroupStore:
 
                 INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0);
 
+                CREATE TABLE IF NOT EXISTS kf_cursor (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    cursor TEXT NOT NULL DEFAULT '',
+                    token TEXT NOT NULL DEFAULT ''
+                );
+
+                INSERT OR IGNORE INTO kf_cursor (id, cursor, token) VALUES (1, '', '');
+
                 CREATE TABLE IF NOT EXISTS group_materials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     roomid TEXT NOT NULL,
@@ -253,6 +261,22 @@ class ExternalGroupStore:
     def set_archive_seq(self, seq: int) -> None:
         with self._conn() as conn:
             conn.execute("UPDATE archive_cursor SET seq = ? WHERE id = 1", (seq,))
+
+    def get_kf_cursor(self) -> tuple[str, str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT cursor, token FROM kf_cursor WHERE id = 1",
+            ).fetchone()
+            if not row:
+                return "", ""
+            return str(row["cursor"] or ""), str(row["token"] or "")
+
+    def set_kf_cursor(self, cursor: str, token: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE kf_cursor SET cursor = ?, token = ? WHERE id = 1",
+                (cursor, token),
+            )
 
     def ensure_form_token(self, roomid: str) -> str:
         import secrets

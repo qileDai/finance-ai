@@ -67,11 +67,24 @@ class UnifiedWebServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _form_disabled_response(self) -> None:
+                html = (
+                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<title>在线表单已关闭</title></head><body>"
+                    "<h1>在线表单已关闭</h1>"
+                    "<p>请在企业微信客户群内发送 <code>/填表</code> 获取填写模板，"
+                    "按模板粘贴到群内提交；证件请直接上传图片或 PDF。</p>"
+                    "</body></html>"
+                )
+                self._send_html(html, 404)
+
             def do_GET(self):
                 path = urlparse(self.path).path
                 if path.startswith(CALLBACK_PATH) or path == "/":
                     return self._handle_callback_get()
                 if path.startswith(FORM_PREFIX):
+                    if not settings.collect_form_enabled:
+                        return self._form_disabled_response()
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_get(token)
                 if path == ADMIN_PATH or path == "/admin":
@@ -84,6 +97,8 @@ class UnifiedWebServer:
                 if path.startswith(CALLBACK_PATH) or path == "/":
                     return self._handle_callback_post()
                 if path.startswith(FORM_PREFIX):
+                    if not settings.collect_form_enabled:
+                        return self._form_disabled_response()
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_post(token)
                 self.send_response(404)
@@ -216,10 +231,12 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                 self._send_html(html)
 
         server = ThreadingHTTPServer((self.host, self.port), Handler)
+        collect_mode = "H5 在线表单" if settings.collect_form_enabled else "群内粘贴（H5 已关闭）"
         logger.info(
-            "[Web] 已启动 http://%s:%s (回调/表单/管理)",
+            "[Web] 已启动 http://%s:%s (回调/管理; 材料收集: %s)",
             self.host,
             self.port,
+            collect_mode,
         )
         if blocking:
             try:

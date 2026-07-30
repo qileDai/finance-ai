@@ -28,14 +28,20 @@ GROUP_STATUS_CONFIRMED = "CONFIRMED"
 GROUP_STATUS_HANDOFF = "HANDOFF"
 GROUP_STATUS_HUMAN = "HUMAN"
 
-WELCOME_HINT = (
-    "欢迎加入香港公司注册服务群！\n\n"
-    "直接在本群提问，AI 会解答材料相关问题。\n"
-    "发送 /资料 获取清单，/填表 获取在线表单链接。\n"
-    "发送 /进度 查看材料收集进度。\n"
-    "材料齐全后回复「确认」启动注册流程。\n"
-    "如需人工协助，请回复「转人工」。"
-)
+WELCOME_ADVISOR_NAME = "邓"
+
+
+def build_welcome_message(phone: str = "") -> str:
+    phone_display = phone.strip() if phone and phone.strip() else "待补充"
+    return (
+        f"大家好 / 您好，我是赢态财务集团 - 香港业务专属服务老师：{WELCOME_ADVISOR_NAME}老师。"
+        f"很荣幸能为您服务，接下来由我全程一对一跟进贵司的香港公司注册、开户及年审等香港公司服务事宜。"
+        f"为确保服务高效顺畅，我会在每个关键节点主动向您汇报进度。"
+        f"我的电话：【{phone_display}】，有任何疑问随时找我哈"
+    )
+
+
+PASTE_FORM_TEMPLATE_PATH = PROJECT_ROOT / "templates" / "company_registration_form.md"
 
 DEBOUNCE_SECONDS = 5.0
 
@@ -63,11 +69,56 @@ class GroupStateMachine:
         return g.get("owner_userid") or self.external.default_owner_userid or None
 
     def _form_url(self, roomid: str) -> str:
+        if not settings.collect_form_enabled:
+            raise RuntimeError("H5 表单未启用")
         token = self.store.ensure_form_token(roomid)
         base = (settings.collect_form_base_url or "").strip().rstrip("/")
         if not base:
             base = f"http://127.0.0.1:{settings.wework_external_callback_port}"
         return f"{base}/collect/form/{token}"
+
+    def _maybe_ensure_form_token(self, roomid: str) -> None:
+        if settings.collect_form_enabled:
+            self.store.ensure_form_token(roomid)
+
+    def _load_paste_template(self) -> str:
+        return PASTE_FORM_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    def _send_paste_template(
+        self,
+        roomid: str,
+        *,
+        to_external_userid: str | None = None,
+    ) -> None:
+        template = self._load_paste_template()
+        msg = (
+            "【填写模板】请按下方格式填写，完成后整段粘贴到本群发送：\n\n"
+            f"{template}"
+        )
+        self._safe_send(roomid, msg, to_external_userid=to_external_userid)
+
+    def _send_form_link(
+        self,
+        roomid: str,
+        *,
+        to_external_userid: str | None = None,
+    ) -> None:
+        self._safe_send(
+            roomid,
+            f"请在线填写注册资料：{self._form_url(roomid)}",
+            to_external_userid=to_external_userid,
+        )
+
+    def _handle_fill_form_command(
+        self,
+        roomid: str,
+        *,
+        to_external_userid: str | None = None,
+    ) -> None:
+        if settings.collect_form_enabled:
+            self._send_form_link(roomid, to_external_userid=to_external_userid)
+        else:
+            self._send_paste_template(roomid, to_external_userid=to_external_userid)
 
     def _safe_send(
         self,
@@ -101,18 +152,11 @@ class GroupStateMachine:
             logger.info("群 %s 已欢迎过，跳过（加 force=True 可重发）", roomid)
             return
 
-        self.store.ensure_form_token(roomid)
+        self._maybe_ensure_form_token(roomid)
         self.store.upsert_group(roomid, name=name, owner_userid=owner, status=GROUP_STATUS_INIT)
 
         try:
-            form_url = self._form_url(roomid)
-            checklist_path = PROJECT_ROOT / "templates" / "material_checklist.md"
-            checklist = checklist_path.read_text(encoding="utf-8")
-            welcome_bundle = (
-                f"{WELCOME_HINT}\n\n"
-                f"---\n\n{checklist}\n\n"
-                f"---\n\n在线填写资料：{form_url}\n（也可在本群直接上传证件图片/PDF）"
-            )
+            welcome_bundle = build_welcome_message(settings.wework_welcome_advisor_phone)
             self.external.send_group_text(roomid, welcome_bundle, sender_userid=owner or None)
         except Exception as e:
             logger.exception("群 %s 欢迎语发送失败: %s", roomid, e)
@@ -125,6 +169,72 @@ class GroupStateMachine:
         )
         logger.info("群 %s 欢迎语已发送 → WELCOMED", roomid)
 
+        if settings.wework_welcome_auto_checklist:
+            try:
+                self._send_checklist(roomid)
+                logger.info("群 %s 已自动发送注册资料清单", roomid)
+            except Exception as e:
+                logger.warning("群 %s 自动发清单失败: %s", roomid, e)
+
+    def _generate_ai_answer(self, combined: str) -> str:
+        context = ""
+        if settings.rag_enabled:
+            try:
+                from src.rag.hybrid_retriever import HybridRetriever
+                from src.rag.prompt import format_hits_for_prompt
+
+                hits = HybridRetriever().retrieve(
+                    combined, top_k=settings.rag_top_k, scope="hk",
+                )
+                context = format_hits_for_prompt(hits)
+            except Exception as e:
+                logger.warning("RAG 检索失败，回退纯 LLM: %s", e)
+        return self.llm.answer_material_question(combined, context=context)
+
+    def handle_kf_incoming_text(
+        self, external_userid: str, msgid: str, content: str,
+    ) -> None:
+        """微信客服私聊入站（debounce 后 RAG+LLM，经 kf/send_msg 回复）"""
+        text = content.strip()
+        if not text:
+            self.store.mark_message_processed(msgid)
+            return
+
+        key = f"kf:{external_userid}"
+        with self._lock:
+            batch = self._pending.get(key)
+            if batch is None:
+                batch = PendingBatch(roomid=key, from_id=external_userid)
+                self._pending[key] = batch
+            batch.msgids.append(msgid)
+            batch.texts.append(text)
+            if batch.timer:
+                batch.timer.cancel()
+            batch.timer = threading.Timer(
+                DEBOUNCE_SECONDS, self._flush_kf_batch, args=(external_userid,),
+            )
+            batch.timer.daemon = True
+            batch.timer.start()
+
+    def _flush_kf_batch(self, external_userid: str) -> None:
+        key = f"kf:{external_userid}"
+        with self._lock:
+            batch = self._pending.pop(key, None)
+        if not batch or not batch.texts:
+            return
+        combined = "\n".join(batch.texts)
+        trigger_msgid = batch.msgids[-1] if batch.msgids else ""
+        try:
+            answer = self._generate_ai_answer(combined)
+            reply = f"【AI 助手】{answer}"
+            self.external.send_kf_text(external_userid, reply)
+            self.store.insert_ai_reply(key, trigger_msgid, reply, model=settings.openai_model)
+        except Exception as e:
+            logger.exception("kf 客户 %s AI 回复失败: %s", external_userid, e)
+        finally:
+            for mid in batch.msgids:
+                self.store.mark_message_processed(mid)
+
     def handle_incoming_text(
         self, roomid: str, msgid: str, from_id: str, content: str,
     ) -> None:
@@ -135,7 +245,7 @@ class GroupStateMachine:
 
         if not self.store.get_group(roomid):
             self.store.upsert_group(roomid, status=GROUP_STATUS_WELCOMED)
-            self.store.ensure_form_token(roomid)
+            self._maybe_ensure_form_token(roomid)
 
         status = (self.store.get_group(roomid) or {}).get("status") or GROUP_STATUS_WELCOMED
         owner = self._owner(roomid)
@@ -150,9 +260,16 @@ class GroupStateMachine:
             return
 
         if text in ("/填表", "/form"):
-            self._safe_send(
+            self._handle_fill_form_command(
                 roomid,
-                f"请填写注册资料：{self._form_url(roomid)}",
+                to_external_userid=from_id if from_id.startswith("wm") else None,
+            )
+            self.store.mark_message_processed(msgid)
+            return
+
+        if text in ("/模板", "/template"):
+            self._send_paste_template(
+                roomid,
                 to_external_userid=from_id if from_id.startswith("wm") else None,
             )
             self.store.mark_message_processed(msgid)
@@ -233,17 +350,7 @@ class GroupStateMachine:
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         owner = self._owner(roomid)
         try:
-            context = ""
-            if settings.rag_enabled:
-                try:
-                    from src.rag.hybrid_retriever import HybridRetriever
-                    from src.rag.prompt import format_hits_for_prompt
-
-                    hits = HybridRetriever().retrieve(combined, top_k=settings.rag_top_k)
-                    context = format_hits_for_prompt(hits)
-                except Exception as e:
-                    logger.warning("RAG 检索失败，回退纯 LLM: %s", e)
-            answer = self.llm.answer_material_question(combined, context=context)
+            answer = self._generate_ai_answer(combined)
             reply = f"【AI 助手】{answer}"
             self.external.send_group_text(
                 roomid,
@@ -262,11 +369,12 @@ class GroupStateMachine:
     def _send_checklist(self, roomid: str) -> None:
         owner = self._owner(roomid)
         self.external.send_material_checklist(roomid, sender_userid=owner)
-        self.external.send_group_text(
-            roomid,
-            f"清单见上。在线填表：{self._form_url(roomid)}",
-            sender_userid=owner,
+        hint = (
+            f"清单见上。在线填表：{self._form_url(roomid)}"
+            if settings.collect_form_enabled
+            else "清单见上。发送 /填表 获取填写模板，粘贴到本群提交；证件请直接上传。"
         )
+        self.external.send_group_text(roomid, hint, sender_userid=owner)
 
     def _send_progress(self, roomid: str) -> None:
         self._safe_send(roomid, format_progress_text(self.store.get_materials(roomid)))
@@ -332,4 +440,4 @@ class GroupStateMachine:
                 owner_userid=owner_userid or self.external.default_owner_userid,
                 status=GROUP_STATUS_WELCOMED,
             )
-            self.store.ensure_form_token(roomid)
+            self._maybe_ensure_form_token(roomid)
