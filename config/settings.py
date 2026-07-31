@@ -1,7 +1,16 @@
 """应用配置"""
 
+import json
 from pathlib import Path
+
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class KfAccountConfig(BaseModel):
+    open_kfid: str
+    name: str = ""
+    label: str = ""
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,11 +49,16 @@ class Settings(BaseSettings):
     wework_external_mode: str = "auto"  # auto | mock | live
     # 外部群消息发送：mass=企业群发(需群主确认) | kf=微信客服私聊(自动) | auto=优先 kf/webhook
     wework_external_send_mode: str = "auto"
+    # 双通道：group=仅外部群 | kf=仅微信客服 | both=两者并行（默认）
+    wework_channel: str = "both"
     # 微信客服（kf 模式必填，Secret 在管理后台「微信客服」获取，非应用 Secret）
     wework_kf_secret: str = ""
-    wework_kf_open_kfid: str = ""
-    wework_kf_sync_enabled: bool = True  # 轮询 sync_msg 接收客服私聊并入智能回复
-    wework_kf_poll_interval: int = 3
+    wework_kf_open_kfid: str = ""  # 单账号兼容；多账号请用 WEWORK_KF_ACCOUNTS
+    wework_kf_accounts_json: str = Field(default="", validation_alias="WEWORK_KF_ACCOUNTS")
+    # push=仅回调 | poll=仅轮询 | both=回调为主+轮询兜底（推荐生产）
+    wework_kf_mode: str = "both"
+    wework_kf_sync_enabled: bool = True  # poll/both 模式下启用 sync_msg 轮询
+    wework_kf_poll_interval: int = 120
     # 可选：群 Webhook（仅内部群支持，外部客户群不可用）
     wework_external_group_webhook_url: str = ""
 
@@ -159,8 +173,9 @@ class Settings(BaseSettings):
 
     @property
     def wework_external_callback_configured(self) -> bool:
-        return self.wework_configured and bool(
-            self.wework_external_callback_token_resolved
+        return bool(
+            self.wework_corp_id
+            and self.wework_external_callback_token_resolved
             and self.wework_external_callback_aes_key_resolved
         )
 
@@ -179,13 +194,84 @@ class Settings(BaseSettings):
             return "live" if self.wework_archive_configured else "mock"
         return mode
 
+    def _parse_kf_accounts_json(self) -> list[KfAccountConfig]:
+        raw = (self.wework_kf_accounts_json or "").strip()
+        if not raw:
+            legacy = (self.wework_kf_open_kfid or "").strip()
+            if legacy:
+                return [KfAccountConfig(open_kfid=legacy, name="默认客服")]
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        accounts: list[KfAccountConfig] = []
+        for item in data:
+            if isinstance(item, dict) and (item.get("open_kfid") or "").strip():
+                accounts.append(KfAccountConfig.model_validate(item))
+        return accounts
+
+    @property
+    def wework_kf_accounts(self) -> list[KfAccountConfig]:
+        return self._parse_kf_accounts_json()
+
+    @property
+    def wework_kf_open_kfid_list(self) -> list[str]:
+        return [a.open_kfid for a in self.wework_kf_accounts]
+
+    @property
+    def wework_kf_default_open_kfid(self) -> str:
+        ids = self.wework_kf_open_kfid_list
+        return ids[0] if ids else (self.wework_kf_open_kfid or "").strip()
+
+    def get_kf_account(self, open_kfid: str) -> KfAccountConfig | None:
+        for acc in self.wework_kf_accounts:
+            if acc.open_kfid == open_kfid:
+                return acc
+        return None
+
+    @property
+    def wework_kf_mode_resolved(self) -> str:
+        mode = (self.wework_kf_mode or "both").strip().lower()
+        if mode in ("push", "poll", "both"):
+            return mode
+        return "both"
+
+    @property
+    def wework_kf_push_enabled(self) -> bool:
+        return self.wework_kf_mode_resolved in ("push", "both")
+
+    @property
+    def wework_kf_poll_enabled(self) -> bool:
+        return (
+            self.wework_kf_sync_enabled
+            and self.wework_kf_mode_resolved in ("poll", "both")
+        )
+
     @property
     def wework_kf_configured(self) -> bool:
         return bool(
             self.wework_corp_id
             and (self.wework_kf_secret or "").strip()
-            and (self.wework_kf_open_kfid or "").strip()
+            and self.wework_kf_open_kfid_list
         )
+
+    @property
+    def wework_channel_resolved(self) -> str:
+        ch = (self.wework_channel or "both").strip().lower()
+        if ch in ("group", "kf", "both"):
+            return ch
+        return "both"
+
+    @property
+    def wework_channel_group_enabled(self) -> bool:
+        return self.wework_channel_resolved in ("group", "both")
+
+    @property
+    def wework_channel_kf_enabled(self) -> bool:
+        return self.wework_channel_resolved in ("kf", "both")
 
     @property
     def wework_external_send_mode_resolved(self) -> str:

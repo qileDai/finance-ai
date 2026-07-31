@@ -85,12 +85,11 @@ class ExternalGroupStore:
                 INSERT OR IGNORE INTO archive_cursor (id, seq) VALUES (1, 0);
 
                 CREATE TABLE IF NOT EXISTS kf_cursor (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    open_kfid TEXT PRIMARY KEY,
                     cursor TEXT NOT NULL DEFAULT '',
-                    token TEXT NOT NULL DEFAULT ''
+                    token TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT
                 );
-
-                INSERT OR IGNORE INTO kf_cursor (id, cursor, token) VALUES (1, '', '');
 
                 CREATE TABLE IF NOT EXISTS group_materials (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,9 +123,20 @@ class ExternalGroupStore:
 
                 CREATE INDEX IF NOT EXISTS idx_agent_runs_roomid
                     ON agent_runs(roomid);
+
+                CREATE TABLE IF NOT EXISTS customer_links (
+                    wm_userid TEXT NOT NULL,
+                    roomid TEXT NOT NULL,
+                    linked_at TEXT NOT NULL,
+                    PRIMARY KEY (wm_userid, roomid)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_customer_links_wm
+                    ON customer_links(wm_userid);
                 """
             )
             self._migrate_columns(conn)
+            self._migrate_kf_cursor(conn)
 
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         """增量添加 Phase 2/3 列"""
@@ -135,6 +145,7 @@ class ExternalGroupStore:
             "form_token": "TEXT NOT NULL DEFAULT ''",
             "company_name": "TEXT NOT NULL DEFAULT ''",
             "package_dir": "TEXT NOT NULL DEFAULT ''",
+            "open_kfid": "TEXT NOT NULL DEFAULT ''",
         }
         for col, typedef in migrations.items():
             if col not in cols:
@@ -148,6 +159,42 @@ class ExternalGroupStore:
             if col not in ai_cols:
                 conn.execute(f"ALTER TABLE ai_replies ADD COLUMN {col} {typedef}")
 
+    def _migrate_kf_cursor(self, conn: sqlite3.Connection) -> None:
+        """将 kf_cursor 从单例 id=1 迁移为 open_kfid 主键"""
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(kf_cursor)")}
+        if not cols:
+            return
+        if "open_kfid" in cols:
+            return
+
+        legacy_cursor, legacy_token = "", ""
+        if "id" in cols:
+            row = conn.execute(
+                "SELECT cursor, token FROM kf_cursor WHERE id = 1",
+            ).fetchone()
+            if row:
+                legacy_cursor = str(row["cursor"] or "")
+                legacy_token = str(row["token"] or "")
+            conn.execute("DROP TABLE kf_cursor")
+            conn.execute(
+                """
+                CREATE TABLE kf_cursor (
+                    open_kfid TEXT PRIMARY KEY,
+                    cursor TEXT NOT NULL DEFAULT '',
+                    token TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT
+                )
+                """
+            )
+            if legacy_cursor or legacy_token:
+                conn.execute(
+                    """
+                    INSERT INTO kf_cursor (open_kfid, cursor, token, updated_at)
+                    VALUES ('__legacy__', ?, ?, ?)
+                    """,
+                    (legacy_cursor, legacy_token, _utc_now()),
+                )
+
     def upsert_group(
         self,
         roomid: str,
@@ -159,6 +206,7 @@ class ExternalGroupStore:
         form_token: str | None = None,
         company_name: str | None = None,
         package_dir: str | None = None,
+        open_kfid: str | None = None,
     ) -> None:
         now = _utc_now()
         with self._conn() as conn:
@@ -190,6 +238,9 @@ class ExternalGroupStore:
                 if package_dir is not None:
                     updates.append("package_dir = ?")
                     params.append(package_dir)
+                if open_kfid is not None:
+                    updates.append("open_kfid = ?")
+                    params.append(open_kfid)
                 params.append(roomid)
                 conn.execute(
                     f"UPDATE external_groups SET {', '.join(updates)} WHERE roomid = ?",
@@ -366,21 +417,57 @@ class ExternalGroupStore:
         with self._conn() as conn:
             conn.execute("UPDATE archive_cursor SET seq = ? WHERE id = 1", (seq,))
 
-    def get_kf_cursor(self) -> tuple[str, str]:
+    def get_kf_cursor(self, open_kfid: str) -> tuple[str, str]:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT cursor, token FROM kf_cursor WHERE id = 1",
+                "SELECT cursor, token FROM kf_cursor WHERE open_kfid = ?",
+                (open_kfid,),
             ).fetchone()
             if not row:
                 return "", ""
             return str(row["cursor"] or ""), str(row["token"] or "")
 
-    def set_kf_cursor(self, cursor: str, token: str = "") -> None:
+    def set_kf_cursor(
+        self, open_kfid: str, cursor: str, token: str = "",
+    ) -> None:
+        now = _utc_now()
         with self._conn() as conn:
             conn.execute(
-                "UPDATE kf_cursor SET cursor = ?, token = ? WHERE id = 1",
-                (cursor, token),
+                """
+                INSERT INTO kf_cursor (open_kfid, cursor, token, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(open_kfid) DO UPDATE SET
+                    cursor = excluded.cursor,
+                    token = excluded.token,
+                    updated_at = excluded.updated_at
+                """,
+                (open_kfid, cursor, token, now),
             )
+
+    def ensure_kf_cursors(self, open_kfid_list: list[str]) -> None:
+        """初始化各客服账号游标；将 __legacy__ 迁移到首个账号"""
+        if not open_kfid_list:
+            return
+        with self._conn() as conn:
+            legacy = conn.execute(
+                "SELECT cursor, token FROM kf_cursor WHERE open_kfid = '__legacy__'",
+            ).fetchone()
+            for kfid in open_kfid_list:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO kf_cursor
+                        (open_kfid, cursor, token, updated_at)
+                    VALUES (?, '', '', ?)
+                    """,
+                    (kfid, _utc_now()),
+                )
+            if legacy:
+                first = open_kfid_list[0]
+                cur, tok = str(legacy["cursor"] or ""), str(legacy["token"] or "")
+                existing_cur, _ = self.get_kf_cursor(first)
+                if not existing_cur and (cur or tok):
+                    self.set_kf_cursor(first, cur, tok)
+                conn.execute("DELETE FROM kf_cursor WHERE open_kfid = '__legacy__'")
 
     def ensure_form_token(self, roomid: str) -> str:
         import secrets
@@ -435,17 +522,70 @@ class ExternalGroupStore:
             ).fetchall()
         return {str(r["field_key"]): dict(r) for r in rows}
 
-    def list_all_materials_summary(self) -> list[dict[str, Any]]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT g.roomid, g.name, g.status, g.company_name,
+    def list_all_materials_summary(
+        self, *, channel: str = "all",
+    ) -> list[dict[str, Any]]:
+        channel = (channel or "all").strip().lower()
+        sql = """
+                SELECT g.roomid, g.name, g.status, g.company_name, g.open_kfid,
                        COUNT(m.id) AS material_count
                 FROM external_groups g
                 LEFT JOIN group_materials m ON g.roomid = m.roomid
+                """
+        params: tuple = ()
+        if channel == "group":
+            sql += " WHERE g.roomid LIKE 'wr%' "
+        elif channel == "kf":
+            sql += " WHERE g.roomid LIKE 'kf:%' "
+        sql += """
                 GROUP BY g.roomid
                 ORDER BY g.updated_at DESC
                 """
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            row = dict(r)
+            rid = str(row.get("roomid") or "")
+            if rid.startswith("kf:"):
+                row["channel"] = "kf"
+                if not row.get("open_kfid"):
+                    from src.wework.kf_session import parse_kf_roomid
+
+                    parsed = parse_kf_roomid(rid)
+                    if parsed:
+                        row["open_kfid"] = parsed[0]
+            elif rid.startswith("wr"):
+                row["channel"] = "group"
+            else:
+                row["channel"] = "other"
+            result.append(row)
+        return result
+
+    def link_customer(self, wm_userid: str, roomid: str) -> None:
+        if not wm_userid.startswith("wm") or not roomid.startswith("wr"):
+            return
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO customer_links (wm_userid, roomid, linked_at)
+                VALUES (?, ?, ?)
+                """,
+                (wm_userid, roomid, now),
+            )
+
+    def get_linked_groups(self, wm_userid: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT cl.roomid, cl.linked_at, g.name, g.status
+                FROM customer_links cl
+                LEFT JOIN external_groups g ON g.roomid = cl.roomid
+                WHERE cl.wm_userid = ?
+                ORDER BY cl.linked_at DESC
+                """,
+                (wm_userid,),
             ).fetchall()
-            return [dict(r) for r in rows]
+        return [dict(r) for r in rows]
 

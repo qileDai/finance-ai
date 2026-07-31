@@ -116,6 +116,55 @@ class MessageRouter:
         )
         logger.info("[Mock] 已注入消息到群 %s: %s", roomid, text[:80])
 
+    def inject_kf_message(
+        self,
+        external_userid: str,
+        text: str,
+        *,
+        msgid: str | None = None,
+        open_kfid: str = "",
+    ) -> None:
+        """CLI Mock 注入微信客服私聊消息"""
+        from src.wework.kf_session import build_kf_roomid
+
+        if not external_userid.startswith("wm"):
+            external_userid = f"wm{external_userid}"
+        kfid = open_kfid or settings.wework_kf_default_open_kfid or "wkMockKf"
+        roomid = build_kf_roomid(kfid, external_userid)
+        mid = msgid or f"mock_kf_{uuid.uuid4().hex[:16]}"
+        is_new = self.store.insert_message_if_new(
+            mid, roomid, external_userid, "text", text,
+        )
+        if not is_new:
+            logger.debug("[Mock] 重复 kf 消息 %s", mid)
+            return
+        self.state_machine.handle_incoming_text(
+            roomid, mid, external_userid, text,
+        )
+        logger.info("[Mock] 已注入 kf 消息 [%s] %s: %s", kfid, external_userid, text[:80])
+
+    def simulate_kf_first_contact(
+        self, external_userid: str, *, open_kfid: str = "",
+    ) -> None:
+        if not external_userid.startswith("wm"):
+            external_userid = f"wm{external_userid}"
+        self.state_machine.handle_kf_first_contact(
+            external_userid, open_kfid=open_kfid,
+        )
+
+    def simulate_kf_callback(
+        self, open_kfid: str, token: str = "mock_token",
+    ) -> None:
+        """Mock 模拟 kf_msg_or_event 回调触发 sync"""
+        from src.wework.kf_worker import KfSyncWorker
+
+        worker = KfSyncWorker(
+            store=self.store,
+            external=self.state_machine.external,
+            state_machine=self.state_machine,
+        )
+        worker.sync_for_account(open_kfid, token=token)
+
     def simulate_group_create(self, roomid: str, *, force: bool = False) -> None:
         """Mock 模拟建群事件"""
         evt = ExternalChatEvent(

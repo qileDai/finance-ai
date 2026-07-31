@@ -69,8 +69,9 @@ $ROOM = "wrTEST001"                  # Mock 测试群；Live 换成真实 roomid
 | 3 | `/资料` 重发清单 | §3.2 | 群内发 `/资料` | 清单 + `/填表` 引导 |
 | 4 | 智能问答 RAG+LLM | §3.3 | 群内提问 | `【AI 助手】` 回复 |
 | 5 | AI 回复送达 | 看启动日志 send 模式 | kf 私聊 / mass 待确认 | kf→客服会话；mass→群主确认 |
-| 6 | kf 私聊入站 AI | §3.4 | 客户在微信客服发消息 | 私聊收到 AI 回复 |
-| 7 | `/填表` 发模板 | §3.5 | 群内 `/填表` | 粘贴模板 |
+| 6 | kf 私聊全流程 | §3.4b | 客户在微信客服发消息 | 欢迎/清单/指令/QA 均在私聊 |
+| 7 | kf 私聊入站 AI | §3.4 | 客户在微信客服发消息 | 私聊收到 AI 回复 |
+| 8 | `/填表` 发模板 | §3.5 / §3.4b | 群内或私聊 `/填表` | 粘贴模板 |
 | 8 | 键=值 粘贴入库 | §3.6 | 群内粘贴表单 | `【材料更新】` + 进度 |
 | 9 | 文件上传归类 | §3.7 | 群内发图片/PDF | 归类提示 + 进度 |
 | 10 | `/进度` | §3.8 | 群内 `/进度` | 必填项完成情况 |
@@ -114,7 +115,7 @@ $ROOM = "wrTEST001"                  # Mock 测试群；Live 换成真实 roomid
 & $PY main.py wework-external-mock --roomid $ROOM --text "测试" --from-id wmMockUser001
 ```
 
-### 3.4 kf 私聊入站（需 Bot 运行 + `WEWORK_KF_*`）
+### 3.4 kf 私聊入站（Live：需 Bot 运行 + `WEWORK_KF_*`）
 
 Bot 终端 1 保持运行，客户在微信客服会话发消息；观察 Bot 日志：
 
@@ -122,7 +123,16 @@ Bot 终端 1 保持运行，客户在微信客服会话发消息；观察 Bot �
 kf 收到客户消息 wmXXX: ...
 ```
 
-Mock 无法模拟 kf 入站，只能 Live 验证。
+### 3.4b kf 私聊 Mock 全流程（无需 Bot）
+
+```powershell
+& $PY main.py wework-kf-mock --open-kfid wkTEST --from-id wmTEST001 --first-contact
+& $PY main.py wework-kf-mock --open-kfid wkTEST --from-id wmTEST001 --text "/填表"
+& $PY main.py wework-kf-mock --open-kfid wkTEST --from-id wmTEST001 --text "香港开户需要多久"
+& $PY main.py wework-kf-mock --simulate-callback --open-kfid wkTEST --token mock_token
+```
+
+**预期：** Mock 日志显示 kf 出站；首次 `--first-contact` 含欢迎语+清单；问答含 `【AI 助手】`。
 
 ### 3.5 获取填写模板
 

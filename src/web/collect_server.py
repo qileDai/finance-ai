@@ -14,8 +14,12 @@ from config.settings import PROJECT_ROOT, settings
 from src.materials.checklist import format_progress_text
 from src.materials.form_parser import fields_to_material_rows, parse_registration_form
 from src.storage.db import ExternalGroupStore
-from src.wework.callback_handler import parse_external_callback_xml
+from src.wework.callback_handler import (
+    parse_external_callback_xml,
+    parse_kf_callback_xml,
+)
 from src.wework.client import WXBizMsgCrypt
+from src.wework.kf_worker import KfSyncWorker
 from src.wework.message_router import MessageRouter
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,7 @@ ADMIN_PATH = "/admin/groups"
 class UnifiedWebServer:
     router: MessageRouter
     store: ExternalGroupStore = field(default_factory=ExternalGroupStore)
+    kf_worker: KfSyncWorker | None = None
     host: str = "0.0.0.0"
     port: int = 8081
     _crypt: WXBizMsgCrypt | None = None
@@ -44,6 +49,7 @@ class UnifiedWebServer:
         crypt = self._crypt
         router = self.router
         store = self.store
+        kf_worker = self.kf_worker
         form_template = (PROJECT_ROOT / "templates" / "company_registration_form.md").read_text(
             encoding="utf-8"
         )
@@ -142,9 +148,17 @@ class UnifiedWebServer:
                     if encrypt is None or encrypt.text is None:
                         raise ValueError("缺少 Encrypt")
                     xml_text = crypt.decrypt(encrypt.text)
-                    evt = parse_external_callback_xml(xml_text)
-                    if evt:
-                        router.route_external_chat_event(evt)
+                    kf_evt = parse_kf_callback_xml(xml_text)
+                    if kf_evt and kf_worker is not None:
+                        logger.info(
+                            "[kf] 收到回调 open_kfid=%s，异步 sync",
+                            kf_evt.open_kfid,
+                        )
+                        kf_worker.on_kf_callback(kf_evt.open_kfid, kf_evt.token)
+                    else:
+                        evt = parse_external_callback_xml(xml_text)
+                        if evt:
+                            router.route_external_chat_event(evt)
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b"success")
@@ -203,7 +217,7 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                 sm = router.state_machine
                 owner = group.get("owner_userid")
                 try:
-                    sm.external.send_group_text(
+                    sm.external.send_session_text(
                         roomid,
                         f"【材料更新】表单已提交。\n{progress}",
                         sender_userid=owner or None,
@@ -214,21 +228,43 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                 self._send_html(html)
 
             def _handle_admin(self):
-                rows = store.list_all_materials_summary()
+                query = parse_qs(urlparse(self.path).query)
+                channel = query.get("channel", ["all"])[0]
+                rows = store.list_all_materials_summary(channel=channel)
+                filter_links = (
+                    f"<p>筛选: "
+                    f"<a href='?channel=all'>全部</a> | "
+                    f"<a href='?channel=group'>群(wr*)</a> | "
+                    f"<a href='?channel=kf'>客服(kf:*)</a>"
+                    f" （当前: {channel}）</p>"
+                )
                 trs = "".join(
-                    f"<tr><td>{r.get('roomid')}</td><td>{r.get('name') or ''}</td>"
+                    f"<tr><td>{r.get('channel', '')}</td>"
+                    f"<td>{r.get('open_kfid') or ''}</td>"
+                    f"<td>{r.get('roomid')}</td>"
+                    f"<td>{self._kf_account_label(r)}</td>"
                     f"<td>{r.get('status')}</td><td>{r.get('material_count')}</td>"
                     f"<td>{r.get('company_name') or ''}</td></tr>"
                     for r in rows
                 )
                 html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>外部群管理</title>
+<html><head><meta charset="utf-8"><title>外部群/客服管理</title>
 <style>table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:8px}}</style>
-</head><body><h1>外部客户群材料管理</h1>
-<table><tr><th>roomid</th><th>群名</th><th>状态</th><th>材料项</th><th>公司</th></tr>
-{trs or '<tr><td colspan=5>暂无数据</td></tr>'}
+</head><body><h1>外部客户群 / 微信客服 材料管理</h1>
+{filter_links}
+<table><tr><th>通道</th><th>open_kfid</th><th>roomid</th><th>账号/名称</th><th>状态</th><th>材料项</th><th>公司</th></tr>
+{trs or '<tr><td colspan=7>暂无数据</td></tr>'}
 </table></body></html>"""
                 self._send_html(html)
+
+            def _kf_account_label(self, row: dict) -> str:
+                name = row.get("name") or ""
+                kfid = row.get("open_kfid") or ""
+                if kfid:
+                    acc = settings.get_kf_account(str(kfid))
+                    if acc and acc.label:
+                        return f"{name} ({acc.label})"
+                return str(name)
 
         server = ThreadingHTTPServer((self.host, self.port), Handler)
         collect_mode = "H5 在线表单" if settings.collect_form_enabled else "群内粘贴（H5 已关闭）"

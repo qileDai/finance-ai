@@ -42,12 +42,14 @@ class WeWorkExternalClient:
             self.default_owner_userid or settings.wework_default_group_owner_userid
         )
         self.kf_secret = self.kf_secret or settings.wework_kf_secret
-        self.kf_open_kfid = self.kf_open_kfid or settings.wework_kf_open_kfid
+        self.kf_open_kfid = self.kf_open_kfid or settings.wework_kf_default_open_kfid
         self.send_mode = self.send_mode or settings.wework_external_send_mode_resolved
         self.group_webhook_url = (
             self.group_webhook_url or settings.wework_external_group_webhook_url
         )
-        self._mock_mode = not settings.wework_configured
+        self._mock_mode = not (
+            settings.wework_configured or settings.wework_kf_configured
+        )
 
     def _get_access_token(self) -> str:
         if self._mock_mode:
@@ -151,9 +153,9 @@ class WeWorkExternalClient:
             return "缺少 chat_id"
         if mode == "mass":
             return f"mass: 企业群发 chat_id_list=[{chat_id}]（需群主确认）"
-        if to_external_userid and self.kf_secret and self.kf_open_kfid:
+        if to_external_userid and self.kf_secret and settings.wework_kf_configured:
             return f"kf: 自动私聊 → {to_external_userid}（仅该客户，当前群 {chat_id}）"
-        if mode in ("kf", "auto") and self.kf_secret and self.kf_open_kfid:
+        if mode in ("kf", "auto") and self.kf_secret and settings.wework_kf_configured:
             members = self.external_userids_in_group(chat_id)
             if members:
                 return (
@@ -165,7 +167,13 @@ class WeWorkExternalClient:
             return "webhook: 单 Webhook 即时推送"
         return f"mass: 企业群发 chat_id_list=[{chat_id}]（需群主确认）"
 
-    def _send_via_kf_group(self, chat_id: str, content: str) -> dict[str, Any] | None:
+    def _send_via_kf_group(
+        self,
+        chat_id: str,
+        content: str,
+        *,
+        open_kfid: str | None = None,
+    ) -> dict[str, Any] | None:
         """仅向 chat_id 对应群内的外部成员自动私聊（不波及其他群）"""
         targets = self.external_userids_in_group(chat_id)
         if not targets:
@@ -174,8 +182,9 @@ class WeWorkExternalClient:
 
         ok = 0
         last: dict[str, Any] = {"errcode": -1, "errmsg": "no send attempt"}
+        kfid = open_kfid or self.kf_open_kfid or settings.wework_kf_default_open_kfid
         for uid in targets:
-            data = self._send_via_kf(uid, content)
+            data = self._send_via_kf(uid, content, open_kfid=kfid)
             last = data
             if data.get("errcode", 0) == 0:
                 ok += 1
@@ -199,16 +208,23 @@ class WeWorkExternalClient:
             logger.info("已通过 Webhook 发送消息（即时入群）")
         return data
 
-    def _send_via_kf(self, external_userid: str, content: str) -> dict[str, Any]:
+    def _send_via_kf(
+        self,
+        external_userid: str,
+        content: str,
+        *,
+        open_kfid: str | None = None,
+    ) -> dict[str, Any]:
         """微信客服私聊（无需群主确认，消息出现在客户微信客服会话中）"""
-        if not self.kf_open_kfid or not self.kf_secret:
+        kfid = (open_kfid or self.kf_open_kfid or settings.wework_kf_default_open_kfid).strip()
+        if not kfid or not self.kf_secret:
             raise RuntimeError("未配置 WEWORK_KF_OPEN_KFID / WEWORK_KF_SECRET")
 
         token = self._get_kf_access_token()
         url = f"https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg?access_token={token}"
         payload = {
             "touser": external_userid,
-            "open_kfid": self.kf_open_kfid,
+            "open_kfid": kfid,
             "msgtype": "text",
             "text": {"content": content},
         }
@@ -216,9 +232,14 @@ class WeWorkExternalClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("errcode", 0) != 0:
-            logger.error("微信客服发消息失败 touser=%s: %s", external_userid, data)
+            logger.error(
+                "微信客服发消息失败 open_kfid=%s touser=%s: %s",
+                kfid,
+                external_userid,
+                data,
+            )
         else:
-            logger.info("已通过微信客服自动发送给 %s", external_userid)
+            logger.info("已通过微信客服 [%s] 自动发送给 %s", kfid, external_userid)
         return data
 
     def _send_via_mass(self, chat_id: str, content: str, sender: str) -> dict[str, Any]:
@@ -284,24 +305,40 @@ class WeWorkExternalClient:
             logger.info("已通过 appchat 即时发送到群 %s", chat_id)
         return data
 
-    def send_kf_text(self, external_userid: str, content: str) -> dict[str, Any]:
+    def send_kf_text(
+        self,
+        external_userid: str,
+        content: str,
+        *,
+        open_kfid: str | None = None,
+    ) -> dict[str, Any]:
         """向微信客服会话发送文本（客户私聊侧可见）"""
+        kfid = open_kfid or self.kf_open_kfid or settings.wework_kf_default_open_kfid
         if self._mock_mode:
-            logger.info("[Mock 客服] → %s: %s", external_userid, content[:200])
+            logger.info("[Mock 客服 %s] → %s: %s", kfid, external_userid, content[:200])
+            from src.wework.kf_session import build_kf_roomid
+
             self._mock_messages.append(
-                {"chat_id": f"kf:{external_userid}", "to": external_userid, "content": content}
+                {
+                    "chat_id": build_kf_roomid(kfid, external_userid),
+                    "to": external_userid,
+                    "open_kfid": kfid,
+                    "content": content,
+                }
             )
             return {"errcode": 0, "errmsg": "ok (mock)"}
-        return self._send_via_kf(external_userid, content)
+        return self._send_via_kf(external_userid, content, open_kfid=kfid)
 
     def sync_kf_messages(
         self,
         *,
+        open_kfid: str,
         cursor: str = "",
         token: str = "",
         limit: int = 1000,
     ) -> dict[str, Any]:
         """拉取微信客服消息（sync_msg）"""
+        kfid = (open_kfid or self.kf_open_kfid or settings.wework_kf_default_open_kfid).strip()
         if self._mock_mode:
             return {
                 "errcode": 0,
@@ -310,7 +347,7 @@ class WeWorkExternalClient:
                 "next_cursor": cursor,
                 "has_more": 0,
             }
-        if not self.kf_open_kfid or not self.kf_secret:
+        if not kfid or not self.kf_secret:
             raise RuntimeError("未配置 WEWORK_KF_OPEN_KFID / WEWORK_KF_SECRET")
 
         access_token = self._get_kf_access_token()
@@ -320,7 +357,7 @@ class WeWorkExternalClient:
             "token": token or "",
             "limit": limit,
             "voice_format": 0,
-            "open_kfid": self.kf_open_kfid,
+            "open_kfid": kfid,
         }
         resp = httpx.post(url, json=payload, timeout=30)
         resp.raise_for_status()
@@ -328,6 +365,51 @@ class WeWorkExternalClient:
         if data.get("errcode", 0) != 0:
             raise RuntimeError(f"kf/sync_msg 失败: {data}")
         return data
+
+    def send_session_text(
+        self,
+        roomid: str,
+        content: str,
+        *,
+        sender_userid: str | None = None,
+        to_external_userid: str | None = None,
+    ) -> dict[str, Any]:
+        """按 roomid 通道发送：kf:* → 客服私聊，wr* → 群/私聊（依 send_mode）"""
+        from src.wework.kf_session import parse_kf_roomid
+
+        roomid = (roomid or "").strip()
+        if roomid.startswith("kf:"):
+            parsed = parse_kf_roomid(roomid)
+            if parsed:
+                open_kfid, wm_default = parsed
+                wm = to_external_userid or wm_default
+                return self.send_kf_text(wm, content, open_kfid=open_kfid)
+            wm = to_external_userid or roomid.removeprefix("kf:")
+            return self.send_kf_text(wm, content)
+        return self.send_group_text(
+            roomid,
+            content,
+            sender_userid=sender_userid,
+            to_external_userid=to_external_userid,
+        )
+
+    def download_kf_media(self, media_id: str) -> bytes:
+        """下载微信客服消息中的临时素材"""
+        if self._mock_mode:
+            return b""
+        if not media_id:
+            return b""
+        access_token = self._get_kf_access_token()
+        url = f"https://qyapi.weixin.qq.com/cgi-bin/kf/get_media?access_token={access_token}"
+        resp = httpx.post(url, json={"media_id": media_id}, timeout=60)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        if "application/json" in content_type:
+            data = resp.json()
+            if data.get("errcode", 0) != 0:
+                raise RuntimeError(f"kf/get_media 失败: {data}")
+            return b""
+        return resp.content
 
     def send_group_text(
         self,
@@ -355,7 +437,7 @@ class WeWorkExternalClient:
             raise ValueError("send_group_text 缺少 chat_id")
 
         # 1. 回复指定外部联系人 → 仅该客户（kf 自动，无需群主确认）
-        if to_external_userid and mode in ("kf", "auto") and self.kf_secret and self.kf_open_kfid:
+        if to_external_userid and mode in ("kf", "auto") and self.kf_secret and settings.wework_kf_configured:
             logger.info("发送计划: %s", self.describe_send_plan(chat_id, to_external_userid=to_external_userid))
             return self._send_via_kf(to_external_userid, content)
 
@@ -366,7 +448,7 @@ class WeWorkExternalClient:
             return self._send_via_mass(chat_id, content, sender)
 
         # 3. kf/auto：优先对当前群内外部成员自动私聊（仅该 roomid 的成员，不波及其他群）
-        if mode in ("kf", "auto") and self.kf_secret and self.kf_open_kfid:
+        if mode in ("kf", "auto") and self.kf_secret and settings.wework_kf_configured:
             logger.info("发送计划: %s", self.describe_send_plan(chat_id))
             kf_result = self._send_via_kf_group(chat_id, content)
             if kf_result is not None:
@@ -415,7 +497,7 @@ class WeWorkExternalClient:
     ) -> str:
         checklist_path = PROJECT_ROOT / "templates" / "material_checklist.md"
         content = checklist_path.read_text(encoding="utf-8")
-        self.send_group_text(
+        self.send_session_text(
             chat_id,
             content,
             sender_userid=sender_userid,

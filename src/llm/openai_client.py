@@ -64,6 +64,11 @@ class LLMClient:
                 "客户询问注意事项，请优先完整列出检索片段中的「注意事项」条目"
                 "（含编号列表），不要只回答话术模板或资料清单。"
             )
+        if re.search(r"多久|周期|多长时间", question):
+            system += (
+                "客户询问办理时效，请依据检索片段中的审核周期、工作日等明确时间作答，"
+                "直接给出具体时间范围。"
+            )
         user = f"检索片段:\n{context.strip()}\n\n客户问题: {question}" if context.strip() else question
         return self.chat(system, user)
 
@@ -121,17 +126,35 @@ class LLMClient:
         question: str,
         history: list[str] | None = None,
         group_meta: dict[str, str] | None = None,
+        hits: list | None = None,
     ) -> dict:
-        """无知识库命中时，结合群上下文用 LLM 兜底。"""
+        """无知识库强命中时，结合群上下文与弱检索片段用 LLM 兜底。"""
+        from src.rag.prompt import format_hits_for_prompt
+
+        has_hits = bool(hits)
         system = (
             "你是香港公司注册顾问助手，仅回答香港公司注册、开户、材料收集相关问题。"
-            "当前无知识库检索片段，可结合对话上下文和通用注册常识简要回答。"
-            "若问题与注册无关、需个案政策确认、或信息不足以准确回答，"
+        )
+        if has_hits:
+            system += (
+                "当前有弱相关检索片段，请优先依据片段作答。"
+                "若片段中有明确时效（如审核周期、工作日），可引用；"
+                "无依据则不编造具体银行个案政策或费用。"
+            )
+        else:
+            system += (
+                "当前无知识库检索片段，可结合对话上下文和通用注册常识简要回答。"
+                "若检索片段或注册流程常识中有明确时效，可引用；"
+                "无依据则不编造具体银行个案政策。"
+            )
+        system += (
+            "若问题与注册完全无关、或信息不足以准确回答，"
             '必须返回 can_answer=false。'
-            "不要编造具体银行政策、费用金额、审批时效。"
             '输出 JSON: {"can_answer": true/false, "answer": "...", "reason": "..."}'
         )
         parts: list[str] = [f"客户问题: {question}"]
+        if has_hits:
+            parts.insert(0, f"参考检索片段:\n{format_hits_for_prompt(hits[:3])}")
         if history:
             hist_text = "\n".join(f"- {h}" for h in history[-10:])
             parts.append(f"近期对话:\n{hist_text}")

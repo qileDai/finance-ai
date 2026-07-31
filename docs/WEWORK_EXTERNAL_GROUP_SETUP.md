@@ -13,8 +13,32 @@
 | 欢迎语 | 企业成员创建客户群 → 发送赢态财务集团邓老师问候语（含联系电话） |
 | 注册资料清单 | 建群欢迎后**自动发送**（`WEWORK_WELCOME_AUTO_CHECKLIST=true`）；也可客户发 `/资料` |
 | AI 解答材料问题 | 客户在群内发文字 → **会话内容存档**拉取（live）或 Mock 注入 |
-| 客服私聊 AI | 客户在微信客服会话发消息 → **kf/sync_msg** 轮询 → 自动私聊回复 |
+| **微信客服私聊全流程** | 客户在微信客服会话发消息 → **kf/sync_msg** → 欢迎/清单/指令/材料/QA/确认 |
+| 客服私聊 AI | 同上（与全流程共用统一状态机） |
 | 转人工 | 客户发送 `转人工` |
+
+### 双通道架构（群 + 微信客服）
+
+| 通道 | roomid | 收消息 | 发消息 |
+|------|--------|--------|--------|
+| 外部客户群 | `wr*` | 会话存档 | kf 私聊客户 或 mass 进群（需确认） |
+| 微信客服私聊 | `kf:wm*` | kf/sync_msg | kf/send_msg（全自动） |
+
+`.env` 中 `WEWORK_CHANNEL=both`（默认）同时启用两通道；`group` / `kf` 可单独开关。
+
+```env
+WEWORK_CHANNEL=both
+WEWORK_EXTERNAL_SEND_MODE=kf
+WEWORK_KF_SYNC_ENABLED=true
+```
+
+Mock 验证：
+
+```powershell
+python main.py wework-external-mock --roomid wrTEST --create-group
+python main.py wework-kf-mock --from-id wmTEST001 --first-contact
+python main.py wework-kf-mock --from-id wmTEST001 --text "香港开户需要多久"
+```
 
 **不需要** 将应用发布到企业微信应用市场。
 
@@ -227,13 +251,49 @@ WEWORK_DEFAULT_GROUP_OWNER_USERID=YingTaiJiTuanDengXianSheng
 ```
 
 5. 客户需先进入该客服（扫码或从群名片），之后对该群 `--roomid` 的操作会自动私聊该群外部成员
-6. **kf 双向**：bot 启动后会轮询 `kf/sync_msg`（`WEWORK_KF_SYNC_ENABLED=true`），客户在客服私聊里提问也会收到 `【AI 助手】` 回复
-7. Mock 测试会自动选用群内外部成员 `wm` ID：
+6. **kf 双向**：bot 启动后通过 **回调推送 + sync_msg 拉取**（推荐 `WEWORK_KF_MODE=both`）或轮询接收客户私聊，AI 自动回复
+
+#### 微信客服推送模式（kf_msg_or_event）
+
+官方流程（[接收消息和事件](https://kf.weixin.qq.com/api/doc/path/94745)）：
+
+1. 客户发消息 → 企微向回调 URL 推送 `kf_msg_or_event`（含 `Token` + `OpenKfId`，**不含正文**）
+2. 服务立即返回 200 → 后台调用 `kf/sync_msg` 拉取完整消息
+3. AI 处理 → `kf/send_msg` 回复（[发送消息](https://kf.weixin.qq.com/api/doc/path/94744)）
+
+**企微后台**：微信客服 → 开发配置 → 回调 URL 填 `https://<域名>/wework/external/callback`，Token/AESKey 与 `.env` 中 `WEWORK_EXTERNAL_CALLBACK_*` 一致。
+
+```env
+WEWORK_KF_MODE=both          # push=仅回调 | poll=仅轮询 | both=推荐
+WEWORK_KF_SECRET=...
+WEWORK_KF_ACCOUNTS=[{"open_kfid":"wkAAA","name":"香港注册","label":"hk"}]
+WEWORK_KF_POLL_INTERVAL=120  # both 模式兜底轮询间隔（秒）
+WEWORK_EXTERNAL_CALLBACK_TOKEN=...
+WEWORK_EXTERNAL_CALLBACK_AES_KEY=...
+```
+
+#### 多客服账号
+
+使用 JSON 配置多个 `open_kfid`，每个账号独立游标；会话 roomid 为 `kf:{open_kfid}:{wm}`：
+
+```env
+WEWORK_KF_ACCOUNTS=[
+  {"open_kfid":"wkAAA","name":"香港注册","label":"hk"},
+  {"open_kfid":"wkBBB","name":"国内咨询","label":"cn"}
+]
+```
+
+仍支持旧单账号 `WEWORK_KF_OPEN_KFID=wkxxx`（自动转为单元素列表）。
+
+7. Mock 测试：
 
 ```powershell
-python main.py wework-external-mock --roomid "wrXXXX" --create-group --force
-python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册需要什么材料？"
+python main.py wework-kf-mock --open-kfid wkAAA --from-id wmTEST --first-contact
+python main.py wework-kf-mock --open-kfid wkAAA --from-id wmTEST --text "香港开户需要多久"
+python main.py wework-kf-mock --simulate-callback --open-kfid wkAAA --token mock_token
 ```
+
+群 Mock 测试会自动选用群内外部成员 `wm` ID：
 
 命令会打印 `[Mock] 发送计划: ...` 说明是 kf 自动还是 mass 需确认。
 
@@ -257,7 +317,8 @@ python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册
 | 能收不能发 | `WEWORK_DEFAULT_GROUP_OWNER_USERID`；客户群 API 权限；群主是否在可见范围 |
 | API 成功但群里无消息 | 当前为 `mass` 模式，需群主在【服务通知】确认；或改 `WEWORK_EXTERNAL_SEND_MODE=kf` |
 | 消息发到群主所有群 | 已修复：群发必须带 `chat_id_list`；sender 自动取当前群群主 |
-| kf 模式发送失败 | 客户是否已联系过该客服；`WEWORK_KF_SECRET/OPEN_KFID` 是否正确 |
+| kf 收不到消息 | `WEWORK_KF_MODE` 与回调 URL 是否配置；push 模式需公网回调；both 模式有轮询兜底 |
+| kf 模式发送失败 | 客户是否已联系过该客服；`WEWORK_KF_SECRET/OPEN_KFID` 是否正确；多账号时检查 roomid 对应 open_kfid |
 | 重复回复 | 正常；系统用 msgid 幂等，不应重复（若重复检查存档 seq） |
 
 ---
@@ -269,7 +330,8 @@ python main.py wework-external-mock --roomid "wrXXXX" --text "香港公司注册
 | `python main.py wework-external-bot` | 启动外部群 bot |
 | `python main.py wework-external-mock --roomid X --create-group` | 模拟建群 |
 | `python main.py wework-external-mock --roomid X --create-group --force` | 强制重发欢迎语 |
-| `python main.py wework-external-mock --roomid X --text "问题"` | 模拟客户消息 |
+| `python main.py wework-kf-mock --open-kfid X --text "问题"` | Mock 注入 kf 私聊 |
+| `python main.py wework-kf-mock --simulate-callback --open-kfid X` | Mock kf 回调触发 sync |
 | `python main.py run --step register --roomid wrXXX` | 从群 DB 加载材料跑 ICRIS 注册 |
 
 ---

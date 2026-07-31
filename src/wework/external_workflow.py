@@ -51,7 +51,7 @@ class ExternalGroupWorkflow:
         try:
             ctx = self.workflow.step_icris_register(ctx)
             icris_user = company_data.get("icris_account", {}).get("username", "")
-            self.external.send_group_text(
+            self.external.send_session_text(
                 roomid,
                 "材料已确认并打包完成。\n"
                 f"ICRIS 账号注册表单已填写（dry_run={settings.dry_run}，未提交）。\n"
@@ -61,7 +61,7 @@ class ExternalGroupWorkflow:
             )
         except Exception as e:
             logger.exception("ICRIS 注册失败 roomid=%s", roomid)
-            self.external.send_group_text(
+            self.external.send_session_text(
                 roomid,
                 f"材料已打包，但 ICRIS 自动填写失败: {e}\n请专员人工处理。",
                 sender_userid=owner,

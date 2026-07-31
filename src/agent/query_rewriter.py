@@ -9,6 +9,7 @@ from src.agent.models import RetrievalEval
 from src.rag.models import RetrievedChunk
 
 CAUTION_QUERY_RE = re.compile(r"注意|要注意|注意事项")
+DURATION_QUERY_RE = re.compile(r"多久|多长时间|要多久|多久能|周期")
 
 
 class QueryRewriter:
@@ -34,6 +35,8 @@ class QueryRewriter:
             extra.append("香港公司注册")
         if "资料" in question or "材料" in question:
             extra.append("资料清单")
+        if DURATION_QUERY_RE.search(question):
+            extra.extend(["审核周期", "开户审核", "正式提交"])
         if not extra:
             return question
         return f"{question} {' '.join(extra)}"

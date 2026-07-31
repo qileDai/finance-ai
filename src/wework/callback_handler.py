@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,53 @@ class ExternalChatEvent:
 def _text(root: ET.Element, tag: str) -> str:
     node = root.find(tag)
     return (node.text or "").strip() if node is not None else ""
+
+
+@dataclass
+class KfMsgOrEvent:
+    """微信客服消息/事件通知（kf_msg_or_event）"""
+
+    token: str
+    open_kfid: str
+    create_time: int = 0
+    raw: dict[str, str] = field(default_factory=dict)
+
+
+def parse_kf_callback_xml(xml_text: str) -> KfMsgOrEvent | None:
+    """解析解密后的微信客服 kf_msg_or_event 回调 XML"""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.error("kf 回调 XML 解析失败: %s", e)
+        return None
+
+    msg_type = _text(root, "MsgType")
+    if msg_type != "event":
+        return None
+
+    event = _text(root, "Event")
+    if event != "kf_msg_or_event":
+        return None
+
+    token = _text(root, "Token")
+    open_kfid = _text(root, "OpenKfId")
+    if not open_kfid:
+        logger.warning("kf_msg_or_event 缺少 OpenKfId")
+        return None
+
+    create_time_raw = _text(root, "CreateTime")
+    try:
+        create_time = int(create_time_raw) if create_time_raw else 0
+    except ValueError:
+        create_time = 0
+
+    raw = {child.tag: (child.text or "") for child in root}
+    return KfMsgOrEvent(
+        token=token,
+        open_kfid=open_kfid,
+        create_time=create_time,
+        raw=raw,
+    )
 
 
 def parse_external_callback_xml(xml_text: str) -> ExternalChatEvent | None:

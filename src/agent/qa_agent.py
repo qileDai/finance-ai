@@ -13,6 +13,11 @@ from src.agent.models import (
     AnswerMode,
     QAResult,
 )
+from src.agent.domain import (
+    hits_contain_timeline_or_topic,
+    hits_have_timeline_content,
+    is_registration_domain,
+)
 from src.agent.query_rewriter import QueryRewriter
 from src.agent.scoring.answer_scorer import AnswerScorer
 from src.agent.scoring.retrieval_scorer import RetrievalScorer
@@ -124,8 +129,14 @@ class QAAgent:
             total_retries += 1
 
         use_knowledge = bool(hits) and r_eval is not None and r_eval.passed
+        use_soft_knowledge = (
+            not use_knowledge
+            and hits
+            and is_registration_domain(question)
+            and hits_contain_timeline_or_topic(hits, question)
+        )
 
-        if use_knowledge:
+        if use_knowledge or use_soft_knowledge:
             return self._run_knowledge_mode(
                 run_id=run_id,
                 question=question,
@@ -134,6 +145,8 @@ class QAAgent:
                 trace=trace,
                 total_retries=total_retries,
                 max_retries=max_retries,
+                soft=use_soft_knowledge,
+                skip_low_confidence_silent=is_registration_domain(question),
             )
 
         if settings.agent_contextual_fallback:
@@ -168,6 +181,8 @@ class QAAgent:
         trace: list[AgentTraceStep],
         total_retries: int,
         max_retries: int,
+        soft: bool = False,
+        skip_low_confidence_silent: bool = False,
     ) -> QAResult:
         context = format_hits_for_prompt(hits)
         answer = self.llm.generate_answer(question, context)
@@ -184,6 +199,7 @@ class QAAgent:
                     attempt=attempt,
                     data={
                         "mode": answer_mode.value,
+                        "soft": soft,
                         "score": a_eval.score,
                         "passed": a_eval.passed,
                         "faithfulness": a_eval.faithfulness,
@@ -194,7 +210,12 @@ class QAAgent:
                 )
             )
             if a_eval.passed or attempt >= max_retries:
-                if not a_eval.passed and settings.agent_abstain_on_low_confidence:
+                if (
+                    not a_eval.passed
+                    and settings.agent_abstain_on_low_confidence
+                    and not soft
+                    and not skip_low_confidence_silent
+                ):
                     final_action = self._resolve_failure_action()
                     answer = self._failure_answer(final_action)
                     if final_action == AgentAction.SILENT:
@@ -236,7 +257,7 @@ class QAAgent:
         group_meta: dict[str, str],
     ) -> QAResult:
         ctx_result = self.llm.generate_contextual_answer(
-            question, history=history, group_meta=group_meta,
+            question, history=history, group_meta=group_meta, hits=hits,
         )
         trace.append(
             AgentTraceStep(
@@ -250,6 +271,22 @@ class QAAgent:
         )
 
         if not ctx_result.get("can_answer"):
+            if (
+                is_registration_domain(question)
+                and hits
+                and hits_have_timeline_content(hits)
+            ):
+                return self._run_knowledge_mode(
+                    run_id=run_id,
+                    question=question,
+                    hits=hits,
+                    retrieval_score=retrieval_score,
+                    trace=trace,
+                    total_retries=total_retries,
+                    max_retries=0,
+                    soft=True,
+                    skip_low_confidence_silent=True,
+                )
             return self._silent_result(
                 run_id=run_id,
                 question=question,

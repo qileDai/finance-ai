@@ -433,6 +433,9 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     port = settings.wework_external_callback_port
 
     print(f"[外部群] 运行模式: {mode}")
+    print(f"[外部群] 双通道: {settings.wework_channel_resolved} "
+          f"(群={'开' if settings.wework_channel_group_enabled else '关'}, "
+          f"客服={'开' if settings.wework_channel_kf_enabled else '关'})")
     print(f"[外部群] 企微已配置: {settings.wework_configured}")
     print(f"[外部群] 回调已配置: {settings.wework_external_callback_configured}")
     print(f"[外部群] 存档已配置: {settings.wework_archive_configured}")
@@ -478,7 +481,10 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
             "请在 .env 配置 WEWORK_EXTERNAL_CALLBACK_TOKEN 与 WEWORK_EXTERNAL_CALLBACK_AES_KEY"
         )
 
-    archive.start_polling(router, blocking=False)
+    if settings.wework_channel_group_enabled:
+        archive.start_polling(router, blocking=False)
+    else:
+        print("[外部群] 群通道已关闭（WEWORK_CHANNEL 不含 group），存档 worker 未启动")
 
     from src.wework.kf_worker import KfSyncWorker
 
@@ -487,26 +493,100 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         external=router.state_machine.external,
         state_machine=router.state_machine,
     )
-    if settings.wework_kf_sync_enabled and settings.wework_kf_configured:
-        print(f"[外部群] kf 入站同步: 已启用（间隔 {settings.wework_kf_poll_interval}s）")
-        kf_worker.start_polling(blocking=False)
+    if settings.wework_channel_kf_enabled and settings.wework_kf_configured:
+        mode = settings.wework_kf_mode_resolved
+        if settings.wework_kf_poll_enabled:
+            print(
+                f"[外部群] kf 轮询: 已启用（模式={mode}，间隔 {settings.wework_kf_poll_interval}s，"
+                f"账号 {len(settings.wework_kf_open_kfid_list)} 个）"
+            )
+            kf_worker.start_polling(blocking=False)
+        else:
+            print(f"[外部群] kf 轮询: 未启用（WEWORK_KF_MODE={mode}）")
+        if settings.wework_kf_push_enabled:
+            if settings.wework_external_callback_configured:
+                print(
+                    "[外部群] kf 推送: 已启用（回调 URL 收到 kf_msg_or_event 后触发 sync_msg）"
+                )
+            else:
+                print(
+                    "[外部群] kf 推送: 需配置 WEWORK_EXTERNAL_CALLBACK_TOKEN/AESKey "
+                    "并在微信客服后台填写回调 URL"
+                )
+    elif not settings.wework_channel_kf_enabled:
+        print("[外部群] kf 通道已关闭（WEWORK_CHANNEL 不含 kf）")
     else:
-        print("[外部群] kf 入站同步: 未启用（需 WEWORK_KF_* 且 WEWORK_KF_SYNC_ENABLED=true）")
+        print("[外部群] kf 未启用（需 WEWORK_KF_* 配置）")
 
     if settings.wework_welcome_auto_checklist:
         print("[外部群] 建群欢迎后自动发清单: 已启用")
     else:
         print("[外部群] 建群欢迎后自动发清单: 已关闭（客户需发 /资料）")
 
-    web = UnifiedWebServer(router=router, port=port)
+    web = UnifiedWebServer(router=router, port=port, kf_worker=kf_worker)
     print(f"\n[外部群] 开始监听… 回调 URL: https://<域名>{CALLBACK_PATH}")
     print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
     print("[外部群] 按 Ctrl+C 退出\n")
     try:
         web.start(blocking=True)
     finally:
-        archive.close()
+        if settings.wework_channel_group_enabled:
+            archive.close()
         kf_worker.stop_polling()
+
+
+def cmd_wework_kf_mock(args: argparse.Namespace) -> None:
+    """Mock 注入微信客服私聊消息或模拟首次欢迎 / 回调 sync"""
+    from config.settings import settings
+    from src.wework.kf_session import build_kf_roomid
+    from src.wework.message_router import MessageRouter
+
+    router = MessageRouter()
+    from_id = args.from_id or "wmMockKfUser001"
+    if not from_id.startswith("wm"):
+        from_id = f"wm{from_id}"
+
+    open_kfid = (
+        getattr(args, "open_kfid", None)
+        or settings.wework_kf_default_open_kfid
+        or "wkMockKf"
+    )
+
+    if not settings.wework_kf_configured:
+        router.state_machine.external._mock_mode = True
+
+    print(f"[Mock-KF] open_kfid={open_kfid}")
+    print(f"[Mock-KF] 目标客户 external_userid={from_id}")
+    print(f"[Mock-KF] 微信客服已配置={settings.wework_kf_configured}")
+    print(f"[Mock-KF] 模式={settings.wework_kf_mode_resolved}")
+    print(f"[Mock-KF] 发送模式={settings.wework_external_send_mode_resolved}")
+
+    if getattr(args, "simulate_callback", False):
+        print(f"[Mock-KF] 模拟 kf_msg_or_event 回调 → sync_for_account")
+        router.simulate_kf_callback(open_kfid, token=getattr(args, "token", "") or "mock_token")
+        print("[Mock-KF] 完成")
+        return
+
+    if args.first_contact:
+        print("[Mock-KF] 模拟首次私聊欢迎 + 清单")
+        router.simulate_kf_first_contact(from_id, open_kfid=open_kfid)
+        print("[Mock-KF] 完成")
+        return
+
+    if not args.text:
+        print("请提供 --text、--first-contact 或 --simulate-callback")
+        raise SystemExit(1)
+
+    router.inject_kf_message(from_id, args.text, open_kfid=open_kfid)
+    import time
+    time.sleep(6)
+    print("[Mock-KF] 处理完成（含 AI 防抖等待）")
+    roomid = build_kf_roomid(open_kfid, from_id)
+    msgs = router.state_machine.external.get_mock_messages(roomid)
+    if msgs:
+        print(f"[Mock-KF] Mock 出站 {len(msgs)} 条:")
+        for m in msgs[-3:]:
+            print(f"  → {m.get('content', '')[:120]}")
 
 
 def _resolve_mock_from_id(router, roomid: str, from_id: str) -> str:
@@ -771,8 +851,11 @@ def cmd_agent_eval(args: argparse.Namespace) -> None:
         ("进群怎么打招呼", "hk"),
         ("香港注册需要什么资料", "hk"),
         ("开户面签要注意什么", "hk"),
+        ("香港开户需要多久", "hk"),
     ]
     CAUTION_MARKERS = ("面签注意事项", "被制裁国家", "仅需要面签人员", "不要拍照")
+    DURATION_QUERY = "香港开户需要多久"
+    DURATION_ANSWER_MARKERS = ("3-4", "周", "审核")
     NUMBERED_RE = re.compile(r"[1-9][、.)．]")
 
     retriever = HybridRetriever()
@@ -818,6 +901,29 @@ def cmd_agent_eval(args: argparse.Namespace) -> None:
             f"OK    {caution_query} → mode={result.answer_mode.value} "
             f"confidence={result.confidence} numbered={numbered}"
         )
+
+    print("\n--- 端到端 QA golden（开户时效）---")
+    duration_result = orchestrator.run_qa(
+        AgentContext(question=DURATION_QUERY, scope=scope),
+    )
+    duration_ok = (
+        duration_result.action.value == "reply"
+        and duration_result.answer.strip()
+        and any(m in duration_result.answer for m in DURATION_ANSWER_MARKERS)
+    )
+    if duration_ok:
+        print(
+            f"OK    {DURATION_QUERY} → mode={duration_result.answer_mode.value} "
+            f"action={duration_result.action.value} "
+            f"answer={duration_result.answer[:60]}..."
+        )
+    else:
+        print(
+            f"FAIL  {DURATION_QUERY} → mode={duration_result.answer_mode.value} "
+            f"action={duration_result.action.value} "
+            f"silent={duration_result.silent_reason[:40] if duration_result.silent_reason else ''}"
+        )
+        failed += 1
 
     print("\n--- 三级策略：无关问题应静默 ---")
     off_topic = "帮我订一张明天去北京的机票"
@@ -907,6 +1013,38 @@ def main() -> None:
     )
     ext_mock.set_defaults(func=cmd_wework_external_mock)
 
+    kf_mock = sub.add_parser(
+        "wework-kf-mock",
+        help="Mock：注入微信客服私聊消息或模拟首次欢迎",
+    )
+    kf_mock.add_argument(
+        "--from-id",
+        default="wmMockKfUser001",
+        help="外部联系人 wm ID",
+    )
+    kf_mock.add_argument(
+        "--open-kfid",
+        default="",
+        help="客服账号 open_kfid（默认取配置首个账号）",
+    )
+    kf_mock.add_argument("--text", default="", help="模拟客户在客服会话发送的文本")
+    kf_mock.add_argument(
+        "--first-contact",
+        action="store_true",
+        help="模拟首次进入客服（欢迎语+清单）",
+    )
+    kf_mock.add_argument(
+        "--simulate-callback",
+        action="store_true",
+        help="模拟 kf_msg_or_event 回调并触发 sync_for_account",
+    )
+    kf_mock.add_argument(
+        "--token",
+        default="",
+        help="与 --simulate-callback 联用的 mock Token",
+    )
+    kf_mock.set_defaults(func=cmd_wework_kf_mock)
+
     rag_ingest = sub.add_parser("rag-ingest", help="入库 docs/knowledge/ 知识文档到 RAG")
     rag_ingest.add_argument("--file", default="", help="仅入库指定文件")
     rag_ingest.add_argument("--verbose", action="store_true", help="输出首块预览")
@@ -974,6 +1112,8 @@ def main() -> None:
         cmd_wework_external_bot(args)
     elif args.command == "wework-external-mock":
         cmd_wework_external_mock(args)
+    elif args.command == "wework-kf-mock":
+        cmd_wework_kf_mock(args)
     elif args.command == "rag-ingest":
         cmd_rag_ingest(args)
     elif args.command == "rag-status":
