@@ -72,6 +72,9 @@ def format_progress_text(materials: dict[str, dict[str, Any]]) -> str:
         lines.extend(f"  - {lbl}" for lbl in p["missing_labels"][:10])
         if len(p["missing_labels"]) > 10:
             lines.append(f"  … 等共 {len(p['missing_labels'])} 项")
+        lines.append("请按上表继续补充，补齐后我会提醒您开始注册。")
     else:
-        lines.append("必填项已齐全，请回复「确认」进入审核。")
+        lines.append(
+            "必填资料已齐全。请回复「确认」或「开始注册」进入注册流程。"
+        )
     return "\n".join(lines)

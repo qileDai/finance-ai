@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     wework_kf_poll_interval: int = 120
     # 可选：群 Webhook（仅内部群支持，外部客户群不可用）
     wework_external_group_webhook_url: str = ""
+    # 资料意图分流：规则不确定时是否单次 LLM 分类（失败回退 qa）
+    wework_intent_llm_fallback: bool = True
 
     # H5 材料收集表单
     collect_form_enabled: bool = False  # True 时才暴露 H5 链接与 /collect/form 路由

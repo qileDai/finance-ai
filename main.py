@@ -414,7 +414,13 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     from config.settings import settings
     from src.storage.db import ExternalGroupStore
     from src.wework.archive_client import ArchiveClient
-    from src.web.collect_server import UnifiedWebServer, CALLBACK_PATH, ADMIN_PATH, FORM_PREFIX
+    from src.web.collect_server import (
+        UnifiedWebServer,
+        CALLBACK_PATH,
+        WEBHOOK_PATH,
+        ADMIN_PATH,
+        FORM_PREFIX,
+    )
     from src.wework.message_router import MessageRouter
 
     logging.basicConfig(
@@ -440,7 +446,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     print(f"[外部群] 回调已配置: {settings.wework_external_callback_configured}")
     print(f"[外部群] 存档已配置: {settings.wework_archive_configured}")
     print(f"[外部群] 回调端口: {port}")
-    print(f"[外部群] 回调路径: {CALLBACK_PATH}")
+    print(f"[外部群] 回调路径: {WEBHOOK_PATH}（公网优先）| {CALLBACK_PATH}（兼容）")
     if settings.collect_form_enabled:
         print(f"[外部群] 材料收集: H5 在线表单")
         print(f"[外部群] 表单路径: {FORM_PREFIX}{{token}}")
@@ -524,7 +530,8 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         print("[外部群] 建群欢迎后自动发清单: 已关闭（客户需发 /资料）")
 
     web = UnifiedWebServer(router=router, port=port, kf_worker=kf_worker)
-    print(f"\n[外部群] 开始监听… 回调 URL: https://<域名>{CALLBACK_PATH}")
+    print(f"\n[外部群] 开始监听… 公网回调: http://szyingtai.cn{WEBHOOK_PATH}")
+    print(f"[外部群] 本机回调: http://127.0.0.1:{port}{WEBHOOK_PATH} 或 {CALLBACK_PATH}")
     print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
     print("[外部群] 按 Ctrl+C 退出\n")
     try:

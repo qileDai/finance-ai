@@ -17,6 +17,7 @@ from src.wework.message_router import MessageRouter
 logger = logging.getLogger(__name__)
 
 CALLBACK_PATH = "/wework/external/callback"
+WEBHOOK_PATH = "/webhook"
 
 
 @dataclass
@@ -50,7 +51,12 @@ class ExternalWebhookServer:
                 logger.debug("HTTP %s", format % args)
 
             def _path_ok(self) -> bool:
-                return self.path.startswith(callback_path) or self.path == "/"
+                path = urlparse(self.path).path.rstrip("/") or "/"
+                if path == "/" or path == callback_path or path.startswith(callback_path + "/"):
+                    return True
+                if path == WEBHOOK_PATH or path.startswith(WEBHOOK_PATH + "/"):
+                    return True
+                return False
 
             def do_GET(self):
                 if not self._path_ok():

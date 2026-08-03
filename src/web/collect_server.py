@@ -25,8 +25,22 @@ from src.wework.message_router import MessageRouter
 logger = logging.getLogger(__name__)
 
 CALLBACK_PATH = "/wework/external/callback"
+# 公网企微回调别名（如 http://szyingtai.cn/webhook）
+WEBHOOK_PATH = "/webhook"
 FORM_PREFIX = "/collect/form/"
 ADMIN_PATH = "/admin/groups"
+
+
+def _is_callback_path(path: str) -> bool:
+    """是否企微回调路径（含公网 /webhook 别名）"""
+    p = (path or "").rstrip("/") or "/"
+    if p == "/":
+        return True
+    if p == CALLBACK_PATH or p.startswith(CALLBACK_PATH + "/"):
+        return True
+    if p == WEBHOOK_PATH or p.startswith(WEBHOOK_PATH + "/"):
+        return True
+    return False
 
 
 @dataclass
@@ -86,7 +100,7 @@ class UnifiedWebServer:
 
             def do_GET(self):
                 path = urlparse(self.path).path
-                if path.startswith(CALLBACK_PATH) or path == "/":
+                if _is_callback_path(path):
                     return self._handle_callback_get()
                 if path.startswith(FORM_PREFIX):
                     if not settings.collect_form_enabled:
@@ -100,7 +114,7 @@ class UnifiedWebServer:
 
             def do_POST(self):
                 path = urlparse(self.path).path
-                if path.startswith(CALLBACK_PATH) or path == "/":
+                if _is_callback_path(path):
                     return self._handle_callback_post()
                 if path.startswith(FORM_PREFIX):
                     if not settings.collect_form_enabled:
@@ -269,10 +283,18 @@ button{{padding:0.6em 1.2em;font-size:1em}}
         server = ThreadingHTTPServer((self.host, self.port), Handler)
         collect_mode = "H5 在线表单" if settings.collect_form_enabled else "群内粘贴（H5 已关闭）"
         logger.info(
-            "[Web] 已启动 http://%s:%s (回调/管理; 材料收集: %s)",
+            "[Web] 已启动 http://%s:%s (回调 %s 与 %s; 材料收集: %s)",
             self.host,
             self.port,
+            WEBHOOK_PATH,
+            CALLBACK_PATH,
             collect_mode,
+        )
+        logger.info(
+            "[Web] 公网回调示例: http://szyingtai.cn%s （须反代到本机 %s%s）",
+            WEBHOOK_PATH,
+            self.port,
+            WEBHOOK_PATH,
         )
         if blocking:
             try:

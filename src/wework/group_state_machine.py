@@ -12,10 +12,16 @@ from config.settings import PROJECT_ROOT, settings
 from src.llm.openai_client import LLMClient
 from src.materials.aggregator import aggregate_company_data, is_ready_for_confirm
 from src.materials.checklist import format_progress_text
-from src.materials.form_parser import fields_to_material_rows, parse_registration_form
+from src.materials.form_parser import extract_material_fields, fields_to_material_rows
 from src.storage.db import ExternalGroupStore
 from src.wework.external_client import WeWorkExternalClient
 from src.wework.external_workflow import ExternalGroupWorkflow
+from src.wework.intent_router import (
+    INTENT_ASK_PROGRESS,
+    INTENT_SUBMIT_MATERIAL,
+    INTENT_UNCLEAR_MATERIAL,
+    classify_intent,
+)
 from src.wework.kf_session import (
     build_kf_roomid,
     is_kf_session,
@@ -396,16 +402,36 @@ class GroupStateMachine:
             self.store.mark_message_processed(msgid)
             return
 
-        if text in ("确认", "确认无误", "/确认") or re.match(r"^确认[。!！]?$", text):
+        if (
+            text in ("确认", "确认无误", "/确认", "开始注册", "/开始注册")
+            or re.match(r"^确认[。!！]?$", text)
+            or re.match(r"^开始注册[。!！]?$", text)
+        ):
             self._handle_confirm(roomid, from_id)
             self.store.mark_message_processed(msgid)
             return
 
-        # 键=值 表单粘贴
-        if "=" in text or "：" in text or ":" in text:
-            result = parse_registration_form(text)
-            if result.fields:
-                for row in fields_to_material_rows(result.fields, source="chat_form"):
+        # 意图分流：材料/进度不进 RAG；业务问答才防抖进 QA
+        intent_result = classify_intent(text, status=status)
+        intent = intent_result.intent
+        logger.info(
+            "意图分流 room=%s status=%s intent=%s source=%s fields=%s",
+            roomid,
+            status,
+            intent,
+            intent_result.source,
+            list(intent_result.fields.keys()),
+        )
+
+        if intent == INTENT_ASK_PROGRESS:
+            self._send_progress(roomid, to_external_userid=wm_target)
+            self.store.mark_message_processed(msgid)
+            return
+
+        if intent in (INTENT_SUBMIT_MATERIAL, INTENT_UNCLEAR_MATERIAL):
+            fields = dict(intent_result.fields) if intent_result.fields else extract_material_fields(text)
+            if fields:
+                for row in fields_to_material_rows(fields, source="chat_form"):
                     fk = row.pop("field_key")
                     self.store.upsert_material(roomid, fk, **row)
                 self.store.set_group_status(roomid, GROUP_STATUS_COLLECTING)
@@ -416,8 +442,18 @@ class GroupStateMachine:
                 )
                 if is_ready_for_confirm(self.store.get_materials(roomid)):
                     self._send_review_summary(roomid, to_external_userid=wm_target)
-                self.store.mark_message_processed(msgid)
-                return
+            else:
+                # 明确是交资料但解析失败：缺项 + /填表，不走 RAG
+                progress = format_progress_text(self.store.get_materials(roomid))
+                self.store.set_group_status(roomid, GROUP_STATUS_COLLECTING)
+                self._safe_send(
+                    roomid,
+                    f"{progress}\n\n"
+                    "未识别到可入库字段。请按「键=值」发送，或发送 /填表 / /模板 获取填写指引。",
+                    to_external_userid=wm_target,
+                )
+            self.store.mark_message_processed(msgid)
+            return
 
         if status in (GROUP_STATUS_CONFIRMED, GROUP_STATUS_HANDOFF):
             self.store.mark_message_processed(msgid)
@@ -546,7 +582,8 @@ class GroupStateMachine:
         self.store.set_group_status(roomid, GROUP_STATUS_REVIEW)
         self._safe_send(
             roomid,
-            f"【材料确认】\n{summary}\n\n请核对后回复「确认」启动打包与 ICRIS 注册（dry_run）。",
+            f"【材料确认】资料已齐全，可以开始注册。\n{summary}\n\n"
+            f"请核对无误后回复「确认」或「开始注册」。",
             to_external_userid=to_external_userid,
         )
 
@@ -563,7 +600,7 @@ class GroupStateMachine:
         self.store.set_group_status(roomid, GROUP_STATUS_CONFIRMED)
         self._safe_send(
             roomid,
-            "已收到确认，正在打包材料并启动 ICRIS 注册…",
+            "已收到，开始为您办理注册：正在打包材料并启动后续流程…",
             to_external_userid=wm,
         )
         threading.Thread(

@@ -67,7 +67,8 @@ python main.py wework-kf-mock --from-id wmTEST001 --text "香港开户需要多�
 
 1. 应用 → **客户联系** → **API** → **接收事件服务器**
 2. 填写：
-   - **URL**：`https://<你的公网域名>/wework/external/callback`
+   - **URL**：`http://szyingtai.cn/webhook`（须 Nginx 反代到本机 `8081/webhook`；建议后续升 https）  
+     兼容路径：`/wework/external/callback`
    - **Token**：与 `.env` 中 `WEWORK_EXTERNAL_CALLBACK_TOKEN` 一致（可与 `WEWORK_TOKEN` 相同）
    - **EncodingAESKey**：与 `WEWORK_EXTERNAL_CALLBACK_AES_KEY` 一致
 3. 保存前**必须先启动**本地 bot（见下文），否则 URL 验证失败
@@ -189,7 +190,8 @@ ngrok http 8081
 将 ngrok 给出的 HTTPS 地址配置到管理后台：
 
 ```
-https://xxxx.ngrok-free.app/wework/external/callback
+http://szyingtai.cn/webhook
+# 或本地穿透: https://xxxx.ngrok-free.app/webhook
 ```
 
 保存后日志应出现：`[外部群] URL 验证成功`
@@ -261,7 +263,7 @@ WEWORK_DEFAULT_GROUP_OWNER_USERID=YingTaiJiTuanDengXianSheng
 2. 服务立即返回 200 → 后台调用 `kf/sync_msg` 拉取完整消息
 3. AI 处理 → `kf/send_msg` 回复（[发送消息](https://kf.weixin.qq.com/api/doc/path/94744)）
 
-**企微后台**：微信客服 → 开发配置 → 回调 URL 填 `https://<域名>/wework/external/callback`，Token/AESKey 与 `.env` 中 `WEWORK_EXTERNAL_CALLBACK_*` 一致。
+**企微后台**：微信客服 → 开发配置 → 回调 URL 填 `http://szyingtai.cn/webhook`（Nginx 反代到 bot 的 `8081/webhook`），Token/AESKey 与 `.env` 中 `WEWORK_EXTERNAL_CALLBACK_*` 一致。本服务同时兼容 `/wework/external/callback`。
 
 ```env
 WEWORK_KF_MODE=both          # push=仅回调 | poll=仅轮询 | both=推荐
