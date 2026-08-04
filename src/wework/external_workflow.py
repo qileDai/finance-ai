@@ -48,16 +48,35 @@ class ExternalGroupWorkflow:
 
         owner = (self.store.get_group(roomid) or {}).get("owner_userid") or None
 
+        allow_submit = (not settings.dry_run) and bool(settings.icris_allow_submit)
         try:
             ctx = self.workflow.step_icris_register(ctx)
-            icris_user = company_data.get("icris_account", {}).get("username", "")
+            if allow_submit:
+                customer_msg = (
+                    "材料已确认并打包完成。\n"
+                    "ICRIS 账号注册流程已执行（含提交开关开启）。\n"
+                    f"申请人: {company_data.get('applicant', {}).get('name_en', '')}\n"
+                    "如页面有异常，专员将跟进复核。"
+                )
+                notify_extra = "allow_submit=true"
+            else:
+                customer_msg = (
+                    "材料已确认并打包完成。\n"
+                    "ICRIS 注册表单已自动填写（预览模式，未点击最终提交）。\n"
+                    "后续将由专员复核后人工提交，请耐心等候。\n"
+                    f"申请人: {company_data.get('applicant', {}).get('name_en', '')}"
+                )
+                notify_extra = f"dry_run={settings.dry_run} icris_allow_submit={settings.icris_allow_submit}"
             self.external.send_session_text(
                 roomid,
-                "材料已确认并打包完成。\n"
-                f"ICRIS 账号注册表单已填写（dry_run={settings.dry_run}，未提交）。\n"
-                f"材料包路径: {package_dir}\n"
-                f"申请人: {company_data.get('applicant', {}).get('name_en', '')}",
+                customer_msg,
                 sender_userid=owner,
+            )
+            logger.info(
+                "ICRIS handoff ok roomid=%s package=%s %s",
+                roomid,
+                package_dir,
+                notify_extra,
             )
         except Exception as e:
             logger.exception("ICRIS 注册失败 roomid=%s", roomid)
@@ -71,9 +90,10 @@ class ExternalGroupWorkflow:
         if notify_id:
             self.external.send_text_to_user(
                 str(notify_id),
-                f"【外部群注册完成】群 {roomid}\n"
+                f"【外部群注册交接】群 {roomid}\n"
                 f"公司: {company_data.get('company_name_en', '')}\n"
-                f"材料包: {package_dir}",
+                f"材料包: {package_dir}\n"
+                f"dry_run={settings.dry_run} allow_submit={allow_submit}",
             )
 
         return ctx

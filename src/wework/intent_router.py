@@ -1,4 +1,4 @@
-"""轻量意图路由：规则优先，可选 LLM 回退（不引入 LangGraph）"""
+"""轻量意图分类：规则优先，可选 LLM 回退（由 message_graph 编排）"""
 
 from __future__ import annotations
 

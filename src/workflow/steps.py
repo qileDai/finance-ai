@@ -118,17 +118,25 @@ class RegistrationWorkflow:
         return ctx
 
     def step_icris_register(self, ctx: WorkflowContext) -> WorkflowContext:
-        """④ ICRIS 账号注册（浏览器填写，不提交）"""
+        """④ ICRIS 账号注册（浏览器填写；仅开关允许时提交）"""
+        from config.settings import settings
         from src.browser.icris_registration import IcrisRegistrationBot
         from src.materials.packager import load_mock_data
 
-        ctx.log("=== 步骤④ ICRIS 账号注册（Mock 填写，不提交）===")
+        allow_submit = (not settings.dry_run) and bool(settings.icris_allow_submit)
+        ctx.log(
+            f"=== 步骤④ ICRIS 账号注册（dry_run={settings.dry_run}, "
+            f"allow_submit={allow_submit}）==="
+        )
         if not ctx.company_data:
             ctx.company_data = load_mock_data()
             ctx.log("未提供资料，使用 mock 数据")
         bot = IcrisRegistrationBot(self.llm)
         asyncio.run(bot.run(ctx.company_data))
-        ctx.log("ICRIS 注册表单已填写（未提交）")
+        if allow_submit:
+            ctx.log("ICRIS 注册流程已执行（含提交开关）")
+        else:
+            ctx.log("ICRIS 注册表单已填写（未提交）")
         return ctx
 
     def step_read_email(self, ctx: WorkflowContext) -> WorkflowContext:

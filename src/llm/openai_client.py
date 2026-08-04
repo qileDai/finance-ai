@@ -52,12 +52,21 @@ class LLMClient:
             logger.warning("LLM JSON 解析失败: %s", raw[:200])
             return {}
 
-    def generate_answer(self, question: str, context: str) -> str:
+    def generate_answer(
+        self,
+        question: str,
+        context: str,
+        *,
+        history: list[str] | None = None,
+        group_meta: dict[str, str] | None = None,
+    ) -> str:
         system = (
             "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"
             "用简洁专业的中文回答客户问题。"
             "请优先依据「检索片段」作答，片段未提及的内容不要编造。"
             "若片段中有编号列表或注意事项，请完整保留要点。"
+            "可结合「近期对话」与「已收集材料」理解指代（如刚才的身份证、我的号码）。"
+            "材料摘要中已有的证件类型/号码，可直接据实告知客户；摘要没有则勿编造。"
         )
         if re.search(r"注意|要注意|注意事项", question):
             system += (
@@ -69,8 +78,24 @@ class LLMClient:
                 "客户询问办理时效，请依据检索片段中的审核周期、工作日等明确时间作答，"
                 "直接给出具体时间范围。"
             )
-        user = f"检索片段:\n{context.strip()}\n\n客户问题: {question}" if context.strip() else question
-        return self.chat(system, user)
+        parts: list[str] = []
+        if context.strip():
+            parts.append(f"检索片段:\n{context.strip()}")
+        if history:
+            hist_text = "\n".join(f"- {h}" for h in history[-10:])
+            parts.append(f"近期对话:\n{hist_text}")
+        if group_meta:
+            mat = (group_meta.get("materials_summary") or "").strip()
+            if mat:
+                parts.append(f"已收集材料: {mat}")
+            meta = ", ".join(
+                f"{k}={v}" for k, v in group_meta.items()
+                if v and k != "materials_summary"
+            )
+            if meta:
+                parts.append(f"会话信息: {meta}")
+        parts.append(f"客户问题: {question}")
+        return self.chat(system, "\n\n".join(parts))
 
     def regenerate_answer(
         self, question: str, context: str, prev_answer: str, feedback: str,

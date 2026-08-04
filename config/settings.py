@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_api_base: str = "https://ai-yyds.com/v1"
     openai_model: str = "gpt-4o-mini"
+    openai_vision_model: str = ""  # 空则回退 openai_model；证件看图识别用
+
+    # 管理后台 Basic Auth（空密码则拒绝访问 /admin）
+    admin_username: str = Field(default="admin", validation_alias="ADMIN_USERNAME")
+    admin_password: str = Field(default="", validation_alias="ADMIN_PASSWORD")
 
     # 企业微信
     wework_corp_id: str = ""
@@ -63,13 +68,21 @@ class Settings(BaseSettings):
     wework_external_group_webhook_url: str = ""
     # 资料意图分流：规则不确定时是否单次 LLM 分类（失败回退 qa）
     wework_intent_llm_fallback: bool = True
+    # 上传证件图片时是否多模态识别类型（HKID/PRC_ID/PASSPORT）与号码
+    wework_id_vision_enabled: bool = True
+    # QA 生成前先发「思考中」提示（占客服额度 1 条；默认关闭）
+    wework_thinking_ack_enabled: bool = False
+    wework_thinking_ack_text: str = "正在为您查询，请稍候…"
 
     # H5 材料收集表单
     collect_form_enabled: bool = False  # True 时才暴露 H5 链接与 /collect/form 路由
     collect_form_base_url: str = ""
     collect_form_jwt_secret: str = ""
 
-    # 对象存储（可选，未配置则使用 data/materials/ 本地存储）
+    # 材料文件根目录：相对路径相对项目根；绝对路径用于生产服务器
+    # 本地默认 data/materials；生产示例 /var/lib/finance-ai/materials
+    materials_dir: str = Field(default="data/materials", validation_alias="MATERIALS_DIR")
+    # 对象存储（可选，未配置则使用 materials_dir 本地存储）
     oss_endpoint: str = ""
     oss_bucket: str = ""
     oss_access_key: str = ""
@@ -110,13 +123,15 @@ class Settings(BaseSettings):
     twocaptcha_max_variants: int = 1  # 1=最快（单图）；3~5 提高准确率但更慢
     twocaptcha_timeout: int = 60  # 单次 2Captcha 任务超时（秒）
     twocaptcha_poll_interval: float = 1.0  # 轮询间隔（秒），首查不等待
-    captcha_save_debug: bool = True
+    captcha_save_debug: bool = False
     # Ollama 本地视觉模型（免费，推荐 qwen2.5vl:7b）
     ollama_base_url: str = "http://localhost:11434"
     ollama_vision_model: str = ""  # 留空则不使用，如 qwen2.5vl:7b
 
     # 工作流
     dry_run: bool = True
+    # True 且 dry_run=False 时才允许点击 ICRIS 最终提交（生产默认仍关闭）
+    icris_allow_submit: bool = False
     notify_colleague_open_id: str = ""
 
     # RAG 知识检索（SQLite FTS5 + Qdrant）
@@ -146,10 +161,16 @@ class Settings(BaseSettings):
     agent_enable_llm_judge: bool = True
     agent_llm_judge_always: bool = False
     agent_log_runs: bool = True
-    agent_silent_on_no_answer: bool = True
+    # 生产建议：域内失败给客户可见兜底，勿裸静默
+    agent_silent_on_no_answer: bool = False
     agent_contextual_fallback: bool = True
     agent_context_history_limit: int = 10
-    agent_abstain_message_to_customer: bool = False
+    agent_abstain_message_to_customer: bool = True
+    agent_abstain_message: str = (
+        "这个问题我暂时无法准确确认，已记录，专员稍后跟进；您也可回复「转人工」。"
+    )
+    # 软知识最低检索分，低于则不走弱命中答题
+    agent_soft_knowledge_min_score: float = 0.35
 
     def rag_primary_source_list(self) -> list[str]:
         return [p.strip() for p in (self.rag_primary_sources or "").split(",") if p.strip()]

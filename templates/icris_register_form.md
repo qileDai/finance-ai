@@ -30,4 +30,4 @@
 - 身份证照片路径填写本机绝对路径，例如：C:\Users\HUAWEI\Desktop\戴启乐资料\身份证.jpg
 
 python main.py feishu-bot
- python main.py --step register
+python main.py --step register 

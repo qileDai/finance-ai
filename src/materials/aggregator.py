@@ -79,8 +79,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             "name_cn": "",
             "email": _get_val(materials, "applicant_email") or _get_val(materials, "contact_email"),
             "phone": _get_val(materials, "applicant_phone") or _get_val(materials, "contact_phone"),
+            "id_type": _get_val(materials, "id_type"),
+            "id_number": _get_val(materials, "id_number"),
         },
         "identity_proof": {
+            "id_type": _get_val(materials, "id_type") or "PRC_ID",
+            "id_number": _get_val(materials, "id_number") or "",
             "document_files": doc_files,
             "document_dir": str(doc_files[0].rsplit("/", 1)[0]) if doc_files else "",
         },

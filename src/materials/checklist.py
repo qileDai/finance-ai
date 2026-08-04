@@ -29,6 +29,8 @@ MATERIAL_FIELDS: list[MaterialField] = [
     MaterialField("applicant_name", "ICRIS 申请人姓名"),
     MaterialField("applicant_email", "ICRIS 申请人电邮"),
     MaterialField("applicant_phone", "ICRIS 申请人电话"),
+    MaterialField("id_type", "身份证明类型（HKID/PRC_ID/PASSPORT）", required=False),
+    MaterialField("id_number", "身份证明号码", required=False),
     MaterialField("id_card_front", "身份证明（正面）", field_type="file"),
     MaterialField("id_card_back", "身份证明（反面）", field_type="file", required=False),
     MaterialField("address_proof", "地址证明", field_type="file", required=False),

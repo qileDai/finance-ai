@@ -12,20 +12,20 @@ from config.settings import PROJECT_ROOT, settings
 from src.llm.openai_client import LLMClient
 from src.materials.aggregator import aggregate_company_data, is_ready_for_confirm
 from src.materials.checklist import format_progress_text
-from src.materials.form_parser import extract_material_fields, fields_to_material_rows
+from src.materials.form_parser import fields_to_material_rows
 from src.storage.db import ExternalGroupStore
 from src.wework.external_client import WeWorkExternalClient
 from src.wework.external_workflow import ExternalGroupWorkflow
-from src.wework.intent_router import (
-    INTENT_ASK_PROGRESS,
-    INTENT_SUBMIT_MATERIAL,
-    INTENT_UNCLEAR_MATERIAL,
-    classify_intent,
-)
 from src.wework.kf_session import (
     build_kf_roomid,
     is_kf_session,
     parse_kf_roomid,
+)
+from src.wework.message_graph import route_incoming_text
+from src.wework.intent_router import (
+    INTENT_ASK_PROGRESS,
+    INTENT_SUBMIT_MATERIAL,
+    INTENT_UNCLEAR_MATERIAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,47 @@ GROUP_STATUS_HANDOFF = "HANDOFF"
 GROUP_STATUS_HUMAN = "HUMAN"
 
 WELCOME_ADVISOR_NAME = "邓"
+SEND_FAIL_FALLBACK = "系统繁忙，消息可能未送达，请稍后再试或回复「转人工」。"
+QA_ERROR_FALLBACK = "系统繁忙，请稍后再试或回复「转人工」。"
+# 企微客服文本约 2048 字节上限，预留余量
+WEWORK_TEXT_MAX_BYTES = 2000
+
+
+def _split_utf8_chunks(text: str, max_bytes: int = WEWORK_TEXT_MAX_BYTES) -> list[str]:
+    """按 UTF-8 字节切分长文本，尽量在换行/句读处断开。"""
+    raw = text or ""
+    if not raw:
+        return [""]
+    encoded = raw.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return [raw]
+    chunks: list[str] = []
+    start = 0
+    while start < len(encoded):
+        end = min(start + max_bytes, len(encoded))
+        # 避免截断多字节字符
+        while end > start:
+            try:
+                piece = encoded[start:end].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        else:
+            end = min(start + max_bytes, len(encoded))
+            piece = encoded[start:end].decode("utf-8", errors="ignore")
+        if end < len(encoded) and len(piece) > 40:
+            for sep in ("\n", "。", "！", "？", ";", "；", ",", "，", " "):
+                idx = piece.rfind(sep)
+                if idx >= len(piece) // 3:
+                    piece = piece[: idx + 1]
+                    end = start + len(piece.encode("utf-8"))
+                    break
+        if piece:
+            chunks.append(piece)
+        if end <= start:
+            break
+        start = end
+    return chunks or [raw[:200]]
 
 
 def build_welcome_message(phone: str = "", *, channel: str = "group") -> str:
@@ -78,6 +119,7 @@ class GroupStateMachine:
     ext_workflow: ExternalGroupWorkflow = field(default_factory=ExternalGroupWorkflow)
     _pending: dict[str, PendingBatch] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _handoff_inflight: set[str] = field(default_factory=set)
 
     def _owner(self, roomid: str) -> str | None:
         g = self.store.get_group(roomid) or {}
@@ -155,16 +197,43 @@ class GroupStateMachine:
         content: str,
         *,
         to_external_userid: str | None = None,
-    ) -> None:
+        customer_fallback: bool = True,
+    ) -> bool:
+        """发送文本（自动切分）；失败时可选向客户发一句兜底。返回是否全部成功。"""
+        chunks = _split_utf8_chunks(content)
+        ok = True
         try:
-            self.external.send_session_text(
-                roomid,
-                content,
-                sender_userid=self._owner(roomid),
-                to_external_userid=to_external_userid,
-            )
+            for chunk in chunks:
+                data = self.external.send_session_text(
+                    roomid,
+                    chunk,
+                    sender_userid=self._owner(roomid),
+                    to_external_userid=to_external_userid,
+                )
+                if isinstance(data, dict) and int(data.get("errcode", 0) or 0) != 0:
+                    raise RuntimeError(f"send errcode={data.get('errcode')} {data.get('errmsg')}")
         except Exception as e:
-            logger.warning("会话 %s 发消息失败: %s", roomid, e)
+            ok = False
+            logger.error(
+                "会话 %s 发消息失败: %s | content=%s",
+                roomid,
+                e,
+                (content or "")[:80],
+            )
+            if (
+                customer_fallback
+                and (content or "").strip() != SEND_FAIL_FALLBACK
+            ):
+                try:
+                    self.external.send_session_text(
+                        roomid,
+                        SEND_FAIL_FALLBACK,
+                        sender_userid=self._owner(roomid),
+                        to_external_userid=to_external_userid,
+                    )
+                except Exception as e2:
+                    logger.error("会话 %s 兜底发送也失败: %s", roomid, e2)
+        return ok
 
     def handle_group_created(self, roomid: str, *, force: bool = False) -> None:
         detail = self.external.get_group_chat(roomid) or {}
@@ -230,6 +299,39 @@ class GroupStateMachine:
             trace_json=json.dumps(trace_data, ensure_ascii=False),
         )
 
+    def _materials_summary(self, roomid: str) -> str:
+        """短摘要注入 QA 上下文（证件类型/号码/缺项）"""
+        from src.materials.checklist import progress_summary
+
+        materials = self.store.get_materials(roomid)
+        if not materials:
+            return ""
+        parts: list[str] = []
+        id_type = str((materials.get("id_type") or {}).get("field_value") or "").strip()
+        id_number = str((materials.get("id_number") or {}).get("field_value") or "").strip()
+        if id_type:
+            parts.append(f"证件类型={id_type}")
+        if id_number:
+            parts.append("号码已填")
+        elif id_type:
+            parts.append("号码未识别")
+        for key, label in (
+            ("id_card_front", "身份证明正面"),
+            ("passport", "护照"),
+            ("address_proof", "地址证明"),
+        ):
+            row = materials.get(key) or {}
+            if row.get("file_path") or row.get("field_value"):
+                parts.append(f"{label}已上传")
+        prog = progress_summary(materials)
+        missing = prog.get("missing_labels") or []
+        if missing:
+            parts.append("缺: " + "、".join(missing[:6]))
+            if len(missing) > 6:
+                parts.append(f"等共{len(missing)}项")
+        summary = "; ".join(parts)
+        return summary[:400]
+
     def _build_agent_context(self, combined: str, roomid: str):
         from config.settings import settings
         from src.agent.models import AgentContext
@@ -248,6 +350,9 @@ class GroupStateMachine:
                 group_meta["channel"] = "kf"
             elif roomid.startswith("wr"):
                 group_meta["channel"] = "group"
+            mat_summary = self._materials_summary(roomid)
+            if mat_summary:
+                group_meta["materials_summary"] = mat_summary
         return AgentContext(
             question=combined,
             roomid=roomid,
@@ -411,29 +516,31 @@ class GroupStateMachine:
             self.store.mark_message_processed(msgid)
             return
 
-        # 意图分流：材料/进度不进 RAG；业务问答才防抖进 QA
-        intent_result = classify_intent(text, status=status)
-        intent = intent_result.intent
+        # LangGraph 意图分流：材料/进度不进 RAG；业务问答才防抖进 QA
+        route = route_incoming_text(text, status=status)
         logger.info(
-            "意图分流 room=%s status=%s intent=%s source=%s fields=%s",
+            "意图分流 room=%s status=%s action=%s source=%s reply=%s fields=%s",
             roomid,
             status,
-            intent,
-            intent_result.source,
-            list(intent_result.fields.keys()),
+            route.action,
+            route.source,
+            route.reply_kind,
+            list(route.fields.keys()),
         )
 
-        if intent == INTENT_ASK_PROGRESS:
+        if route.action == INTENT_ASK_PROGRESS:
             self._send_progress(roomid, to_external_userid=wm_target)
             self.store.mark_message_processed(msgid)
             return
 
-        if intent in (INTENT_SUBMIT_MATERIAL, INTENT_UNCLEAR_MATERIAL):
-            fields = dict(intent_result.fields) if intent_result.fields else extract_material_fields(text)
+        if route.action in (INTENT_SUBMIT_MATERIAL, INTENT_UNCLEAR_MATERIAL):
+            fields = dict(route.fields or {})
             if fields:
                 for row in fields_to_material_rows(fields, source="chat_form"):
                     fk = row.pop("field_key")
                     self.store.upsert_material(roomid, fk, **row)
+                if "company_name_cn" in fields or "company_name_en" in fields:
+                    self._align_materials_folder(roomid)
                 self.store.set_group_status(roomid, GROUP_STATUS_COLLECTING)
                 self._safe_send(
                     roomid,
@@ -474,6 +581,31 @@ class GroupStateMachine:
             batch.timer.daemon = True
             batch.timer.start()
 
+    def _align_materials_folder(self, roomid: str) -> None:
+        """公司名入库后，将材料目录从 roomid 名对齐到公司中文/英文名"""
+        from src.storage.file_store import ensure_company_folder
+
+        materials = self.store.get_materials(roomid)
+        cn = str((materials.get("company_name_cn") or {}).get("field_value") or "").strip()
+        en = str((materials.get("company_name_en") or {}).get("field_value") or "").strip()
+        if not cn and not en:
+            return
+        try:
+            _new_dir, old_name, new_name = ensure_company_folder(roomid, cn, en)
+            if old_name and new_name and old_name != new_name:
+                n = self.store.rewire_material_file_paths(roomid, old_name, new_name)
+                logger.info(
+                    "会话 %s 材料目录对齐 %s → %s，更新路径 %d 条",
+                    roomid,
+                    old_name,
+                    new_name,
+                    n,
+                )
+            if cn or en:
+                self.store.upsert_group(roomid, company_name=cn or en)
+        except Exception:
+            logger.warning("会话 %s 材料目录对齐失败", roomid, exc_info=True)
+
     def handle_file_received(
         self,
         roomid: str,
@@ -483,17 +615,32 @@ class GroupStateMachine:
         *,
         to_external_userid: str | None = None,
     ) -> None:
-        from src.wework.material_handler import MaterialHandler
+        from src.wework.material_handler import REJECTED_NON_ID, MaterialHandler
 
         handler = MaterialHandler(store=self.store)
-        msg = handler.notify_classification(field_key, filename)
-        self.store.set_group_status(roomid, GROUP_STATUS_COLLECTING)
-        wm = to_external_userid or self._resolve_external_userid(roomid, "")
-        self._safe_send(
-            roomid,
-            f"{msg}\n{format_progress_text(self.store.get_materials(roomid))}",
-            to_external_userid=wm,
+        msg = handler.notify_classification(field_key, filename, roomid=roomid) or (
+            f"已收到文件「{filename}」。"
         )
+        wm = to_external_userid or self._resolve_external_userid(roomid, "")
+
+        if field_key == REJECTED_NON_ID:
+            # 非身份证明：不入库、不标为已收证件，仅提示
+            reply = msg
+            self._safe_send(roomid, reply, to_external_userid=wm)
+            try:
+                self.store.insert_ai_reply(roomid, msgid, reply, model="material_file")
+            except Exception:
+                logger.debug("写入文件回复上下文失败 room=%s", roomid, exc_info=True)
+            self.store.mark_message_processed(msgid)
+            return
+
+        self.store.set_group_status(roomid, GROUP_STATUS_COLLECTING)
+        reply = f"{msg}\n{format_progress_text(self.store.get_materials(roomid))}"
+        self._safe_send(roomid, reply, to_external_userid=wm)
+        try:
+            self.store.insert_ai_reply(roomid, msgid, reply, model="material_file")
+        except Exception:
+            logger.debug("写入文件回复上下文失败 room=%s", roomid, exc_info=True)
         if is_ready_for_confirm(self.store.get_materials(roomid)):
             self._send_review_summary(roomid, to_external_userid=wm)
         self.store.mark_message_processed(msgid)
@@ -507,12 +654,31 @@ class GroupStateMachine:
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         wm = batch.from_id if batch.from_id.startswith("wm") else None
         try:
+            if settings.wework_thinking_ack_enabled:
+                ack = (settings.wework_thinking_ack_text or "正在为您查询，请稍候…").strip()
+                if ack:
+                    self._safe_send(
+                        roomid,
+                        ack,
+                        to_external_userid=wm,
+                        customer_fallback=False,
+                    )
+
             answer, qa_result = self._generate_ai_answer(combined, roomid=roomid)
             from src.agent.models import AgentAction
 
             if qa_result and qa_result.action == AgentAction.SILENT:
                 logger.info("会话 %s 问题静默跳过，待人工: %s", roomid, combined[:80])
                 return
+            if qa_result and qa_result.action in (
+                AgentAction.ABSTAIN,
+                AgentAction.HUMAN,
+            ):
+                answer = (answer or "").strip() or (
+                    settings.agent_abstain_message
+                    if qa_result.action == AgentAction.ABSTAIN
+                    else "已为您转接人工服务，专属服务老师将尽快回复您。"
+                )
             if not (answer or "").strip():
                 logger.info("会话 %s 无回答，跳过发送", roomid)
                 return
@@ -527,6 +693,12 @@ class GroupStateMachine:
             self.store.set_group_status(roomid, GROUP_STATUS_QA)
         except Exception as e:
             logger.exception("会话 %s AI 回复失败: %s", roomid, e)
+            self._safe_send(
+                roomid,
+                QA_ERROR_FALLBACK,
+                to_external_userid=wm,
+                customer_fallback=False,
+            )
         finally:
             for mid in batch.msgids:
                 self.store.mark_message_processed(mid)
@@ -597,10 +769,28 @@ class GroupStateMachine:
                 to_external_userid=wm,
             )
             return
+
+        with self._lock:
+            status = (self.store.get_group(roomid) or {}).get("status") or ""
+            if roomid in self._handoff_inflight or status == GROUP_STATUS_HANDOFF:
+                self._safe_send(
+                    roomid,
+                    "注册流程已在处理中或已完成交接，请稍候；勿重复发送「确认」。",
+                    to_external_userid=wm,
+                    customer_fallback=False,
+                )
+                return
+            self._handoff_inflight.add(roomid)
+
         self.store.set_group_status(roomid, GROUP_STATUS_CONFIRMED)
+        submit_note = (
+            "将尝试自动提交 ICRIS。"
+            if (not settings.dry_run and settings.icris_allow_submit)
+            else "当前为填表预览（不自动提交），完成后由专员复核。"
+        )
         self._safe_send(
             roomid,
-            "已收到，开始为您办理注册：正在打包材料并启动后续流程…",
+            f"已收到，开始为您办理注册：正在打包材料并启动后续流程…\n{submit_note}",
             to_external_userid=wm,
         )
         threading.Thread(
@@ -620,6 +810,9 @@ class GroupStateMachine:
                 f"后续流程异常: {e}",
                 to_external_userid=self._resolve_external_userid(roomid, from_id),
             )
+        finally:
+            with self._lock:
+                self._handoff_inflight.discard(roomid)
 
     def _transfer_human(self, roomid: str, from_id: str) -> None:
         owner = str(self._owner(roomid) or "")

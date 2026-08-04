@@ -293,14 +293,49 @@ class RagSqliteIndex:
         return {str(r["region"]): int(r["n"]) for r in rows}
 
 
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _cjk_ngram_query(text: str, *, max_terms: int = 24) -> str:
+    """连续中文 2/3-gram，提升 unicode61 FTS 对无分词中文的命中。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if len(compact) < 2 or not _has_cjk(compact):
+        return ""
+    grams: list[str] = []
+    seen: set[str] = set()
+    for n in (2, 3):
+        if len(compact) < n:
+            continue
+        for i in range(len(compact) - n + 1):
+            g = compact[i : i + n]
+            if g in seen:
+                continue
+            seen.add(g)
+            grams.append(g)
+            if len(grams) >= max_terms:
+                break
+        if len(grams) >= max_terms:
+            break
+    return " OR ".join(f'"{g}"' for g in grams)
+
+
 def _build_fts_queries(q: str) -> list[str]:
+    """空白分词 + 中文 n-gram，结果由调用方并集去重。"""
     queries: list[str] = []
     tokens = [t for t in q.split() if t.strip()]
     if len(tokens) > 1:
         queries.append(" OR ".join(f'"{token}"' for token in tokens))
+        for token in tokens:
+            nq = _cjk_ngram_query(token, max_terms=12)
+            if nq:
+                queries.append(nq)
     else:
         queries.append(f'"{q}"')
-        if len(q) >= 4 and not re.search(r"\s", q):
+        nq = _cjk_ngram_query(q)
+        if nq:
+            queries.append(nq)
+        elif len(q) >= 4 and not re.search(r"\s", q):
             bigrams = [q[i : i + 2] for i in range(len(q) - 1)]
             if bigrams:
                 queries.append(" OR ".join(f'"{bg}"' for bg in bigrams[:16]))

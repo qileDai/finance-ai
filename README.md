@@ -117,12 +117,28 @@ run.bat --step register
 
 ICRIS 验证码为 `data:image/gif` + 输入框 `#checkCode`，需 **ddddocr** 识别（LLM 视觉在当前 API 代理下不可用）。
 
+## 生产入口（L1 客服机器人）
+
+试点推荐使用统一入口（回调 + 微信客服轮询 + 状态机）：
+
+```bash
+python main.py wework-external-bot
+```
+
+运维清单见 [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md)；systemd / Nginx 样例见 [`deploy/`](deploy/)。
+
+探活：`GET /health`（或 `/healthz`）。管理后台 `/admin` 需配置 `ADMIN_PASSWORD`。
+
 ## 注意事项
 
-- `DRY_RUN=true` 时不会点击提交按钮
+- `DRY_RUN=true` 时不会点击 ICRIS 最终提交；真实提交还需 `ICRIS_ALLOW_SUBMIT=true`
 - ICRIS 网站表单结构可能变化，浏览器自动化使用多策略选择器
 - 验证码识别优先 ddddocr，失败时回退 LLM 视觉模型
+- 改知识文档后需执行 `python main.py rag-ingest`
 - **请勿将 `.env` 提交到版本控制**
 
+```bash
 python main.py feishu-bot
 python main.py --step register
+python main.py wework-external-bot
+```

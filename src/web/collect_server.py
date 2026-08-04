@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import threading
@@ -98,8 +99,85 @@ class UnifiedWebServer:
                 )
                 self._send_html(html, 404)
 
+            def _check_admin_auth(self) -> bool:
+                """Basic Auth；未配置 ADMIN_PASSWORD 时拒绝访问"""
+                pwd = (settings.admin_password or "").strip()
+                if not pwd:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="finance-ai-admin"')
+                    self.end_headers()
+                    self.wfile.write(
+                        "Admin disabled: set ADMIN_PASSWORD in .env".encode("utf-8")
+                    )
+                    return False
+                auth = self.headers.get("Authorization") or ""
+                if not auth.startswith("Basic "):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="finance-ai-admin"')
+                    self.end_headers()
+                    return False
+                try:
+                    raw = base64.b64decode(auth[6:].strip()).decode("utf-8")
+                    user, _, password = raw.partition(":")
+                except Exception:
+                    self.send_response(401)
+                    self.end_headers()
+                    return False
+                expect_user = (settings.admin_username or "admin").strip() or "admin"
+                if user != expect_user or password != pwd:
+                    self.send_response(403)
+                    self.end_headers()
+                    return False
+                return True
+
+            def _handle_health(self) -> None:
+                from src.storage.file_store import materials_root
+
+                qdrant_ok: bool | None = None
+                if settings.rag_enabled:
+                    try:
+                        import httpx
+
+                        base = (settings.qdrant_url or "").rstrip("/")
+                        if base:
+                            r = httpx.get(f"{base}/readyz", timeout=2.0)
+                            qdrant_ok = r.status_code < 500
+                        else:
+                            qdrant_ok = False
+                    except Exception:
+                        qdrant_ok = False
+
+                data = {
+                    "ok": True,
+                    "service": "finance-ai-wework",
+                    "callback_crypt": crypt is not None,
+                    "kf_worker": kf_worker is not None,
+                    "collect_form_enabled": bool(settings.collect_form_enabled),
+                    "rag_enabled": bool(settings.rag_enabled),
+                    "qdrant_ok": qdrant_ok,
+                    "dry_run": bool(settings.dry_run),
+                    "icris_allow_submit": bool(settings.icris_allow_submit),
+                    "materials_dir": str(materials_root()),
+                    "wework_channel": settings.wework_channel_resolved,
+                    "wework_kf_mode": settings.wework_kf_mode_resolved,
+                    "thinking_ack": bool(settings.wework_thinking_ack_enabled),
+                    "agent_silent_on_no_answer": bool(settings.agent_silent_on_no_answer),
+                }
+                warnings: list[str] = []
+                # crypt 未配置时进程可存活，但回调不可用
+                if crypt is None and settings.wework_channel_resolved in ("kf", "both"):
+                    data["ok"] = False
+                    warnings.append("callback crypt not configured")
+                if settings.rag_enabled and qdrant_ok is False:
+                    warnings.append("qdrant unavailable; keyword-only retrieval")
+                if warnings:
+                    data["warning"] = "; ".join(warnings)
+                self._send_json(data, 200 if data["ok"] else 503)
+
             def do_GET(self):
                 path = urlparse(self.path).path
+                if path in ("/health", "/healthz"):
+                    return self._handle_health()
                 if _is_callback_path(path):
                     return self._handle_callback_get()
                 if path.startswith(FORM_PREFIX):
@@ -108,6 +186,8 @@ class UnifiedWebServer:
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_get(token)
                 if path == ADMIN_PATH or path == "/admin":
+                    if not self._check_admin_auth():
+                        return
                     return self._handle_admin()
                 self.send_response(404)
                 self.end_headers()
@@ -148,9 +228,10 @@ class UnifiedWebServer:
 
             def _handle_callback_post(self):
                 if crypt is None:
-                    self.send_response(200)
+                    logger.error("[外部群] 回调 Token/AESKey 未配置，消息无法解密处理")
+                    self.send_response(503)
                     self.end_headers()
-                    self.wfile.write(b"success")
+                    self.wfile.write(b"crypt not configured")
                     return
                 import xml.etree.ElementTree as ET
 

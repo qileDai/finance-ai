@@ -189,6 +189,31 @@ class KfSyncWorker:
             return True
         return False
 
+    def _reply_kf_file_error(
+        self,
+        roomid: str,
+        external_userid: str,
+        text: str,
+        *,
+        open_kfid: str = "",
+    ) -> None:
+        """文件链路失败时直接回复客户，不进意图/QA 静默路径"""
+        try:
+            self.external.send_session_text(
+                roomid,
+                text,
+                to_external_userid=external_userid,
+            )
+        except Exception as send_exc:
+            logger.error(
+                "kf 文件失败回复发送失败 room=%s user=%s kfid=%s: %s | %s",
+                roomid,
+                external_userid,
+                open_kfid,
+                send_exc,
+                text[:80],
+            )
+
     def _handle_kf_file(
         self,
         roomid: str,
@@ -203,12 +228,13 @@ class KfSyncWorker:
         try:
             data = self.external.download_kf_media(media_id)
             if not data:
-                self.state_machine.handle_incoming_text(
+                self._reply_kf_file_error(
                     roomid,
-                    msgid,
                     external_userid,
-                    "（文件下载失败，请重新发送或联系专员）",
+                    "图片/文件下载失败，请重新发送；若多次失败请回复「转人工」。",
+                    open_kfid=open_kfid,
                 )
+                self.store.mark_message_processed(msgid)
                 return
             from src.wework.material_handler import MaterialHandler
 
@@ -223,4 +249,10 @@ class KfSyncWorker:
             )
         except Exception as e:
             logger.exception("kf 文件处理失败 %s: %s", external_userid, e)
+            self._reply_kf_file_error(
+                roomid,
+                external_userid,
+                "文件处理失败，请重试一次；仍不行请回复「转人工」。",
+                open_kfid=open_kfid,
+            )
             self.store.mark_message_processed(msgid)

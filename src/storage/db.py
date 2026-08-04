@@ -30,8 +30,9 @@ class ExternalGroupStore:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             yield conn
             conn.commit()
@@ -40,6 +41,13 @@ class ExternalGroupStore:
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
+            # 多线程读写：WAL 降低 database is locked
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.Error as e:
+                logger = __import__("logging").getLogger(__name__)
+                logger.warning("SQLite WAL 启用失败: %s", e)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS external_groups (
@@ -314,37 +322,50 @@ class ExternalGroupStore:
             )
 
     def get_recent_messages(self, roomid: str, *, limit: int = 10) -> list[str]:
-        """取群最近消息与 AI 回复，供上下文兜底。"""
+        """按时间交错合并客户消息与助手回复，供 QA 上下文。"""
+        fetch_n = max(limit * 2, 20)
         with self._conn() as conn:
             inbox_rows = conn.execute(
                 """
-                SELECT content FROM message_inbox
-                WHERE roomid = ? AND msgtype = 'text' AND content != ''
+                SELECT msgtype, content, created_at FROM message_inbox
+                WHERE roomid = ? AND content != ''
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (roomid, limit),
+                (roomid, fetch_n),
             ).fetchall()
             reply_rows = conn.execute(
                 """
-                SELECT reply_text FROM ai_replies
+                SELECT reply_text, created_at FROM ai_replies
                 WHERE roomid = ? AND reply_text != ''
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (roomid, max(limit // 2, 3)),
+                (roomid, fetch_n),
             ).fetchall()
 
-        messages: list[str] = []
-        for row in reversed(inbox_rows):
-            text = str(row["content"]).strip()
-            if text and text not in messages:
-                messages.append(text)
-        for row in reversed(reply_rows):
-            text = str(row["reply_text"]).strip()
-            if text and text not in messages:
-                messages.append(text)
-        return messages[-limit:]
+        events: list[tuple[str, str]] = []
+        for row in inbox_rows:
+            msgtype = str(row["msgtype"] or "text")
+            content = str(row["content"] or "").strip()
+            if not content:
+                continue
+            if msgtype in ("image", "file"):
+                line = f"客户: [上传文件 {content}]"
+            else:
+                line = f"客户: {content}"
+            events.append((str(row["created_at"] or ""), line))
+        for row in reply_rows:
+            text = str(row["reply_text"] or "").strip()
+            if not text:
+                continue
+            # 截断过长回复，避免撑爆 prompt
+            if len(text) > 300:
+                text = text[:300] + "…"
+            events.append((str(row["created_at"] or ""), f"助手: {text}"))
+
+        events.sort(key=lambda x: x[0])
+        return [line for _, line in events[-limit:]]
 
     def insert_ai_reply(
         self,
@@ -521,6 +542,37 @@ class ExternalGroupStore:
                 (roomid,),
             ).fetchall()
         return {str(r["field_key"]): dict(r) for r in rows}
+
+    def rewire_material_file_paths(
+        self,
+        roomid: str,
+        old_dirname: str,
+        new_dirname: str,
+    ) -> int:
+        """材料目录重命名后，更新 file_path 中的目录名片段"""
+        if not old_dirname or not new_dirname or old_dirname == new_dirname:
+            return 0
+        updated = 0
+        materials = self.get_materials(roomid)
+        now = _utc_now()
+        with self._conn() as conn:
+            for key, row in materials.items():
+                path = str(row.get("file_path") or "")
+                if not path or old_dirname not in path:
+                    continue
+                new_path = path.replace(old_dirname, new_dirname, 1)
+                if new_path == path:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE group_materials
+                    SET file_path = ?, updated_at = ?
+                    WHERE roomid = ? AND field_key = ?
+                    """,
+                    (new_path, now, roomid, key),
+                )
+                updated += 1
+        return updated
 
     def list_all_materials_summary(
         self, *, channel: str = "all",

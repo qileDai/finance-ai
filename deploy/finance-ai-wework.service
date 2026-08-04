@@ -1,0 +1,17 @@
+[Unit]
+Description=Finance AI WeWork External Bot
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/finance-ai
+EnvironmentFile=/opt/finance-ai/.env
+ExecStart=/opt/finance-ai/.venv/bin/python main.py wework-external-bot
+Restart=always
+RestartSec=5
+# 限制敏感目录权限由运维保证 MATERIALS_DIR 属主
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

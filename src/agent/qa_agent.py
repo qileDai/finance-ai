@@ -51,6 +51,17 @@ def _citations_from_hits(hits: list[RetrievedChunk]) -> list[str]:
     return cites
 
 
+def _looks_empty_talk(answer: str) -> bool:
+    """轻量空话检测：过短或仅套话。"""
+    t = (answer or "").strip()
+    if len(t) < 8:
+        return True
+    hollow = ("抱歉", "无法回答", "不清楚", "不知道", "建议咨询", "请联系人工")
+    if len(t) < 24 and any(h in t for h in hollow):
+        return True
+    return False
+
+
 class QAAgent:
     def __init__(
         self,
@@ -78,8 +89,56 @@ class QAAgent:
         if action == AgentAction.HUMAN:
             return HUMAN_MESSAGE
         if action == AgentAction.ABSTAIN:
-            return ABSTAIN_MESSAGE
+            msg = (settings.agent_abstain_message or "").strip()
+            return msg or ABSTAIN_MESSAGE
         return ""
+
+    def _domain_abstain_or_silent(
+        self,
+        *,
+        run_id: str,
+        question: str,
+        hits: list[RetrievedChunk],
+        retrieval_score: float,
+        trace: list[AgentTraceStep],
+        total_retries: int,
+        reason: str,
+    ) -> QAResult:
+        """注册域失败优先固定兜底；非注册域可静默。"""
+        if is_registration_domain(question) and not (
+            settings.agent_silent_on_no_answer
+            or not settings.agent_abstain_message_to_customer
+        ):
+            action = self._resolve_failure_action()
+            if action != AgentAction.SILENT:
+                answer = self._failure_answer(action)
+                return QAResult(
+                    run_id=run_id,
+                    question=question,
+                    answer=answer,
+                    action=action,
+                    confidence=0.0,
+                    retrieval_score=round(retrieval_score, 4),
+                    answer_score=0.0,
+                    retries=total_retries,
+                    answer_mode=AnswerMode.SILENT
+                    if action == AgentAction.SILENT
+                    else AnswerMode.CONTEXTUAL,
+                    hits=hits,
+                    citations=_citations_from_hits(hits),
+                    trace=trace,
+                    needs_human=action == AgentAction.HUMAN,
+                    silent_reason=reason,
+                )
+        return self._silent_result(
+            run_id=run_id,
+            question=question,
+            hits=hits,
+            retrieval_score=retrieval_score,
+            trace=trace,
+            total_retries=total_retries,
+            reason=reason,
+        )
 
     def run(
         self,
@@ -129,10 +188,12 @@ class QAAgent:
             total_retries += 1
 
         use_knowledge = bool(hits) and r_eval is not None and r_eval.passed
+        soft_min = float(settings.agent_soft_knowledge_min_score or 0.0)
         use_soft_knowledge = (
             not use_knowledge
             and hits
             and is_registration_domain(question)
+            and retrieval_score >= soft_min
             and hits_contain_timeline_or_topic(hits, question)
         )
 
@@ -146,7 +207,8 @@ class QAAgent:
                 total_retries=total_retries,
                 max_retries=max_retries,
                 soft=use_soft_knowledge,
-                skip_low_confidence_silent=is_registration_domain(question),
+                history=history,
+                group_meta=group_meta or {},
             )
 
         if settings.agent_contextual_fallback:
@@ -161,7 +223,7 @@ class QAAgent:
                 group_meta=group_meta or {},
             )
 
-        return self._silent_result(
+        return self._domain_abstain_or_silent(
             run_id=run_id,
             question=question,
             hits=hits,
@@ -182,10 +244,18 @@ class QAAgent:
         total_retries: int,
         max_retries: int,
         soft: bool = False,
-        skip_low_confidence_silent: bool = False,
+        history: list[str] | None = None,
+        group_meta: dict[str, str] | None = None,
     ) -> QAResult:
         context = format_hits_for_prompt(hits)
-        answer = self.llm.generate_answer(question, context)
+        history = history or []
+        group_meta = group_meta or {}
+        answer = self.llm.generate_answer(
+            question,
+            context,
+            history=history,
+            group_meta=group_meta,
+        )
         answer_score = 0.0
         final_action = AgentAction.REPLY
         answer_mode = AnswerMode.KNOWLEDGE
@@ -206,17 +276,32 @@ class QAAgent:
                         "completeness": a_eval.completeness,
                         "grounded": a_eval.grounded,
                         "feedback": a_eval.feedback,
+                        "history_len": len(history),
+                        "has_materials_summary": bool(group_meta.get("materials_summary")),
                     },
                 )
             )
             if a_eval.passed or attempt >= max_retries:
-                if (
-                    not a_eval.passed
-                    and settings.agent_abstain_on_low_confidence
-                    and not soft
-                    and not skip_low_confidence_silent
-                ):
+                if not a_eval.passed and settings.agent_abstain_on_low_confidence:
+                    # 软知识质检失败：尝试一次 contextual，避免与 soft 互相递归
+                    if soft and settings.agent_contextual_fallback:
+                        return self._run_contextual_mode(
+                            run_id=run_id,
+                            question=question,
+                            hits=hits,
+                            retrieval_score=retrieval_score,
+                            trace=trace,
+                            total_retries=total_retries,
+                            history=history,
+                            group_meta=group_meta,
+                            allow_soft_fallback=False,
+                        )
                     final_action = self._resolve_failure_action()
+                    if (
+                        final_action == AgentAction.SILENT
+                        and is_registration_domain(question)
+                    ):
+                        final_action = AgentAction.ABSTAIN
                     answer = self._failure_answer(final_action)
                     if final_action == AgentAction.SILENT:
                         answer_mode = AnswerMode.SILENT
@@ -255,6 +340,7 @@ class QAAgent:
         total_retries: int,
         history: list[str],
         group_meta: dict[str, str],
+        allow_soft_fallback: bool = True,
     ) -> QAResult:
         ctx_result = self.llm.generate_contextual_answer(
             question, history=history, group_meta=group_meta, hits=hits,
@@ -271,9 +357,12 @@ class QAAgent:
         )
 
         if not ctx_result.get("can_answer"):
+            soft_min = float(settings.agent_soft_knowledge_min_score or 0.0)
             if (
-                is_registration_domain(question)
+                allow_soft_fallback
+                and is_registration_domain(question)
                 and hits
+                and retrieval_score >= soft_min
                 and hits_have_timeline_content(hits)
             ):
                 return self._run_knowledge_mode(
@@ -285,9 +374,8 @@ class QAAgent:
                     total_retries=total_retries,
                     max_retries=0,
                     soft=True,
-                    skip_low_confidence_silent=True,
                 )
-            return self._silent_result(
+            return self._domain_abstain_or_silent(
                 run_id=run_id,
                 question=question,
                 hits=hits,
@@ -298,25 +386,53 @@ class QAAgent:
             )
 
         answer = str(ctx_result.get("answer") or "").strip()
-        if not answer:
-            return self._silent_result(
+        if not answer or _looks_empty_talk(answer):
+            return self._domain_abstain_or_silent(
                 run_id=run_id,
                 question=question,
                 hits=hits,
                 retrieval_score=retrieval_score,
                 trace=trace,
                 total_retries=total_retries,
-                reason="LLM 返回空回答",
+                reason="LLM 返回空回答或空话",
             )
+
+        answer_score = 0.75
+        if hits:
+            a_eval = self.answer_scorer.score(question, hits, answer)
+            answer_score = a_eval.score
+            trace.append(
+                AgentTraceStep(
+                    step="contextual_answer_score",
+                    attempt=0,
+                    data={
+                        "score": a_eval.score,
+                        "passed": a_eval.passed,
+                        "faithfulness": a_eval.faithfulness,
+                        "completeness": a_eval.completeness,
+                        "feedback": a_eval.feedback,
+                    },
+                )
+            )
+            if not a_eval.passed and settings.agent_abstain_on_low_confidence:
+                return self._domain_abstain_or_silent(
+                    run_id=run_id,
+                    question=question,
+                    hits=hits,
+                    retrieval_score=retrieval_score,
+                    trace=trace,
+                    total_retries=total_retries,
+                    reason="上下文回答质检未通过",
+                )
 
         return QAResult(
             run_id=run_id,
             question=question,
             answer=answer,
             action=AgentAction.REPLY,
-            confidence=round(max(retrieval_score, 0.5), 4),
+            confidence=round(max(retrieval_score, min(answer_score, 0.9)), 4),
             retrieval_score=round(retrieval_score, 4),
-            answer_score=0.75,
+            answer_score=round(answer_score, 4),
             retries=total_retries,
             answer_mode=AnswerMode.CONTEXTUAL,
             hits=hits,

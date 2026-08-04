@@ -216,6 +216,8 @@ class WeWorkExternalClient:
         open_kfid: str | None = None,
     ) -> dict[str, Any]:
         """微信客服私聊（无需群主确认，消息出现在客户微信客服会话中）"""
+        import time
+
         kfid = (open_kfid or self.kf_open_kfid or settings.wework_kf_default_open_kfid).strip()
         if not kfid or not self.kf_secret:
             raise RuntimeError("未配置 WEWORK_KF_OPEN_KFID / WEWORK_KF_SECRET")
@@ -228,18 +230,33 @@ class WeWorkExternalClient:
             "msgtype": "text",
             "text": {"content": content},
         }
-        resp = httpx.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("errcode", 0) != 0:
+        data: dict[str, Any] = {}
+        # 45009 API 频控：指数退避最多重试 2 次
+        for attempt in range(3):
+            resp = httpx.post(url, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            errcode = int(data.get("errcode", 0) or 0)
+            if errcode == 0:
+                logger.info("已通过微信客服 [%s] 自动发送给 %s", kfid, external_userid)
+                return data
+            if errcode == 45009 and attempt < 2:
+                delay = 1.0 * (2 ** attempt)
+                logger.warning(
+                    "微信客服限流 45009，%.1fs 后重试 (%d/3) open_kfid=%s",
+                    delay,
+                    attempt + 1,
+                    kfid,
+                )
+                time.sleep(delay)
+                continue
             logger.error(
                 "微信客服发消息失败 open_kfid=%s touser=%s: %s",
                 kfid,
                 external_userid,
                 data,
             )
-        else:
-            logger.info("已通过微信客服 [%s] 自动发送给 %s", kfid, external_userid)
+            return data
         return data
 
     def _send_via_mass(self, chat_id: str, content: str, sender: str) -> dict[str, Any]:
@@ -394,20 +411,33 @@ class WeWorkExternalClient:
         )
 
     def download_kf_media(self, media_id: str) -> bytes:
-        """下载微信客服消息中的临时素材"""
+        """下载微信客服消息中的临时素材（GET /cgi-bin/media/get）"""
+        # 最小合法 JPEG 头，供 mock / 本地联调，避免「下载失败」假阴性
+        _mock_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
         if self._mock_mode:
-            return b""
+            return _mock_jpeg
         if not media_id:
             return b""
         access_token = self._get_kf_access_token()
-        url = f"https://qyapi.weixin.qq.com/cgi-bin/kf/get_media?access_token={access_token}"
-        resp = httpx.post(url, json={"media_id": media_id}, timeout=60)
+        url = "https://qyapi.weixin.qq.com/cgi-bin/media/get"
+        resp = httpx.get(
+            url,
+            params={"access_token": access_token, "media_id": media_id},
+            timeout=60,
+        )
         resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        if "application/json" in content_type:
-            data = resp.json()
-            if data.get("errcode", 0) != 0:
-                raise RuntimeError(f"kf/get_media 失败: {data}")
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "application/json" in content_type or resp.content[:1] == b"{":
+            try:
+                data = resp.json()
+            except Exception:
+                data = {"errmsg": resp.text[:200]}
+            err = data.get("errcode", 0) if isinstance(data, dict) else -1
+            if err:
+                raise RuntimeError(f"media/get 失败: {data}")
+            logger.warning("media/get 返回 JSON 但无 errcode: %s", data)
+            return b""
+        if not resp.content:
             return b""
         return resp.content
 

@@ -137,11 +137,13 @@ def _password_meets_rules(password: str) -> bool:
 
 
 class IcrisRegistrationBot:
-    """ICRIS 电子服务账号注册 - 自动填写但不提交"""
+    """ICRIS 电子服务账号注册 - 自动填写；仅显式开关下才点最终提交"""
 
     def __init__(self, llm: LLMClient | None = None) -> None:
         self.llm = llm or LLMClient()
         self.dry_run = settings.dry_run
+        # 双重开关：DRY_RUN=false 且 ICRIS_ALLOW_SUBMIT=true 才允许最终提交
+        self.allow_submit = (not settings.dry_run) and bool(settings.icris_allow_submit)
         self._locale: str | None = None
 
     async def _log_page(self, page: "Page", label: str) -> None:
@@ -3076,9 +3078,8 @@ class IcrisRegistrationBot:
         proof = data.get("identity_proof") or {}
         applicant = data.get("applicant") or {}
         id_type = str(proof.get("id_type") or applicant.get("id_type") or "PRC_ID").upper()
-        id_number = str(
-            proof.get("id_number") or applicant.get("id_number") or "362531199002111537"
-        )
+        # 无号码时保持空，避免用演示假号上生产；由材料视觉识别或客户补充写入
+        id_number = str(proof.get("id_number") or applicant.get("id_number") or "").strip()
 
         type_labels = {
             "HKID": r"香港身分證|香港身份証|香港身份证",
@@ -3696,9 +3697,24 @@ class IcrisRegistrationBot:
                     "form input[type='submit'], form button[type='submit']"
                 )
                 if await submit_btns.count() > 0:
-                    logger.info("[DRY RUN] 检测到提交按钮，不会点击提交")
+                    if self.allow_submit:
+                        logger.warning(
+                            "即将点击 ICRIS 最终提交（DRY_RUN=false, ICRIS_ALLOW_SUBMIT=true）"
+                        )
+                        await submit_btns.first.click(timeout=15000)
+                        await self._wait_spin_clear(page, timeout_ms=30000)
+                        logger.warning("已点击 ICRIS 最终提交按钮")
+                    else:
+                        logger.info(
+                            "检测到提交按钮，未点击（dry_run=%s icris_allow_submit=%s）",
+                            self.dry_run,
+                            settings.icris_allow_submit,
+                        )
 
-                logger.info("注册表单填写完成（未提交）")
+                if self.allow_submit:
+                    logger.info("注册表单填写完成（已按开关尝试提交）")
+                else:
+                    logger.info("注册表单填写完成（未提交）")
 
             except Exception as e:
                 run_error = e

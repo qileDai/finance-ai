@@ -23,6 +23,8 @@ FIELD_MAP = {
     "申请人姓名": "applicant_name",
     "申请人电邮": "applicant_email",
     "申请人电话": "applicant_phone",
+    "证件类型": "id_type",
+    "证件号码": "id_number",
 }
 
 # 别名 / 口语标签 → 标准中文标签（再映射到 field_key）
@@ -60,6 +62,15 @@ FIELD_ALIASES_CN: dict[str, str] = {
     "申请人邮箱": "申请人电邮",
     "申请人电邮地址": "申请人电邮",
     "申请人手机": "申请人电话",
+    "身份证明类型": "证件类型",
+    "身份证类型": "证件类型",
+    "id_type": "证件类型",
+    "身份证号码": "证件号码",
+    "身分證號碼": "证件号码",
+    "护照号码": "证件号码",
+    "护照號碼": "证件号码",
+    "id_number": "证件号码",
+    "号码": "证件号码",
 }
 
 # 资料相关关键词（意图识别用）
@@ -67,6 +78,7 @@ MATERIAL_KEYWORDS = (
     "公司名", "公司英文", "公司中文", "注册地址", "股东", "董事", "秘书",
     "身份证", "地址证明", "护照", "申请人", "联络邮箱", "联络电话",
     "创办成员", "业务性质", "商业登记", "英文名", "中文名",
+    "证件类型", "证件号码", "身分證",
 )
 
 _LABEL_TO_KEY: dict[str, str] = {}
@@ -130,13 +142,14 @@ def extract_material_fields(text: str) -> dict[str, str]:
         if key and val.strip():
             fields[key] = val.strip()
 
-    # 行内「标签=值」未按行切开时的补充
+    # 行内「标签=值」未按行切开时的补充（支持同行多组键值）
     for m in re.finditer(
-        r"([^\s=:：,，。；;]{2,12})\s*[=:：]\s*([^\n,，；;]+)",
+        r"([^\s=:：,，。；;]{2,12})\s*[=:：]\s*"
+        r"(.+?)(?=\s+[^\s=:：,，。；;]{2,12}\s*[=:：]|$)",
         text,
     ):
         key = _label_to_field_key(m.group(1))
-        val = m.group(2).strip()
+        val = m.group(2).strip().rstrip("。.!！,，；;")
         if key and val and key not in fields:
             fields[key] = val
 
@@ -197,7 +210,29 @@ def extract_material_fields(text: str) -> dict[str, str]:
             if ph2 and ("电话" in text or "手机" in text or "联络" in text):
                 fields["contact_phone"] = ph2.group(1)
 
+    if "id_type" in fields:
+        fields["id_type"] = _normalize_id_type_value(fields["id_type"])
+    if "id_number" in fields:
+        fields["id_number"] = fields["id_number"].strip().replace(" ", "")
+
     return fields
+
+
+def _normalize_id_type_value(raw: str) -> str:
+    t = (raw or "").strip().upper()
+    if t in ("HKID", "HK", "HK_ID"):
+        return "HKID"
+    if t in ("PRC_ID", "PRC", "CN_ID", "CHINA_ID"):
+        return "PRC_ID"
+    if t in ("PASSPORT", "PP"):
+        return "PASSPORT"
+    if re.search(r"香港", raw or ""):
+        return "HKID"
+    if re.search(r"护照|護照", raw or ""):
+        return "PASSPORT"
+    if re.search(r"中国|大陸|大陆|居民身份证|身分證|身份证", raw or ""):
+        return "PRC_ID"
+    return t or raw.strip()
 
 
 def text_looks_like_material_submit(text: str) -> bool:
