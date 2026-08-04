@@ -3572,8 +3572,13 @@ class IcrisRegistrationBot:
         """兼容旧调用，统一走 _click_continue"""
         return await self._click_continue(page)
 
-    async def run(self, data: dict[str, Any]) -> None:
-        """执行注册流程：打开浏览器 → 验证码 → 条款 → 填写表单（不提交）"""
+    async def run(
+        self,
+        data: dict[str, Any],
+        *,
+        force_isolated_browser: bool = False,
+    ) -> None:
+        """执行注册流程：打开浏览器 → 验证码 → 条款 → 填写表单（按开关提交）"""
         try:
             from src.browser.launcher import import_async_playwright
 
@@ -3588,8 +3593,13 @@ class IcrisRegistrationBot:
         keep_open = max(10, settings.browser_keep_open_seconds)
 
         async with async_playwright() as p:
-            browser = await launch_browser(p)
-            via_cdp = bool(settings.chrome_use_existing and browser.contexts)
+            browser = await launch_browser(
+                p, force_isolated=force_isolated_browser
+            )
+            via_cdp = (
+                bool(settings.chrome_use_existing and browser.contexts)
+                and not force_isolated_browser
+            )
             context = await create_browser_context(browser)
             page = await context.new_page()
             run_error: Exception | None = None
@@ -3719,6 +3729,27 @@ class IcrisRegistrationBot:
             except Exception as e:
                 run_error = e
                 logger.exception("注册流程异常: %s", e)
+                screenshot_path = ""
+                try:
+                    from config.settings import PROJECT_ROOT
+
+                    shot_dir = PROJECT_ROOT / "data" / "icris_failures"
+                    shot_dir.mkdir(parents=True, exist_ok=True)
+                    from datetime import datetime, timezone
+
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    shot_file = shot_dir / f"job_fail_{stamp}.png"
+                    if not page.is_closed():
+                        await page.screenshot(path=str(shot_file), full_page=True)
+                        screenshot_path = str(shot_file)
+                        logger.warning("ICRIS 失败截图已保存: %s", screenshot_path)
+                except Exception as shot_err:
+                    logger.warning("保存失败截图失败: %s", shot_err)
+                if screenshot_path:
+                    from src.browser.icris_errors import IcrisFlowError
+
+                    run_error = IcrisFlowError(str(e), screenshot_path=screenshot_path)
+                    run_error.__cause__ = e
             finally:
                 logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
                 try:

@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     # 材料文件根目录：相对路径相对项目根；绝对路径用于生产服务器
     # 本地默认 data/materials；生产示例 /var/lib/finance-ai/materials
     materials_dir: str = Field(default="data/materials", validation_alias="MATERIALS_DIR")
+    # 上传限制（字节）；扩展名逗号分隔，小写
+    materials_upload_max_bytes: int = Field(
+        default=10 * 1024 * 1024, validation_alias="MATERIALS_UPLOAD_MAX_BYTES"
+    )
+    materials_upload_allowed_ext: str = Field(
+        default=".jpg,.jpeg,.png,.pdf,.webp,.gif",
+        validation_alias="MATERIALS_UPLOAD_ALLOWED_EXT",
+    )
     # 对象存储（可选，未配置则使用 materials_dir 本地存储）
     oss_endpoint: str = ""
     oss_bucket: str = ""
@@ -133,6 +141,14 @@ class Settings(BaseSettings):
     # True 且 dry_run=False 时才允许点击 ICRIS 最终提交（生产默认仍关闭）
     icris_allow_submit: bool = False
     notify_colleague_open_id: str = ""
+    # L2 注册任务队列 Worker（与 wework-external-bot 同进程）
+    icris_worker_enabled: bool = True
+    icris_worker_poll_seconds: float = 3.0
+    icris_job_max_attempts: int = 3
+    # 串行执行，避免多浏览器冲突（预留，当前固定按 1 处理）
+    icris_worker_concurrency: int = 1
+    # 失败重试退避基数（秒）：delay = base * 2^(attempt-1)
+    icris_job_retry_backoff_seconds: float = 30.0
 
     # RAG 知识检索（SQLite FTS5 + Qdrant）
     rag_enabled: bool = True

@@ -9,6 +9,7 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from config.settings import PROJECT_ROOT, settings
@@ -49,6 +50,7 @@ class UnifiedWebServer:
     router: MessageRouter
     store: ExternalGroupStore = field(default_factory=ExternalGroupStore)
     kf_worker: KfSyncWorker | None = None
+    icris_worker: Any = None
     host: str = "0.0.0.0"
     port: int = 8081
     _crypt: WXBizMsgCrypt | None = None
@@ -65,6 +67,7 @@ class UnifiedWebServer:
         router = self.router
         store = self.store
         kf_worker = self.kf_worker
+        icris_worker = self.icris_worker
         form_template = (PROJECT_ROOT / "templates" / "company_registration_form.md").read_text(
             encoding="utf-8"
         )
@@ -163,6 +166,16 @@ class UnifiedWebServer:
                     "thinking_ack": bool(settings.wework_thinking_ack_enabled),
                     "agent_silent_on_no_answer": bool(settings.agent_silent_on_no_answer),
                 }
+                if icris_worker is not None and hasattr(icris_worker, "status_payload"):
+                    data["icris_worker"] = icris_worker.status_payload()
+                else:
+                    stats = store.registration_job_stats()
+                    data["icris_worker"] = {
+                        "enabled": bool(settings.icris_worker_enabled),
+                        "alive": False,
+                        "pending_count": stats.get("pending_count", 0),
+                        "running_job_id": stats.get("running_job_id"),
+                    }
                 warnings: list[str] = []
                 # crypt 未配置时进程可存活，但回调不可用
                 if crypt is None and settings.wework_channel_resolved in ("kf", "both"):
@@ -170,6 +183,9 @@ class UnifiedWebServer:
                     warnings.append("callback crypt not configured")
                 if settings.rag_enabled and qdrant_ok is False:
                     warnings.append("qdrant unavailable; keyword-only retrieval")
+                iw = data.get("icris_worker") or {}
+                if settings.icris_worker_enabled and not iw.get("alive"):
+                    warnings.append("icris worker not alive")
                 if warnings:
                     data["warning"] = "; ".join(warnings)
                 self._send_json(data, 200 if data["ok"] else 503)
@@ -201,8 +217,61 @@ class UnifiedWebServer:
                         return self._form_disabled_response()
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_post(token)
+                if path.rstrip("/") == "/admin/jobs":
+                    if not self._check_admin_auth():
+                        return
+                    return self._handle_admin_job_action()
                 self.send_response(404)
                 self.end_headers()
+
+            def _handle_admin_job_action(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length).decode("utf-8", errors="replace")
+                params = parse_qs(body)
+                action = (params.get("action", [""])[0] or "").strip().lower()
+                try:
+                    job_id = int(params.get("job_id", ["0"])[0])
+                except ValueError:
+                    job_id = 0
+                if not job_id or action not in ("cancel", "requeue"):
+                    return self._send_html(
+                        "<h1>参数错误</h1><p>需要 action=cancel|requeue 与 job_id</p>"
+                        "<a href='/admin/groups'>返回</a>",
+                        400,
+                    )
+                if action == "cancel":
+                    job = store.cancel_registration_job(job_id)
+                    if not job:
+                        return self._send_html("<h1>任务不存在</h1>", 404)
+                    if job.get("status") != "cancelled":
+                        msg = (
+                            f"无法取消（当前状态 {job.get('status')}，仅 pending 可取消）"
+                        )
+                    else:
+                        msg = f"已取消任务 #{job_id}"
+                        rid = str(job.get("roomid") or "")
+                        if rid:
+                            store.set_group_status(rid, "FAILED")
+                else:
+                    job = store.requeue_registration_job(job_id)
+                    if not job:
+                        return self._send_html("<h1>任务不存在</h1>", 404)
+                    if job.get("status") != "pending":
+                        msg = (
+                            f"无法重跑（当前 {job.get('status')}；"
+                            "需 failed/cancelled 且同会话无活跃任务）"
+                        )
+                    else:
+                        msg = f"已重新入队任务 #{job_id}"
+                        rid = str(job.get("roomid") or "")
+                        if rid:
+                            store.set_group_status(rid, "QUEUED")
+                html = (
+                    f"<h1>{msg}</h1>"
+                    f"<p>status={job.get('status')} roomid={job.get('roomid')}</p>"
+                    "<p><a href='/admin/groups'>返回管理后台</a></p>"
+                )
+                self._send_html(html)
 
             def _handle_callback_get(self):
                 if crypt is None:
@@ -326,6 +395,7 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                 query = parse_qs(urlparse(self.path).query)
                 channel = query.get("channel", ["all"])[0]
                 rows = store.list_all_materials_summary(channel=channel)
+                jobs = store.list_registration_jobs(limit=30)
                 filter_links = (
                     f"<p>筛选: "
                     f"<a href='?channel=all'>全部</a> | "
@@ -342,15 +412,54 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                     f"<td>{r.get('company_name') or ''}</td></tr>"
                     for r in rows
                 )
+                job_trs = "".join(
+                    f"<tr><td>{j.get('id')}</td>"
+                    f"<td>{j.get('roomid')}</td>"
+                    f"<td>{j.get('status')}</td>"
+                    f"<td>{j.get('attempts')}/{j.get('max_attempts')}</td>"
+                    f"<td>{'Y' if j.get('dry_run') else 'N'}/"
+                    f"{'Y' if j.get('allow_submit') else 'N'}</td>"
+                    f"<td>{(j.get('last_error') or '')[:80]}</td>"
+                    f"<td>{(j.get('screenshot_path') or '')[:50]}</td>"
+                    f"<td>{j.get('updated_at') or ''}</td>"
+                    f"<td>{self._job_actions(j)}</td></tr>"
+                    for j in jobs
+                )
                 html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>外部群/客服管理</title>
-<style>table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:8px}}</style>
+<style>table{{border-collapse:collapse;width:100%;font-size:14px}}
+td,th{{border:1px solid #ccc;padding:6px}}form.inline{{display:inline}}</style>
 </head><body><h1>外部客户群 / 微信客服 材料管理</h1>
 {filter_links}
 <table><tr><th>通道</th><th>open_kfid</th><th>roomid</th><th>账号/名称</th><th>状态</th><th>材料项</th><th>公司</th></tr>
 {trs or '<tr><td colspan=7>暂无数据</td></tr>'}
+</table>
+<h2>ICRIS 注册任务队列</h2>
+<table><tr><th>ID</th><th>roomid</th><th>状态</th><th>尝试</th><th>dry/submit</th>
+<th>错误</th><th>截图</th><th>更新时间</th><th>操作</th></tr>
+{job_trs or '<tr><td colspan=9>暂无任务</td></tr>'}
 </table></body></html>"""
                 self._send_html(html)
+
+            def _job_actions(self, job: dict) -> str:
+                jid = job.get("id")
+                st = str(job.get("status") or "")
+                parts: list[str] = []
+                if st == "pending":
+                    parts.append(
+                        f"<form class='inline' method='post' action='/admin/jobs'>"
+                        f"<input type='hidden' name='job_id' value='{jid}'/>"
+                        f"<input type='hidden' name='action' value='cancel'/>"
+                        f"<button type='submit'>取消</button></form>"
+                    )
+                if st in ("failed", "cancelled"):
+                    parts.append(
+                        f"<form class='inline' method='post' action='/admin/jobs'>"
+                        f"<input type='hidden' name='job_id' value='{jid}'/>"
+                        f"<input type='hidden' name='action' value='requeue'/>"
+                        f"<button type='submit'>重跑</button></form>"
+                    )
+                return " ".join(parts) or "-"
 
             def _kf_account_label(self, row: dict) -> str:
                 name = row.get("name") or ""

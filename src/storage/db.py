@@ -141,10 +141,44 @@ class ExternalGroupStore:
 
                 CREATE INDEX IF NOT EXISTS idx_customer_links_wm
                     ON customer_links(wm_userid);
+
+                CREATE TABLE IF NOT EXISTS registration_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    roomid TEXT NOT NULL,
+                    customer_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    package_dir TEXT NOT NULL DEFAULT '',
+                    dry_run INTEGER NOT NULL DEFAULT 1,
+                    allow_submit INTEGER NOT NULL DEFAULT 0,
+                    screenshot_path TEXT NOT NULL DEFAULT '',
+                    available_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_registration_jobs_status
+                    ON registration_jobs(status, available_at, id);
+                CREATE INDEX IF NOT EXISTS idx_registration_jobs_roomid
+                    ON registration_jobs(roomid);
                 """
             )
             self._migrate_columns(conn)
             self._migrate_kf_cursor(conn)
+            self._migrate_registration_jobs(conn)
+
+    def _migrate_registration_jobs(self, conn: sqlite3.Connection) -> None:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(registration_jobs)")}
+        if not cols:
+            return
+        if "screenshot_path" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
 
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         """增量添加 Phase 2/3 列"""
@@ -640,4 +674,367 @@ class ExternalGroupStore:
                 (wm_userid,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- registration_jobs (L2 ICRIS 队列) ----
+
+    def get_active_registration_job(self, roomid: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE roomid = ? AND status IN ('pending', 'running')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (roomid,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_registration_job(self, job_id: int) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def enqueue_registration_job(
+        self,
+        roomid: str,
+        *,
+        customer_id: str = "",
+        dry_run: bool = True,
+        allow_submit: bool = False,
+        max_attempts: int | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """幂等入队。返回 (job, created)。同 roomid 已有 pending/running 则返回已有任务。"""
+        from config.settings import settings
+
+        existing = self.get_active_registration_job(roomid)
+        if existing:
+            return existing, False
+
+        now = _utc_now()
+        max_att = int(
+            max_attempts
+            if max_attempts is not None
+            else getattr(settings, "icris_job_max_attempts", 3) or 3
+        )
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE roomid = ? AND status IN ('pending', 'running')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (roomid,),
+            ).fetchone()
+            if row:
+                return dict(row), False
+            cur = conn.execute(
+                """
+                INSERT INTO registration_jobs (
+                    roomid, customer_id, status, attempts, max_attempts,
+                    last_error, package_dir, dry_run, allow_submit,
+                    available_at, created_at, started_at, finished_at, updated_at
+                ) VALUES (?, ?, 'pending', 0, ?, '', '', ?, ?, ?, ?, NULL, NULL, ?)
+                """,
+                (
+                    roomid,
+                    customer_id or "",
+                    max_att,
+                    1 if dry_run else 0,
+                    1 if allow_submit else 0,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            job_id = int(cur.lastrowid)
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return dict(row), True
+
+    def claim_next_job(self) -> dict[str, Any] | None:
+        """认领最早可执行的 pending 任务（串行 worker 用）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE status = 'pending'
+                  AND (available_at = '' OR available_at <= ?)
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if not row:
+                return None
+            job_id = int(row["id"])
+            cur = conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    started_at = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now, now, job_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return dict(claimed) if claimed else None
+
+    def mark_job_succeeded(
+        self,
+        job_id: int,
+        *,
+        package_dir: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'succeeded',
+                    package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
+                    finished_at = ?,
+                    updated_at = ?,
+                    last_error = ''
+                WHERE id = ?
+                """,
+                (package_dir, package_dir, now, now, job_id),
+            )
+
+    def mark_job_failed(
+        self,
+        job_id: int,
+        *,
+        error: str,
+        requeue: bool = False,
+        available_at: str = "",
+        package_dir: str = "",
+        screenshot_path: str = "",
+    ) -> None:
+        now = _utc_now()
+        status = "pending" if requeue else "failed"
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = ?,
+                    last_error = ?,
+                    package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
+                    screenshot_path = CASE WHEN ? != '' THEN ? ELSE screenshot_path END,
+                    available_at = CASE WHEN ? != '' THEN ? ELSE available_at END,
+                    finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    (error or "")[:2000],
+                    package_dir,
+                    package_dir,
+                    screenshot_path,
+                    screenshot_path,
+                    available_at,
+                    available_at,
+                    status,
+                    now,
+                    now,
+                    job_id,
+                ),
+            )
+
+    def cancel_registration_job(self, job_id: int) -> dict[str, Any] | None:
+        """取消 pending 任务（running 不可取消）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            if str(row["status"]) != "pending":
+                return dict(row)
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'cancelled', finished_at = ?, updated_at = ?,
+                    last_error = CASE WHEN last_error = '' THEN 'cancelled by admin' ELSE last_error END
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now, now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def requeue_registration_job(self, job_id: int) -> dict[str, Any] | None:
+        """将 failed/cancelled 任务重新入队（同 room 若已有活跃任务则拒绝）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            status = str(row["status"])
+            if status not in ("failed", "cancelled"):
+                return dict(row)
+            roomid = str(row["roomid"])
+            active = conn.execute(
+                """
+                SELECT id FROM registration_jobs
+                WHERE roomid = ? AND status IN ('pending', 'running')
+                LIMIT 1
+                """,
+                (roomid,),
+            ).fetchone()
+            if active:
+                return dict(row)
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'pending',
+                    available_at = ?,
+                    finished_at = NULL,
+                    updated_at = ?,
+                    last_error = ''
+                WHERE id = ?
+                """,
+                (now, now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_latest_registration_job(self, roomid: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE roomid = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (roomid,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_registration_jobs(
+        self,
+        *,
+        limit: int = 50,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit or 50), 200))
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM registration_jobs
+                    WHERE status = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM registration_jobs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def registration_job_stats(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM registration_jobs
+                GROUP BY status
+                """
+            ).fetchall()
+            running = conn.execute(
+                """
+                SELECT id, roomid FROM registration_jobs
+                WHERE status = 'running'
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+        counts = {str(r["status"]): int(r["n"]) for r in rows}
+        return {
+            "counts": counts,
+            "pending_count": int(counts.get("pending", 0)),
+            "running_count": int(counts.get("running", 0)),
+            "running_job_id": int(running["id"]) if running else None,
+            "running_roomid": str(running["roomid"]) if running else "",
+        }
+
+    def reset_stale_running_jobs(self, *, older_than_minutes: int = 120) -> int:
+        """进程重启后把卡住的 running 回收为 pending。
+
+        older_than_minutes=0 表示回收全部 running（启动时用）。
+        """
+        from datetime import timedelta
+
+        now = _utc_now()
+        if older_than_minutes <= 0:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE registration_jobs
+                    SET status = 'pending',
+                        available_at = ?,
+                        updated_at = ?,
+                        last_error = CASE
+                            WHEN last_error = '' THEN 'recovered running after restart'
+                            ELSE last_error
+                        END
+                    WHERE status = 'running'
+                    """,
+                    (now, now),
+                )
+                return int(cur.rowcount or 0)
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        ).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'pending',
+                    available_at = ?,
+                    updated_at = ?,
+                    last_error = CASE
+                        WHEN last_error = '' THEN 'recovered stale running after restart'
+                        ELSE last_error
+                    END
+                WHERE status = 'running'
+                  AND (started_at IS NULL OR started_at < ?)
+                """,
+                (now, now, cutoff),
+            )
+            return int(cur.rowcount or 0)
 

@@ -38,27 +38,39 @@ AGENT_ABSTAIN_MESSAGE_TO_CUSTOMER=true
 AGENT_SOFT_KNOWLEDGE_MIN_SCORE=0.35
 DRY_RUN=true
 ICRIS_ALLOW_SUBMIT=false
+ICRIS_WORKER_ENABLED=true
+ICRIS_JOB_MAX_ATTEMPTS=3
 CAPTCHA_SAVE_DEBUG=false
 BROWSER_HEADLESS=true
+CHROME_USE_EXISTING=false
 ```
 
 ## 5. 验证
 
 - [ ] 发文本业务问题：直接正式答复（无「思考中」提示）  
-
 - [ ] 发材料键值：材料更新，无 RAG  
 - [ ] 发无关图片：提示未存档  
 - [ ] 发身份证：识别类型/号码（中文提示）  
 - [ ] 故意断 OpenAI：客户收到兜底/转人工提示，而非完全无声  
+- [ ] `/health` 含 `icris_worker.alive=true`、`pending_count`  
 
-## 6. L2 自动注册（可选，默认关闭）
+## 6. L2 自动注册（队列）
 
-仅在验收通过后：
+确认后**入队**（`registration_jobs`），由串行 Worker 执行，不再直起线程抢浏览器。
 
 ```env
+ICRIS_WORKER_ENABLED=true
+ICRIS_WORKER_POLL_SECONDS=3
+ICRIS_JOB_MAX_ATTEMPTS=3
+# 仅验收通过后开放真实提交：
 DRY_RUN=false
 ICRIS_ALLOW_SUBMIT=true
 BROWSER_HEADLESS=true
+CHROME_USE_EXISTING=false
 ```
 
-并具备任务监控与人工接管流程后再对真实客户开放。
+- [ ] 两客户先后确认：两条 pending，Worker 串行执行  
+- [ ] 同客户重复确认：不建第二活跃任务  
+- [ ] `/admin` 可取消 pending / 重跑 failed；失败任务可见截图路径  
+- [ ] 成功后再确认需回复「重新办理」；QUEUED 态闲聊会收到「办理中」提示  
+- [ ] `needs_review` 材料不可直接确认；超限/非法扩展名上传被拒  

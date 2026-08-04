@@ -20,6 +20,7 @@ from src.storage.file_store import save_bytes
 logger = logging.getLogger(__name__)
 
 REJECTED_NON_ID = "rejected_non_id"
+REJECTED_UPLOAD = "rejected_upload"
 
 CLASSIFY_RULES: list[tuple[str, str]] = [
     (r"身份证|id.?card|hkid", "id_card_front"),
@@ -87,12 +88,17 @@ class MaterialHandler:
         *,
         folder_label: str,
     ) -> str:
-        dest = save_bytes(
-            roomid,
-            f"{msgid}_{filename}",
-            data,
-            folder_label=folder_label,
-        )
+        try:
+            dest = save_bytes(
+                roomid,
+                f"{msgid}_{filename}",
+                data,
+                folder_label=folder_label,
+            )
+        except ValueError as e:
+            logger.warning("上传校验拒绝 room=%s file=%s: %s", roomid, filename, e)
+            self._last_upload_reject_reason = str(e)
+            return REJECTED_UPLOAD
         self.store.upsert_material(
             roomid,
             field_key,
@@ -114,6 +120,17 @@ class MaterialHandler:
         use_llm: bool = False,
     ) -> str:
         """先视觉识别身份证明；非证件不落盘。目录优先公司中文/英文名。"""
+        self._last_upload_reject_reason = ""
+        # 先做大小/类型校验，避免大文件进视觉
+        from src.storage.file_store import validate_upload
+
+        try:
+            validate_upload(filename, data)
+        except ValueError as e:
+            self._last_upload_reject_reason = str(e)
+            logger.warning("上传校验拒绝 room=%s file=%s: %s", roomid, filename, e)
+            return REJECTED_UPLOAD
+
         filename_key = (
             self.classify_by_llm(filename, roomid)
             if use_llm
@@ -232,6 +249,9 @@ class MaterialHandler:
                 "若为证件请重传清晰正反面；也可文字补充："
                 f"{supplement_hint}"
             )
+        if field_key == REJECTED_UPLOAD:
+            reason = getattr(self, "_last_upload_reject_reason", "") or "文件不符合要求"
+            return f"文件「{filename}」未保存：{reason}"
 
         if id_type in ID_TYPE_LABELS and id_number:
             return (

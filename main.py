@@ -493,6 +493,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         print("[外部群] 群通道已关闭（WEWORK_CHANNEL 不含 group），存档 worker 未启动")
 
     from src.wework.kf_worker import KfSyncWorker
+    from src.wework.icris_job_worker import IcrisJobWorker
 
     kf_worker = KfSyncWorker(
         store=store,
@@ -524,12 +525,28 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     else:
         print("[外部群] kf 未启用（需 WEWORK_KF_* 配置）")
 
+    icris_worker = IcrisJobWorker(
+        store=store,
+        workflow=router.state_machine.ext_workflow,
+    )
+    if settings.icris_worker_enabled:
+        print(
+            f"[外部群] ICRIS 队列 Worker: 已启用（poll={settings.icris_worker_poll_seconds}s, "
+            f"max_attempts={settings.icris_job_max_attempts}, "
+            f"dry_run={settings.dry_run}, allow_submit={settings.icris_allow_submit}）"
+        )
+        icris_worker.start(blocking=False)
+    else:
+        print("[外部群] ICRIS 队列 Worker: 已关闭（ICRIS_WORKER_ENABLED=false）")
+
     if settings.wework_welcome_auto_checklist:
         print("[外部群] 建群欢迎后自动发清单: 已启用")
     else:
         print("[外部群] 建群欢迎后自动发清单: 已关闭（客户需发 /资料）")
 
-    web = UnifiedWebServer(router=router, port=port, kf_worker=kf_worker)
+    web = UnifiedWebServer(
+        router=router, port=port, kf_worker=kf_worker, icris_worker=icris_worker
+    )
     print(f"\n[外部群] 开始监听… 公网回调: http://szyingtai.cn{WEBHOOK_PATH}")
     print(f"[外部群] 本机回调: http://127.0.0.1:{port}{WEBHOOK_PATH} 或 {CALLBACK_PATH}")
     print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
@@ -540,6 +557,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         if settings.wework_channel_group_enabled:
             archive.close()
         kf_worker.stop_polling()
+        icris_worker.stop()
 
 
 def cmd_wework_kf_mock(args: argparse.Namespace) -> None:

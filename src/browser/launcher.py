@@ -92,9 +92,18 @@ class BrowserSession:
     external_cdp: bool = False
 
 
-async def launch_browser(playwright: Any) -> Any:
-    """启动浏览器，降低被识别为自动化脚本的概率"""
-    if settings.chrome_use_existing:
+async def launch_browser(
+    playwright: Any,
+    *,
+    force_isolated: bool = False,
+    headless: bool | None = None,
+) -> Any:
+    """启动浏览器，降低被识别为自动化脚本的概率。
+
+    force_isolated=True 时忽略 CHROME_USE_EXISTING，供队列 Worker 使用，避免抢 CDP。
+    """
+    use_existing = bool(settings.chrome_use_existing) and not force_isolated
+    if use_existing:
         try:
             browser = await playwright.chromium.connect_over_cdp(settings.chrome_cdp_url)
             logger.info("已连接已有 Chrome: %s", settings.chrome_cdp_url)
@@ -115,6 +124,9 @@ async def launch_browser(playwright: Any) -> Any:
                 except Exception as e2:
                     logger.warning("自动 CDP 连接仍失败: %s", e2)
 
+    if force_isolated:
+        logger.info("强制独立浏览器（忽略 CHROME_USE_EXISTING）")
+
     configured = getattr(settings, "browser_channel", "") or ""
     channels: list[str | None] = []
 
@@ -127,11 +139,12 @@ async def launch_browser(playwright: Any) -> Any:
         elif ch not in channels:
             channels.append(ch)
 
+    headless_flag = settings.browser_headless if headless is None else bool(headless)
     last_error: Exception | None = None
     for channel in channels:
         label = channel or "chromium (bundled)"
         launch_kwargs: dict[str, Any] = {
-            "headless": settings.browser_headless,
+            "headless": headless_flag,
             "slow_mo": settings.browser_slow_mo,
             "args": [
                 "--disable-blink-features=AutomationControlled",
@@ -145,14 +158,13 @@ async def launch_browser(playwright: Any) -> Any:
             launch_kwargs["args"].append("--proxy-server=direct://")
         if channel and channel != "chromium":
             launch_kwargs["channel"] = channel
-
         try:
             browser = await playwright.chromium.launch(**launch_kwargs)
-            logger.info("浏览器已启动: %s", label)
+            logger.info("已启动浏览器: %s headless=%s", label, headless_flag)
             return browser
         except Exception as e:
             last_error = e
-            logger.warning("无法使用 %s: %s", label, e)
+            logger.warning("启动浏览器失败 (%s): %s", label, e)
 
     hint = (
         "请安装 Google Chrome / Microsoft Edge，或执行: python -m playwright install chromium"

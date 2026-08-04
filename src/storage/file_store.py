@@ -63,13 +63,38 @@ def room_dir(roomid: str, *, folder_label: str = "") -> Path:
     return d
 
 
+def validate_upload(filename: str, data: bytes) -> None:
+    """校验上传大小与扩展名；不合规则抛 ValueError。"""
+    max_bytes = int(getattr(settings, "materials_upload_max_bytes", 0) or 0)
+    if max_bytes > 0 and len(data) > max_bytes:
+        raise ValueError(
+            f"文件过大（{len(data)} 字节），上限 {max_bytes} 字节"
+        )
+    allowed = (settings.materials_upload_allowed_ext or "").strip()
+    if not allowed:
+        return
+    ext = Path(filename or "").suffix.lower()
+    allow_set = {
+        e.strip().lower() if e.strip().startswith(".") else f".{e.strip().lower()}"
+        for e in allowed.split(",")
+        if e.strip()
+    }
+    if allow_set and ext not in allow_set:
+        raise ValueError(
+            f"不支持的文件类型 {ext or '(无扩展名)'}，允许: {', '.join(sorted(allow_set))}"
+        )
+
+
 def save_bytes(
     roomid: str,
     filename: str,
     data: bytes,
     *,
     folder_label: str = "",
+    validate: bool = True,
 ) -> Path:
+    if validate:
+        validate_upload(filename, data)
     dest = room_dir(roomid, folder_label=folder_label) / filename
     dest.write_bytes(data)
     logger.info("已保存文件 %s (%d bytes)", dest, len(data))
@@ -83,10 +108,8 @@ def save_upload(
     *,
     folder_label: str = "",
 ) -> Path:
-    dest = room_dir(roomid, folder_label=folder_label) / filename
-    with open(dest, "wb") as f:
-        shutil.copyfileobj(stream, f)
-    return dest
+    data = stream.read()
+    return save_bytes(roomid, filename, data, folder_label=folder_label)
 
 
 def ensure_company_folder(

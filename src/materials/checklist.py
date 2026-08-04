@@ -42,15 +42,21 @@ REQUIRED_FIELD_KEYS = {f.key for f in MATERIAL_FIELDS if f.required}
 
 
 def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """根据 group_materials 计算进度"""
+    """根据 group_materials 计算进度。needs_review 不计入齐全。"""
     received = 0
     missing: list[str] = []
+    needs_review: list[str] = []
     for f in MATERIAL_FIELDS:
         row = materials.get(f.key) or {}
         status = row.get("status", "missing")
         has_value = bool(row.get("field_value") or row.get("file_path"))
-        if status in ("received", "confirmed", "needs_review") and has_value:
+        if status in ("received", "confirmed") and has_value:
             received += 1
+        elif status == "needs_review" and has_value:
+            needs_review.append(f.label)
+            if f.required:
+                # 待复核不算齐，仍列入缺项语义
+                missing.append(f"{f.label}（待复核）")
         elif f.required:
             missing.append(f.label)
     total_required = len(REQUIRED_FIELD_KEYS)
@@ -59,6 +65,7 @@ def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "total": len(MATERIAL_FIELDS),
         "total_required": total_required,
         "missing_labels": missing,
+        "needs_review_labels": needs_review,
         "complete": len(missing) == 0,
     }
 
@@ -69,6 +76,9 @@ def format_progress_text(materials: dict[str, dict[str, Any]]) -> str:
         f"材料收集进度：{p['received']}/{p['total']} 项",
         f"必填项剩余：{len(p['missing_labels'])} 项",
     ]
+    if p.get("needs_review_labels"):
+        lines.append("待人工复核（不可直接确认注册）：")
+        lines.extend(f"  - {lbl}" for lbl in p["needs_review_labels"][:8])
     if p["missing_labels"]:
         lines.append("还缺：")
         lines.extend(f"  - {lbl}" for lbl in p["missing_labels"][:10])

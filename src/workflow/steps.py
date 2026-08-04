@@ -117,23 +117,42 @@ class RegistrationWorkflow:
         ctx.log(f"材料包路径: {ctx.package_dir}")
         return ctx
 
-    def step_icris_register(self, ctx: WorkflowContext) -> WorkflowContext:
+    def step_icris_register(
+        self,
+        ctx: WorkflowContext,
+        *,
+        dry_run: bool | None = None,
+        allow_submit: bool | None = None,
+        force_isolated_browser: bool = False,
+    ) -> WorkflowContext:
         """④ ICRIS 账号注册（浏览器填写；仅开关允许时提交）"""
         from config.settings import settings
         from src.browser.icris_registration import IcrisRegistrationBot
         from src.materials.packager import load_mock_data
 
-        allow_submit = (not settings.dry_run) and bool(settings.icris_allow_submit)
+        use_dry = settings.dry_run if dry_run is None else bool(dry_run)
+        use_submit = (
+            ((not settings.dry_run) and bool(settings.icris_allow_submit))
+            if allow_submit is None
+            else bool(allow_submit) and (not use_dry)
+        )
         ctx.log(
-            f"=== 步骤④ ICRIS 账号注册（dry_run={settings.dry_run}, "
-            f"allow_submit={allow_submit}）==="
+            f"=== 步骤④ ICRIS 账号注册（dry_run={use_dry}, "
+            f"allow_submit={use_submit}, isolated={force_isolated_browser}）==="
         )
         if not ctx.company_data:
             ctx.company_data = load_mock_data()
             ctx.log("未提供资料，使用 mock 数据")
         bot = IcrisRegistrationBot(self.llm)
-        asyncio.run(bot.run(ctx.company_data))
-        if allow_submit:
+        bot.dry_run = use_dry
+        bot.allow_submit = use_submit
+        asyncio.run(
+            bot.run(
+                ctx.company_data,
+                force_isolated_browser=force_isolated_browser,
+            )
+        )
+        if use_submit:
             ctx.log("ICRIS 注册流程已执行（含提交开关）")
         else:
             ctx.log("ICRIS 注册表单已填写（未提交）")

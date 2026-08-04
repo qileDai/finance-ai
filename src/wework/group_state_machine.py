@@ -36,7 +36,9 @@ GROUP_STATUS_QA = "QA"
 GROUP_STATUS_COLLECTING = "COLLECTING"
 GROUP_STATUS_REVIEW = "REVIEW"
 GROUP_STATUS_CONFIRMED = "CONFIRMED"
+GROUP_STATUS_QUEUED = "QUEUED"
 GROUP_STATUS_HANDOFF = "HANDOFF"
+GROUP_STATUS_FAILED = "FAILED"
 GROUP_STATUS_HUMAN = "HUMAN"
 
 WELCOME_ADVISOR_NAME = "邓"
@@ -507,6 +509,11 @@ class GroupStateMachine:
             self.store.mark_message_processed(msgid)
             return
 
+        if text in ("重新办理", "/重新办理", "重新注册"):
+            self._handle_confirm(roomid, from_id, force_redo=True)
+            self.store.mark_message_processed(msgid)
+            return
+
         if (
             text in ("确认", "确认无误", "/确认", "开始注册", "/开始注册")
             or re.match(r"^确认[。!！]?$", text)
@@ -562,7 +569,20 @@ class GroupStateMachine:
             self.store.mark_message_processed(msgid)
             return
 
-        if status in (GROUP_STATUS_CONFIRMED, GROUP_STATUS_HANDOFF):
+        if status in (
+            GROUP_STATUS_CONFIRMED,
+            GROUP_STATUS_QUEUED,
+            GROUP_STATUS_HANDOFF,
+        ):
+            active = self.store.get_active_registration_job(roomid)
+            job_hint = f"（任务 #{active['id']}）" if active else ""
+            self._safe_send(
+                roomid,
+                f"您的注册正在办理中{job_hint}，请稍候。"
+                "如需帮助请回复「转人工」；办结后如需再跑请回复「重新办理」。",
+                to_external_userid=wm_target,
+                customer_fallback=False,
+            )
             self.store.mark_message_processed(msgid)
             return
 
@@ -615,7 +635,11 @@ class GroupStateMachine:
         *,
         to_external_userid: str | None = None,
     ) -> None:
-        from src.wework.material_handler import REJECTED_NON_ID, MaterialHandler
+        from src.wework.material_handler import (
+            REJECTED_NON_ID,
+            REJECTED_UPLOAD,
+            MaterialHandler,
+        )
 
         handler = MaterialHandler(store=self.store)
         msg = handler.notify_classification(field_key, filename, roomid=roomid) or (
@@ -623,8 +647,8 @@ class GroupStateMachine:
         )
         wm = to_external_userid or self._resolve_external_userid(roomid, "")
 
-        if field_key == REJECTED_NON_ID:
-            # 非身份证明：不入库、不标为已收证件，仅提示
+        if field_key in (REJECTED_NON_ID, REJECTED_UPLOAD):
+            # 未入库：仅提示
             reply = msg
             self._safe_send(roomid, reply, to_external_userid=wm)
             try:
@@ -759,7 +783,13 @@ class GroupStateMachine:
             to_external_userid=to_external_userid,
         )
 
-    def _handle_confirm(self, roomid: str, from_id: str) -> None:
+    def _handle_confirm(
+        self,
+        roomid: str,
+        from_id: str,
+        *,
+        force_redo: bool = False,
+    ) -> None:
         wm = self._resolve_external_userid(roomid, from_id)
         materials = self.store.get_materials(roomid)
         if not is_ready_for_confirm(materials):
@@ -770,37 +800,66 @@ class GroupStateMachine:
             )
             return
 
-        with self._lock:
-            status = (self.store.get_group(roomid) or {}).get("status") or ""
-            if roomid in self._handoff_inflight or status == GROUP_STATUS_HANDOFF:
-                self._safe_send(
-                    roomid,
-                    "注册流程已在处理中或已完成交接，请稍候；勿重复发送「确认」。",
-                    to_external_userid=wm,
-                    customer_fallback=False,
-                )
-                return
-            self._handoff_inflight.add(roomid)
+        active = self.store.get_active_registration_job(roomid)
+        if active:
+            self._safe_send(
+                roomid,
+                f"注册任务 #{active.get('id')} 已在办理或排队中（{active.get('status')}），请勿重复确认。",
+                to_external_userid=wm,
+                customer_fallback=False,
+            )
+            return
 
-        self.store.set_group_status(roomid, GROUP_STATUS_CONFIRMED)
-        submit_note = (
-            "将尝试自动提交 ICRIS。"
-            if (not settings.dry_run and settings.icris_allow_submit)
-            else "当前为填表预览（不自动提交），完成后由专员复核。"
+        latest = self.store.get_latest_registration_job(roomid)
+        if (
+            not force_redo
+            and latest
+            and str(latest.get("status") or "") == "succeeded"
+        ):
+            self._safe_send(
+                roomid,
+                f"注册任务 #{latest.get('id')} 已办理完成。"
+                "如需再次自动填表，请回复「重新办理」。",
+                to_external_userid=wm,
+                customer_fallback=False,
+            )
+            return
+
+        dry_run = bool(settings.dry_run)
+        allow_submit = (not dry_run) and bool(settings.icris_allow_submit)
+        job, created = self.store.enqueue_registration_job(
+            roomid,
+            customer_id=from_id or wm or "",
+            dry_run=dry_run,
+            allow_submit=allow_submit,
+            max_attempts=settings.icris_job_max_attempts,
         )
+        job_id = job.get("id")
+        self.store.set_group_status(roomid, GROUP_STATUS_QUEUED)
+
+        if not created:
+            self._safe_send(
+                roomid,
+                f"注册任务 #{job_id} 已在队列中（状态 {job.get('status')}），请稍候。",
+                to_external_userid=wm,
+                customer_fallback=False,
+            )
+            return
+
+        submit_note = (
+            "排队办理中，将尝试自动提交 ICRIS。"
+            if allow_submit
+            else "排队办理中；当前为填表预览（不自动提交），完成后由专员复核。"
+        )
+        redo_note = "（重新办理）" if force_redo else ""
         self._safe_send(
             roomid,
-            f"已收到，开始为您办理注册：正在打包材料并启动后续流程…\n{submit_note}",
+            f"已受理{redo_note}，进入注册队列（任务 #{job_id}）。\n{submit_note}",
             to_external_userid=wm,
         )
-        threading.Thread(
-            target=self._run_handoff,
-            args=(roomid, from_id),
-            daemon=True,
-            name=f"handoff-{roomid[:8]}",
-        ).start()
 
     def _run_handoff(self, roomid: str, from_id: str) -> None:
+        """兼容旧路径：同步执行（新路径走 registration_jobs 队列）。"""
         try:
             self.ext_workflow.run_after_confirm(roomid, from_id)
         except Exception as e:
