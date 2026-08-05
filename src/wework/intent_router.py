@@ -134,27 +134,26 @@ def classify_intent(text: str, status: str = "") -> IntentResult:
     if fields:
         return IntentResult(intent=INTENT_SUBMIT_MATERIAL, fields=fields, source="rule")
 
+    # 问句/咨询优先 QA（收集中尤甚），避免「董事资料怎么填」被当成交材料
+    if _looks_like_qa_question(t):
+        return IntentResult(intent=INTENT_QA, source="rule")
+
     if text_looks_like_material_submit(t):
         # 像表单但未抽出字段
         return IntentResult(intent=INTENT_UNCLEAR_MATERIAL, source="rule")
 
     collecting = status in ("COLLECTING", "REVIEW")
     if collecting and text_has_material_keyword(t):
-        # 收集中提到资料关键词：优先材料链路，避免进 RAG
         if settings.wework_intent_llm_fallback:
             llm = _llm_classify(t, status)
-            if llm and llm.intent != INTENT_QA:
+            if llm:
                 if llm.intent == INTENT_SUBMIT_MATERIAL and not llm.fields:
                     llm.intent = INTENT_UNCLEAR_MATERIAL
                 return llm
         return IntentResult(intent=INTENT_UNCLEAR_MATERIAL, source="rule")
 
     # 弱信号：有资料词但非明确问答 → 可选 LLM
-    if (
-        settings.wework_intent_llm_fallback
-        and text_has_material_keyword(t)
-        and not _looks_like_qa_question(t)
-    ):
+    if settings.wework_intent_llm_fallback and text_has_material_keyword(t):
         llm = _llm_classify(t, status)
         if llm:
             if llm.intent == INTENT_SUBMIT_MATERIAL and not llm.fields:

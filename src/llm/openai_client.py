@@ -18,9 +18,11 @@ class LLMClient:
     """封装 OpenAI 兼容 API，用于智能对话与表单字段推断"""
 
     def __init__(self) -> None:
+        timeout = float(getattr(settings, "openai_timeout_seconds", 20.0) or 20.0)
         self.client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_api_base,
+            timeout=timeout,
         )
         self.model = settings.openai_model
 

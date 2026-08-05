@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 
 from openai import OpenAI
 
@@ -17,12 +19,18 @@ EMBEDDING_DIMENSIONS: dict[str, int] = {
     "text-embedding-ada-002": 1536,
 }
 
+_QUERY_CACHE: dict[str, list[float]] = {}
+_QUERY_CACHE_LOCK = threading.Lock()
+_QUERY_CACHE_MAX = 256
+
 
 class Embedder:
     def __init__(self) -> None:
+        timeout = float(getattr(settings, "openai_timeout_seconds", 20.0) or 20.0)
         self.client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_api_base,
+            timeout=timeout,
         )
         self.model = settings.rag_embedding_model
 
@@ -43,4 +51,18 @@ class Embedder:
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
-        return self.embed_texts([query])[0]
+        key = hashlib.sha256(
+            f"{self.model}\0{(query or '').strip()}".encode("utf-8")
+        ).hexdigest()
+        with _QUERY_CACHE_LOCK:
+            cached = _QUERY_CACHE.get(key)
+            if cached is not None:
+                return cached
+        vec = self.embed_texts([query])[0]
+        with _QUERY_CACHE_LOCK:
+            if len(_QUERY_CACHE) >= _QUERY_CACHE_MAX:
+                # 简单淘汰：清一半
+                for k in list(_QUERY_CACHE.keys())[: _QUERY_CACHE_MAX // 2]:
+                    _QUERY_CACHE.pop(k, None)
+            _QUERY_CACHE[key] = vec
+        return vec

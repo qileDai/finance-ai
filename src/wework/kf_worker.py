@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 # origin=3：微信用户（客户）发送
 KF_ORIGIN_CUSTOMER = 3
 
+UNSUPPORTED_MSG_TIP = "暂不支持该消息类型，请发送文字说明，或上传证件图片/PDF 文件。"
+
 
 @dataclass
 class KfSyncWorker:
@@ -28,6 +30,7 @@ class KfSyncWorker:
     state_machine: GroupStateMachine | None = None
     _running: bool = False
     _thread: threading.Thread | None = None
+    _recover_thread: threading.Thread | None = None
     _sync_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
@@ -111,12 +114,20 @@ class KfSyncWorker:
                 poll,
                 len(accounts),
             )
+            try:
+                self.recover_stale_inbox()
+            except Exception as e:
+                logger.exception("kf 启动 inbox 恢复失败: %s", e)
             while self._running:
                 for open_kfid in accounts:
                     try:
                         self.sync_for_account(open_kfid)
                     except Exception as e:
                         logger.exception("kf 轮询 sync 异常 %s: %s", open_kfid, e)
+                try:
+                    self.recover_stale_inbox()
+                except Exception as e:
+                    logger.exception("kf inbox 恢复失败: %s", e)
                 time.sleep(poll)
 
         if blocking:
@@ -125,8 +136,86 @@ class KfSyncWorker:
             self._thread = threading.Thread(target=_loop, daemon=True, name="kf-sync-worker")
             self._thread.start()
 
+    def start_inbox_recover(self, *, interval: int | None = None) -> None:
+        """push-only 模式也定时扫描未处理 inbox（崩溃恢复）。"""
+        if self._recover_thread and self._recover_thread.is_alive():
+            return
+        poll = max(30, int(interval or settings.wework_kf_poll_interval or 120))
+
+        def _loop() -> None:
+            self._running = True
+            logger.info("kf inbox 恢复扫描已启动，间隔 %ds", poll)
+            try:
+                self.recover_stale_inbox()
+            except Exception as e:
+                logger.exception("kf 启动 inbox 恢复失败: %s", e)
+            while self._running:
+                time.sleep(poll)
+                if not self._running:
+                    break
+                try:
+                    self.recover_stale_inbox()
+                except Exception as e:
+                    logger.exception("kf inbox 恢复失败: %s", e)
+
+        self._recover_thread = threading.Thread(
+            target=_loop, daemon=True, name="kf-inbox-recover"
+        )
+        self._recover_thread.start()
+
     def stop_polling(self) -> None:
         self._running = False
+
+    def recover_stale_inbox(self) -> int:
+        """重投超时未处理的文本消息（进程崩溃后 processed=0）。"""
+        stale = int(getattr(settings, "wework_inbox_stale_seconds", 120) or 120)
+        batch = int(getattr(settings, "wework_inbox_recover_batch", 20) or 20)
+        rows = self.store.list_unprocessed_messages(
+            older_than_seconds=stale,
+            limit=batch,
+            msgtype="text",
+        )
+        if not rows:
+            return 0
+        assert self.state_machine is not None
+        recovered = 0
+        for row in rows:
+            msgid = str(row.get("msgid") or "")
+            roomid = str(row.get("roomid") or "")
+            from_id = str(row.get("from_id") or "")
+            content = str(row.get("content") or "").strip()
+            if not msgid or not roomid or not content:
+                if msgid:
+                    self.store.mark_message_processed(msgid)
+                continue
+            try:
+                logger.warning(
+                    "恢复未处理 inbox msgid=%s room=%s: %s",
+                    msgid,
+                    roomid,
+                    content[:60],
+                )
+                self.state_machine.handle_incoming_text(
+                    roomid, msgid, from_id, content,
+                )
+                recovered += 1
+            except Exception as e:
+                logger.exception(
+                    "恢复 inbox 失败 msgid=%s: %s", msgid, e
+                )
+                # 避免死循环：失败也标记已处理并尽量告知客户
+                try:
+                    self.external.send_session_text(
+                        roomid,
+                        "刚才有一条消息处理异常，请再发一次；或回复「转人工」。",
+                        to_external_userid=from_id if from_id.startswith("wm") else None,
+                    )
+                except Exception:
+                    pass
+                self.store.mark_message_processed(msgid)
+        if recovered:
+            logger.info("inbox 恢复重投 %d 条", recovered)
+        return recovered
 
     def _handle_message(self, msg: dict, open_kfid: str) -> bool:
         origin = msg.get("origin")
@@ -187,7 +276,27 @@ class KfSyncWorker:
                 open_kfid=msg_open_kfid,
             )
             return True
-        return False
+
+        # 语音/视频/链接等：明确提示，禁止静默丢弃
+        is_new = self.store.insert_message_if_new(
+            msgid, roomid, external_userid, msgtype or "unknown", msgtype or "",
+        )
+        if not is_new:
+            return False
+        logger.info(
+            "kf 不支持的消息类型 [%s] %s msgtype=%s",
+            msg_open_kfid,
+            external_userid,
+            msgtype,
+        )
+        self._reply_kf_file_error(
+            roomid,
+            external_userid,
+            UNSUPPORTED_MSG_TIP,
+            open_kfid=msg_open_kfid,
+        )
+        self.store.mark_message_processed(msgid)
+        return True
 
     def _reply_kf_file_error(
         self,

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from config.settings import settings
+from src.agent.faq_cache import lookup_faq
 from src.agent.models import (
     ABSTAIN_MESSAGE,
     HUMAN_MESSAGE,
@@ -62,6 +64,10 @@ def _looks_empty_talk(answer: str) -> bool:
     return False
 
 
+def _elapsed_ms(t0: float) -> int:
+    return int((time.monotonic() - t0) * 1000)
+
+
 class QAAgent:
     def __init__(
         self,
@@ -72,11 +78,11 @@ class QAAgent:
         answer_scorer: AnswerScorer | None = None,
         query_rewriter: QueryRewriter | None = None,
     ) -> None:
-        self.retriever = retriever or HybridRetriever()
         self.llm = llm or LLMClient()
-        self.retrieval_scorer = retrieval_scorer or RetrievalScorer()
-        self.answer_scorer = answer_scorer or AnswerScorer()
-        self.query_rewriter = query_rewriter or QueryRewriter()
+        self.retriever = retriever or HybridRetriever()
+        self.retrieval_scorer = retrieval_scorer or RetrievalScorer(llm=self.llm)
+        self.answer_scorer = answer_scorer or AnswerScorer(llm=self.llm)
+        self.query_rewriter = query_rewriter or QueryRewriter(llm=self.llm)
 
     def _resolve_failure_action(self) -> AgentAction:
         if settings.agent_escalate_to_human:
@@ -103,8 +109,17 @@ class QAAgent:
         trace: list[AgentTraceStep],
         total_retries: int,
         reason: str,
+        t_start: float | None = None,
     ) -> QAResult:
         """注册域失败优先固定兜底；非注册域可静默。"""
+        if t_start is not None:
+            trace.append(
+                AgentTraceStep(
+                    step="total",
+                    attempt=0,
+                    data={"elapsed_ms": _elapsed_ms(t_start)},
+                )
+            )
         if is_registration_domain(question) and not (
             settings.agent_silent_on_no_answer
             or not settings.agent_abstain_message_to_customer
@@ -155,19 +170,63 @@ class QAAgent:
         total_retries = 0
         max_retries = settings.agent_max_retries
         history = history or []
+        t_start = time.monotonic()
+
+        # FAQ 快路径：跳过 RAG/生成
+        t_faq = time.monotonic()
+        faq = lookup_faq(question)
+        if faq:
+            cites = [faq.source] if faq.source and faq.source != "system" else []
+            trace.append(
+                AgentTraceStep(
+                    step="faq",
+                    attempt=0,
+                    data={
+                        "id": faq.id,
+                        "match_type": faq.match_type,
+                        "elapsed_ms": _elapsed_ms(t_faq),
+                    },
+                )
+            )
+            trace.append(
+                AgentTraceStep(
+                    step="total",
+                    attempt=0,
+                    data={"elapsed_ms": _elapsed_ms(t_start), "path": "faq"},
+                )
+            )
+            return QAResult(
+                run_id=run_id,
+                question=question,
+                answer=faq.answer,
+                action=AgentAction.REPLY,
+                confidence=0.95,
+                retrieval_score=1.0,
+                answer_score=0.95,
+                retries=0,
+                answer_mode=AnswerMode.KNOWLEDGE,
+                hits=[],
+                citations=cites,
+                trace=trace,
+            )
 
         query = question.strip()
         hits: list[RetrievedChunk] = []
         retrieval_score = 0.0
         r_eval = None
+        skip_rewrite_th = float(
+            getattr(settings, "agent_high_confidence_skip_rewrite", 0.70) or 0.70
+        )
 
         for attempt in range(max_retries + 1):
+            t_ret = time.monotonic()
             new_hits = self.retriever.retrieve(
                 query, top_k=settings.rag_top_k, scope=scope,
             )
             hits = _merge_hits(hits, new_hits) if hits else new_hits
             r_eval = self.retrieval_scorer.score(question, hits)
             retrieval_score = r_eval.score
+            high_conf = r_eval.passed and retrieval_score >= skip_rewrite_th
             trace.append(
                 AgentTraceStep(
                     step="retrieve",
@@ -179,13 +238,25 @@ class QAAgent:
                         "hit_count": r_eval.hit_count,
                         "keyword_coverage": r_eval.keyword_coverage,
                         "feedback": r_eval.feedback,
+                        "high_confidence": high_conf,
+                        "elapsed_ms": _elapsed_ms(t_ret),
                     },
                 )
             )
             if r_eval.passed or attempt >= max_retries:
                 break
+            if high_conf:
+                break
+            t_rw = time.monotonic()
             query = self.query_rewriter.rewrite(question, hits, r_eval)
             total_retries += 1
+            trace.append(
+                AgentTraceStep(
+                    step="rewrite",
+                    attempt=attempt,
+                    data={"query": query, "elapsed_ms": _elapsed_ms(t_rw)},
+                )
+            )
 
         use_knowledge = bool(hits) and r_eval is not None and r_eval.passed
         soft_min = float(settings.agent_soft_knowledge_min_score or 0.0)
@@ -198,7 +269,7 @@ class QAAgent:
         )
 
         if use_knowledge or use_soft_knowledge:
-            return self._run_knowledge_mode(
+            result = self._run_knowledge_mode(
                 run_id=run_id,
                 question=question,
                 hits=hits,
@@ -209,10 +280,23 @@ class QAAgent:
                 soft=use_soft_knowledge,
                 history=history,
                 group_meta=group_meta or {},
+                skip_llm_judge=retrieval_score
+                >= float(getattr(settings, "agent_high_confidence_skip_judge", 0.75) or 0.75),
             )
+            result.trace.append(
+                AgentTraceStep(
+                    step="total",
+                    attempt=0,
+                    data={
+                        "elapsed_ms": _elapsed_ms(t_start),
+                        "path": "soft" if use_soft_knowledge else "knowledge",
+                    },
+                )
+            )
+            return result
 
         if settings.agent_contextual_fallback:
-            return self._run_contextual_mode(
+            result = self._run_contextual_mode(
                 run_id=run_id,
                 question=question,
                 hits=hits,
@@ -222,6 +306,14 @@ class QAAgent:
                 history=history,
                 group_meta=group_meta or {},
             )
+            result.trace.append(
+                AgentTraceStep(
+                    step="total",
+                    attempt=0,
+                    data={"elapsed_ms": _elapsed_ms(t_start), "path": "contextual"},
+                )
+            )
+            return result
 
         return self._domain_abstain_or_silent(
             run_id=run_id,
@@ -231,6 +323,7 @@ class QAAgent:
             trace=trace,
             total_retries=total_retries,
             reason="无有效检索且未启用上下文兜底",
+            t_start=t_start,
         )
 
     def _run_knowledge_mode(
@@ -246,23 +339,46 @@ class QAAgent:
         soft: bool = False,
         history: list[str] | None = None,
         group_meta: dict[str, str] | None = None,
+        skip_llm_judge: bool = False,
     ) -> QAResult:
         context = format_hits_for_prompt(hits)
         history = history or []
         group_meta = group_meta or {}
+        t_gen = time.monotonic()
         answer = self.llm.generate_answer(
             question,
             context,
             history=history,
             group_meta=group_meta,
         )
+        trace.append(
+            AgentTraceStep(
+                step="generate",
+                attempt=0,
+                data={"elapsed_ms": _elapsed_ms(t_gen), "soft": soft},
+            )
+        )
         answer_score = 0.0
         final_action = AgentAction.REPLY
         answer_mode = AnswerMode.KNOWLEDGE
 
         for attempt in range(max_retries + 1):
-            a_eval = self.answer_scorer.score(question, hits, answer)
+            t_sc = time.monotonic()
+            a_eval = self.answer_scorer.score(
+                question,
+                hits,
+                answer,
+                skip_llm_judge=skip_llm_judge and attempt == 0,
+            )
             answer_score = a_eval.score
+            # 首轮启发式过线且高置信：确认跳过了 LLM
+            if (
+                skip_llm_judge
+                and attempt == 0
+                and a_eval.passed
+                and not settings.agent_llm_judge_always
+            ):
+                skip_llm_judge = True
             trace.append(
                 AgentTraceStep(
                     step="answer",
@@ -276,14 +392,15 @@ class QAAgent:
                         "completeness": a_eval.completeness,
                         "grounded": a_eval.grounded,
                         "feedback": a_eval.feedback,
+                        "skip_llm_judge": skip_llm_judge and attempt == 0,
                         "history_len": len(history),
                         "has_materials_summary": bool(group_meta.get("materials_summary")),
+                        "elapsed_ms": _elapsed_ms(t_sc),
                     },
                 )
             )
             if a_eval.passed or attempt >= max_retries:
                 if not a_eval.passed and settings.agent_abstain_on_low_confidence:
-                    # 软知识质检失败：尝试一次 contextual，避免与 soft 互相递归
                     if soft and settings.agent_contextual_fallback:
                         return self._run_contextual_mode(
                             run_id=run_id,
@@ -306,10 +423,18 @@ class QAAgent:
                     if final_action == AgentAction.SILENT:
                         answer_mode = AnswerMode.SILENT
                 break
+            t_rg = time.monotonic()
             answer = self.llm.regenerate_answer(
                 question, context, answer, a_eval.feedback,
             )
             total_retries += 1
+            trace.append(
+                AgentTraceStep(
+                    step="regenerate",
+                    attempt=attempt,
+                    data={"elapsed_ms": _elapsed_ms(t_rg)},
+                )
+            )
 
         confidence = min(retrieval_score, answer_score)
         return QAResult(
@@ -342,6 +467,7 @@ class QAAgent:
         group_meta: dict[str, str],
         allow_soft_fallback: bool = True,
     ) -> QAResult:
+        t_ctx = time.monotonic()
         ctx_result = self.llm.generate_contextual_answer(
             question, history=history, group_meta=group_meta, hits=hits,
         )
@@ -352,6 +478,7 @@ class QAAgent:
                 data={
                     "can_answer": ctx_result.get("can_answer"),
                     "reason": ctx_result.get("reason", ""),
+                    "elapsed_ms": _elapsed_ms(t_ctx),
                 },
             )
         )
@@ -386,6 +513,10 @@ class QAAgent:
             )
 
         answer = str(ctx_result.get("answer") or "").strip()
+        # 弱证据路径强制附免责声明
+        disclaimer = "（以上供参考，具体以专员核实为准；也可回复「转人工」。）"
+        if answer and disclaimer not in answer:
+            answer = f"{answer}\n{disclaimer}"
         if not answer or _looks_empty_talk(answer):
             return self._domain_abstain_or_silent(
                 run_id=run_id,

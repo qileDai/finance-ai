@@ -18,6 +18,27 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _percentile_stats(values: list[int]) -> dict[str, Any]:
+    """返回 count / p50 / p95 / max（毫秒）。"""
+    if not values:
+        return {"count": 0, "p50": 0, "p95": 0, "max": 0}
+    n = len(values)
+    sorted_v = sorted(values)
+
+    def _pct(p: float) -> int:
+        if n == 1:
+            return sorted_v[0]
+        idx = min(n - 1, max(0, int(round((p / 100.0) * (n - 1)))))
+        return int(sorted_v[idx])
+
+    return {
+        "count": n,
+        "p50": _pct(50),
+        "p95": _pct(95),
+        "max": int(sorted_v[-1]),
+    }
+
+
 @dataclass
 class ExternalGroupStore:
     """外部客户群、消息收件箱、AI 回复审计"""
@@ -126,11 +147,14 @@ class ExternalGroupStore:
                     action TEXT NOT NULL DEFAULT 'reply',
                     retries INTEGER NOT NULL DEFAULT 0,
                     trace_json TEXT NOT NULL DEFAULT '{}',
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_agent_runs_roomid
                     ON agent_runs(roomid);
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_created
+                    ON agent_runs(created_at);
 
                 CREATE TABLE IF NOT EXISTS customer_links (
                     wm_userid TEXT NOT NULL,
@@ -165,6 +189,25 @@ class ExternalGroupStore:
                     ON registration_jobs(status, available_at, id);
                 CREATE INDEX IF NOT EXISTS idx_registration_jobs_roomid
                     ON registration_jobs(roomid);
+
+                CREATE TABLE IF NOT EXISTS kf_send_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    open_kfid TEXT NOT NULL DEFAULT '',
+                    external_userid TEXT NOT NULL DEFAULT '',
+                    roomid TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kf_send_log_user_time
+                    ON kf_send_log(open_kfid, external_userid, created_at);
+
+                CREATE TABLE IF NOT EXISTS send_fail_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    roomid TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_send_fail_log_time
+                    ON send_fail_log(created_at);
                 """
             )
             self._migrate_columns(conn)
@@ -200,6 +243,12 @@ class ExternalGroupStore:
         }.items():
             if col not in ai_cols:
                 conn.execute(f"ALTER TABLE ai_replies ADD COLUMN {col} {typedef}")
+
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_runs)")}
+        if run_cols and "duration_ms" not in run_cols:
+            conn.execute(
+                "ALTER TABLE agent_runs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_kf_cursor(self, conn: sqlite3.Connection) -> None:
         """将 kf_cursor 从单例 id=1 迁移为 open_kfid 主键"""
@@ -355,6 +404,162 @@ class ExternalGroupStore:
                 (msgid,),
             )
 
+    def list_unprocessed_messages(
+        self,
+        *,
+        older_than_seconds: int = 120,
+        limit: int = 20,
+        msgtype: str = "text",
+    ) -> list[dict[str, Any]]:
+        """超时未处理的入站消息（供崩溃恢复重投）。"""
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=max(30, int(older_than_seconds or 120)))
+        ).isoformat()
+        limit = max(1, min(int(limit or 20), 100))
+        with self._conn() as conn:
+            if msgtype:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM message_inbox
+                    WHERE processed = 0
+                      AND created_at < ?
+                      AND msgtype = ?
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (cutoff, msgtype, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM message_inbox
+                    WHERE processed = 0 AND created_at < ?
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    """,
+                    (cutoff, limit),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_unprocessed_messages(self) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM message_inbox WHERE processed = 0"
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def record_kf_send(
+        self,
+        *,
+        open_kfid: str,
+        external_userid: str,
+        roomid: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO kf_send_log (open_kfid, external_userid, roomid, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (open_kfid or "", external_userid or "", roomid or "", now),
+            )
+
+    def count_kf_sends_48h(
+        self,
+        *,
+        open_kfid: str,
+        external_userid: str,
+        hours: float = 48.0,
+    ) -> int:
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max(1.0, float(hours)))
+        ).isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM kf_send_log
+                WHERE open_kfid = ? AND external_userid = ? AND created_at >= ?
+                """,
+                (open_kfid or "", external_userid or "", cutoff),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def record_send_failure(self, roomid: str, reason: str = "") -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO send_fail_log (roomid, reason, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (roomid or "", (reason or "")[:200], now),
+            )
+
+    def conversation_quality_stats(self, *, hours: float = 24.0) -> dict[str, Any]:
+        """近 N 小时 QA action 分布 + inbox 积压 + 发送失败。"""
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max(1.0, float(hours)))
+        ).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT action, COUNT(*) AS n FROM agent_runs
+                WHERE created_at >= ?
+                GROUP BY action
+                """,
+                (cutoff,),
+            ).fetchall()
+            backlog = conn.execute(
+                "SELECT COUNT(*) AS n FROM message_inbox WHERE processed = 0"
+            ).fetchone()
+            fail_row = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM send_fail_log
+                WHERE created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()
+            send_row = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM kf_send_log
+                WHERE created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()
+            dur_rows = conn.execute(
+                """
+                SELECT duration_ms FROM agent_runs
+                WHERE created_at >= ? AND duration_ms > 0
+                ORDER BY duration_ms ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+        actions = {str(r["action"]): int(r["n"]) for r in rows}
+        total = sum(actions.values()) or 0
+        silent_n = int(actions.get("silent", 0))
+        abstain_n = int(actions.get("abstain", 0))
+        durations = [int(r["duration_ms"]) for r in dur_rows if r["duration_ms"]]
+        latency = _percentile_stats(durations)
+        return {
+            "hours": hours,
+            "agent_runs_total": total,
+            "actions": actions,
+            "silent_rate": round(silent_n / total, 4) if total else 0.0,
+            "abstain_rate": round(abstain_n / total, 4) if total else 0.0,
+            "inbox_unprocessed": int(backlog["n"]) if backlog else 0,
+            "send_failures": int(fail_row["n"]) if fail_row else 0,
+            "kf_sends": int(send_row["n"]) if send_row else 0,
+            "qa_latency_ms": latency,
+        }
+
     def get_recent_messages(self, roomid: str, *, limit: int = 10) -> list[str]:
         """按时间交错合并客户消息与助手回复，供 QA 上下文。"""
         fetch_n = max(limit * 2, 20)
@@ -433,6 +638,7 @@ class ExternalGroupStore:
         action: str,
         retries: int,
         trace_json: str,
+        duration_ms: int = 0,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -440,13 +646,13 @@ class ExternalGroupStore:
                 INSERT INTO agent_runs (
                     id, roomid, question, final_answer,
                     retrieval_score, answer_score, confidence,
-                    action, retries, trace_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    action, retries, trace_json, duration_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id, roomid, question, final_answer,
                     retrieval_score, answer_score, confidence,
-                    action, retries, trace_json, _utc_now(),
+                    action, retries, trace_json, int(duration_ms or 0), _utc_now(),
                 ),
             )
 

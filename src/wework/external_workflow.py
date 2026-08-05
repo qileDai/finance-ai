@@ -139,8 +139,9 @@ class ExternalGroupWorkflow:
             try:
                 self.external.send_session_text(
                     roomid,
-                    f"【任务 #{job_id}】材料已打包，但自动办理失败: {error}\n"
-                    "请专员人工处理，或稍后回复「确认」重试（需专员重置任务状态）。",
+                    f"【任务 #{job_id}】自动办理未成功，专员已收到通知。"
+                    "您可继续咨询业务问题，或回复「重新办理」再次排队；"
+                    "也可回复「转人工」。",
                     sender_userid=owner,
                 )
             except Exception as e:

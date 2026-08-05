@@ -6,6 +6,7 @@ import re
 
 from config.settings import settings
 from src.agent.models import RetrievalEval
+from src.llm.openai_client import LLMClient
 from src.rag.models import RetrievedChunk
 
 RRF_NORM = 0.05  # 典型 RRF 高分区间参考值
@@ -28,6 +29,9 @@ def _keyword_coverage(query: str, hits: list[RetrievedChunk]) -> float:
 
 
 class RetrievalScorer:
+    def __init__(self, llm: LLMClient | None = None) -> None:
+        self._llm = llm
+
     def score(self, question: str, hits: list[RetrievedChunk]) -> RetrievalEval:
         if not hits:
             return RetrievalEval(
@@ -43,10 +47,25 @@ class RetrievalScorer:
         rrf_norm = min(top_score / RRF_NORM, 1.0) if top_score > 0 else 0.0
         hit_ratio = min(hit_count / max(settings.rag_top_k, 1), 1.0)
 
+        # 高置信启发式：直接过线，跳过 LLM retrieval judge
+        heuristic_score = 0.35 * rrf_norm + 0.15 * hit_ratio + 0.50 * kw_cov
+        high_th = float(
+            getattr(settings, "agent_high_confidence_skip_rewrite", 0.70) or 0.70
+        )
+        skip_llm = (
+            heuristic_score >= high_th
+            and not settings.agent_llm_judge_always
+        )
+
         llm_relevance = 0.0
-        if settings.agent_enable_llm_judge and (
-            settings.agent_llm_judge_always
-            or (rrf_norm * 0.25 + kw_cov * 0.25) < settings.agent_retrieval_llm_threshold
+        if (
+            not skip_llm
+            and settings.agent_enable_llm_judge
+            and (
+                settings.agent_llm_judge_always
+                or (rrf_norm * 0.25 + kw_cov * 0.25)
+                < settings.agent_retrieval_llm_threshold
+            )
         ):
             llm_relevance = self._llm_relevance(question, hits)
 
@@ -58,7 +77,7 @@ class RetrievalScorer:
                 + 0.40 * llm_relevance
             )
         else:
-            score = 0.35 * rrf_norm + 0.15 * hit_ratio + 0.50 * kw_cov
+            score = heuristic_score
 
         passed = score >= settings.agent_retrieval_threshold
         if llm_relevance > 0 and llm_relevance < 0.6:
@@ -84,14 +103,14 @@ class RetrievalScorer:
             details={
                 "rrf_norm": round(rrf_norm, 4),
                 "hit_ratio": round(hit_ratio, 4),
+                "skipped_llm": skip_llm,
             },
         )
 
     def _llm_relevance(self, question: str, hits: list[RetrievedChunk]) -> float:
         try:
-            from src.llm.openai_client import LLMClient
-
-            scores = LLMClient().judge_retrieval_relevance(question, hits[:3])
+            client = self._llm or LLMClient()
+            scores = client.judge_retrieval_relevance(question, hits[:3])
             if not scores:
                 return 0.0
             return sum(scores) / len(scores) / 5.0

@@ -253,7 +253,12 @@ def text_looks_like_material_submit(text: str) -> bool:
     hit = sum(1 for lab in _LABEL_TO_KEY if lab in t)
     if hit >= 2:
         return True
-    if hit >= 1 and ("=" in t or "：" in t or ":" in t or "是" in t):
+    if hit >= 1 and (
+        "=" in t
+        or "：" in t
+        or ":" in t
+        or re.search(r"(?<![董监])是", t)  # 「董事是张三」；勿把「董事」里的「是」算进去
+    ):
         return True
     email_n = len(re.findall(r"[\w.+-]+@[\w.-]+\.\w+", t))
     if email_n >= 1 and any(k in t for k in ("公司", "董事", "股东", "注册", "申请人")):

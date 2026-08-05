@@ -73,6 +73,26 @@ class Settings(BaseSettings):
     # QA 生成前先发「思考中」提示（占客服额度 1 条；默认关闭）
     wework_thinking_ack_enabled: bool = False
     wework_thinking_ack_text: str = "正在为您查询，请稍候…"
+    # 微信客服主动回复额度（48h 窗口；0=不限制）
+    wework_kf_send_quota_48h: int = Field(default=5, validation_alias="WEWORK_KF_SEND_QUOTA_48H")
+    # 首触达欢迎+清单合并为 1 条（省额度）
+    wework_kf_merge_welcome_checklist: bool = True
+    # 长答超过该字节数时截断并提示（0=仅按 2048 切分，不摘要）
+    wework_kf_long_reply_max_bytes: int = Field(
+        default=1800, validation_alias="WEWORK_KF_LONG_REPLY_MAX_BYTES"
+    )
+    # 切分发送间隔（秒），降低连发触限流
+    wework_send_chunk_delay_seconds: float = 0.4
+    # 未处理 inbox 超过该秒数则恢复重投
+    wework_inbox_stale_seconds: int = 120
+    wework_inbox_recover_batch: int = 20
+    # QA 防抖（秒）：普通合并等待；明确问句用更快值
+    wework_qa_debounce_seconds: float = Field(
+        default=1.0, validation_alias="WEWORK_QA_DEBOUNCE_SECONDS"
+    )
+    wework_qa_debounce_fast_seconds: float = Field(
+        default=0.4, validation_alias="WEWORK_QA_DEBOUNCE_FAST_SECONDS"
+    )
 
     # H5 材料收集表单
     collect_form_enabled: bool = False  # True 时才暴露 H5 链接与 /collect/form 路由
@@ -165,6 +185,11 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""
     qdrant_collection: str = "finance_knowledge"
 
+    # OpenAI 请求超时（秒），避免 Timer 线程挂死
+    openai_timeout_seconds: float = Field(
+        default=20.0, validation_alias="OPENAI_TIMEOUT_SECONDS"
+    )
+
     # QA Agent Loop（检索/回答打分 + 自我纠错）
     agent_max_retries: int = 2
     agent_retrieval_threshold: float = 0.55
@@ -172,6 +197,9 @@ class Settings(BaseSettings):
     agent_answer_faithfulness_threshold: float = 0.7
     agent_answer_completeness_threshold: float = 0.6
     agent_answer_llm_threshold: float = 0.65
+    # 检索分达到该值：跳过 rewrite；答案启发式过线则跳过 LLM judge
+    agent_high_confidence_skip_rewrite: float = 0.70
+    agent_high_confidence_skip_judge: float = 0.75
     agent_abstain_on_low_confidence: bool = True
     agent_escalate_to_human: bool = False
     agent_enable_llm_judge: bool = True
@@ -179,14 +207,22 @@ class Settings(BaseSettings):
     agent_log_runs: bool = True
     # 生产建议：域内失败给客户可见兜底，勿裸静默
     agent_silent_on_no_answer: bool = False
-    agent_contextual_fallback: bool = True
+    # 弱证据上下文兜底：生产默认关闭，避免幻觉
+    agent_contextual_fallback: bool = False
     agent_context_history_limit: int = 10
     agent_abstain_message_to_customer: bool = True
     agent_abstain_message: str = (
         "这个问题我暂时无法准确确认，已记录，专员稍后跟进；您也可回复「转人工」。"
     )
     # 软知识最低检索分，低于则不走弱命中答题
-    agent_soft_knowledge_min_score: float = 0.35
+    agent_soft_knowledge_min_score: float = 0.45
+    # 高频 FAQ 缓存（命中跳过 RAG/生成）
+    agent_faq_enabled: bool = True
+    agent_faq_path: str = Field(
+        default="docs/knowledge/faq.json", validation_alias="AGENT_FAQ_PATH"
+    )
+    # 对客回复末尾附短引用
+    agent_show_citations: bool = True
 
     def rag_primary_source_list(self) -> list[str]:
         return [p.strip() for p in (self.rag_primary_sources or "").split(",") if p.strip()]

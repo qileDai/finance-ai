@@ -13,12 +13,21 @@ DURATION_QUERY_RE = re.compile(r"多久|多长时间|要多久|多久能|周期"
 
 
 class QueryRewriter:
+    def __init__(self, llm=None) -> None:
+        self._llm = llm
+
     def rewrite(
         self,
         question: str,
         hits: list[RetrievedChunk],
         eval_result: RetrievalEval,
     ) -> str:
+        # 高置信未过线时仍优先规则改写，避免额外 LLM
+        high_th = float(
+            getattr(settings, "agent_high_confidence_skip_rewrite", 0.70) or 0.70
+        )
+        if eval_result.score >= high_th * 0.9:
+            return self._rule_rewrite(question)
         if settings.agent_enable_llm_judge:
             llm_query = self._llm_rewrite(question, hits, eval_result)
             if llm_query:
@@ -50,6 +59,7 @@ class QueryRewriter:
         try:
             from src.llm.openai_client import LLMClient
 
-            return LLMClient().rewrite_query(question, hits, eval_result.feedback)
+            client = self._llm or LLMClient()
+            return client.rewrite_query(question, hits, eval_result.feedback)
         except Exception:
             return ""

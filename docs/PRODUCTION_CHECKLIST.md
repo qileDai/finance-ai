@@ -33,9 +33,16 @@
 WEWORK_CHANNEL=kf
 WEWORK_KF_MODE=both
 WEWORK_THINKING_ACK_ENABLED=false
+WEWORK_KF_SEND_QUOTA_48H=5
+WEWORK_KF_MERGE_WELCOME_CHECKLIST=true
+WEWORK_INBOX_STALE_SECONDS=120
+WEWORK_QA_DEBOUNCE_SECONDS=1.0
+WEWORK_QA_DEBOUNCE_FAST_SECONDS=0.4
 AGENT_SILENT_ON_NO_ANSWER=false
 AGENT_ABSTAIN_MESSAGE_TO_CUSTOMER=true
-AGENT_SOFT_KNOWLEDGE_MIN_SCORE=0.35
+AGENT_CONTEXTUAL_FALLBACK=false
+AGENT_SOFT_KNOWLEDGE_MIN_SCORE=0.45
+AGENT_FAQ_ENABLED=true
 DRY_RUN=true
 ICRIS_ALLOW_SUBMIT=false
 ICRIS_WORKER_ENABLED=true
@@ -49,10 +56,14 @@ CHROME_USE_EXISTING=false
 
 - [ ] 发文本业务问题：直接正式答复（无「思考中」提示）  
 - [ ] 发材料键值：材料更新，无 RAG  
+- [ ] 收集中问「董事资料怎么填 / 要多久」：走 QA，非「未识别字段」  
 - [ ] 发无关图片：提示未存档  
+- [ ] 发语音/视频等非文本：提示「请发文字或证件图片」  
 - [ ] 发身份证：识别类型/号码（中文提示）  
 - [ ] 故意断 OpenAI：客户收到兜底/转人工提示，而非完全无声  
-- [ ] `/health` 含 `icris_worker.alive=true`、`pending_count`  
+- [ ] `/health` 含 `icris_worker.alive=true`、`conversation.inbox_unprocessed`、`silent_rate`  
+- [ ] HUMAN 态再发消息：收到「已转人工」确认（非无声）  
+- [ ] FAILED 态可「重新办理」/继续问答 
 
 ## 6. L2 自动注册（队列）
 

@@ -510,6 +510,9 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
             kf_worker.start_polling(blocking=False)
         else:
             print(f"[外部群] kf 轮询: 未启用（WEWORK_KF_MODE={mode}）")
+            # push-only：仍需定时恢复崩溃后未处理的 inbox
+            kf_worker.start_inbox_recover()
+            print("[外部群] kf inbox 恢复扫描: 已启用")
         if settings.wework_kf_push_enabled:
             if settings.wework_external_callback_configured:
                 print(

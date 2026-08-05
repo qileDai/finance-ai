@@ -150,6 +150,19 @@ class UnifiedWebServer:
                     except Exception:
                         qdrant_ok = False
 
+                try:
+                    convo = store.conversation_quality_stats(hours=24.0)
+                except Exception:
+                    convo = {
+                        "hours": 24.0,
+                        "agent_runs_total": 0,
+                        "actions": {},
+                        "silent_rate": 0.0,
+                        "abstain_rate": 0.0,
+                        "inbox_unprocessed": store.count_unprocessed_messages(),
+                        "send_failures": 0,
+                        "kf_sends": 0,
+                    }
                 data = {
                     "ok": True,
                     "service": "finance-ai-wework",
@@ -165,6 +178,8 @@ class UnifiedWebServer:
                     "wework_kf_mode": settings.wework_kf_mode_resolved,
                     "thinking_ack": bool(settings.wework_thinking_ack_enabled),
                     "agent_silent_on_no_answer": bool(settings.agent_silent_on_no_answer),
+                    "kf_send_quota_48h": int(settings.wework_kf_send_quota_48h or 0),
+                    "conversation": convo,
                 }
                 if icris_worker is not None and hasattr(icris_worker, "status_payload"):
                     data["icris_worker"] = icris_worker.status_payload()
@@ -186,6 +201,9 @@ class UnifiedWebServer:
                 iw = data.get("icris_worker") or {}
                 if settings.icris_worker_enabled and not iw.get("alive"):
                     warnings.append("icris worker not alive")
+                backlog = int((convo or {}).get("inbox_unprocessed") or 0)
+                if backlog >= 50:
+                    warnings.append(f"inbox backlog high ({backlog})")
                 if warnings:
                     data["warning"] = "; ".join(warnings)
                 self._send_json(data, 200 if data["ok"] else 503)

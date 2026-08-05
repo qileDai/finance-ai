@@ -6,6 +6,7 @@ import re
 
 from config.settings import settings
 from src.agent.models import AnswerEval
+from src.llm.openai_client import LLMClient
 from src.rag.models import RetrievedChunk
 
 CAUTION_QUERY_RE = re.compile(r"注意|要注意|注意事项")
@@ -50,11 +51,16 @@ def _completeness_heuristic(question: str, answer: str) -> float:
 
 
 class AnswerScorer:
+    def __init__(self, llm: LLMClient | None = None) -> None:
+        self._llm = llm
+
     def score(
         self,
         question: str,
         hits: list[RetrievedChunk],
         answer: str,
+        *,
+        skip_llm_judge: bool = False,
     ) -> AnswerEval:
         faith_h = _faithfulness_heuristic(answer, hits)
         comp_h = _completeness_heuristic(question, answer)
@@ -65,11 +71,28 @@ class AnswerScorer:
         missing: list[str] = []
         feedback = ""
 
-        if settings.agent_enable_llm_judge and (
+        heuristic_pass = (
+            faithfulness >= settings.agent_answer_faithfulness_threshold
+            and completeness >= settings.agent_answer_completeness_threshold
+            and grounded
+        )
+
+        use_llm = settings.agent_enable_llm_judge and (
             settings.agent_llm_judge_always
-            or faith_h < settings.agent_answer_llm_threshold
-            or CAUTION_QUERY_RE.search(question)
-        ):
+            or (
+                not skip_llm_judge
+                and (
+                    faith_h < settings.agent_answer_llm_threshold
+                    or CAUTION_QUERY_RE.search(question)
+                    or not heuristic_pass
+                )
+            )
+        )
+        # 高置信快路径：启发式已过线则跳过 LLM judge
+        if skip_llm_judge and heuristic_pass and not settings.agent_llm_judge_always:
+            use_llm = False
+
+        if use_llm:
             llm_eval = self._llm_judge(question, hits, answer)
             if llm_eval:
                 faithfulness = llm_eval.get("faithfulness", faith_h)
@@ -112,8 +135,7 @@ class AnswerScorer:
         self, question: str, hits: list[RetrievedChunk], answer: str,
     ) -> dict | None:
         try:
-            from src.llm.openai_client import LLMClient
-
-            return LLMClient().judge_answer_quality(question, hits, answer)
+            client = self._llm or LLMClient()
+            return client.judge_answer_quality(question, hits, answer)
         except Exception:
             return None

@@ -101,7 +101,44 @@ def build_welcome_message(phone: str = "", *, channel: str = "group") -> str:
 
 PASTE_FORM_TEMPLATE_PATH = PROJECT_ROOT / "templates" / "company_registration_form.md"
 
-DEBOUNCE_SECONDS = 5.0
+def _qa_debounce_seconds(text: str) -> float:
+    """普通合并等待；明确问句更快启动。"""
+    base = float(getattr(settings, "wework_qa_debounce_seconds", 1.0) or 1.0)
+    fast = float(getattr(settings, "wework_qa_debounce_fast_seconds", 0.4) or 0.4)
+    base = max(0.0, base)
+    fast = max(0.0, min(fast, base if base > 0 else fast))
+    t = (text or "").strip()
+    if not t:
+        return base
+    if "?" in t or "？" in t:
+        return fast
+    from src.wework.intent_router import _looks_like_qa_question
+
+    if _looks_like_qa_question(t):
+        return fast
+    return base
+
+
+def _format_customer_answer(answer: str, qa_result) -> str:
+    """拼接对客回复，可选短引用。"""
+    text = (answer or "").strip()
+    body = f"【AI 助手】{text}" if text else "【AI 助手】"
+    if not qa_result or not getattr(settings, "agent_show_citations", True):
+        return body
+    cites = [c for c in (getattr(qa_result, "citations", None) or []) if c]
+    if not cites:
+        return body
+    # 缩短路径展示
+    labels: list[str] = []
+    for c in cites[:2]:
+        label = str(c).replace("\\", "/")
+        if "/" in label:
+            label = label.rsplit("/", 1)[-1]
+        if label and label not in labels:
+            labels.append(label)
+    if labels:
+        body = f"{body}\n依据：{' / '.join(labels)}"
+    return body
 
 
 @dataclass
@@ -122,6 +159,17 @@ class GroupStateMachine:
     _pending: dict[str, PendingBatch] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _handoff_inflight: set[str] = field(default_factory=set)
+    _qa_inflight: set[str] = field(default_factory=set)
+    _human_acked: set[str] = field(default_factory=set)
+    _failed_hinted: set[str] = field(default_factory=set)
+    _orchestrator: object | None = field(default=None, repr=False)
+
+    def _get_orchestrator(self):
+        if self._orchestrator is None:
+            from src.agent.orchestrator import TaskOrchestrator
+
+            self._orchestrator = TaskOrchestrator()
+        return self._orchestrator
 
     def _owner(self, roomid: str) -> str | None:
         g = self.store.get_group(roomid) or {}
@@ -193,6 +241,56 @@ class GroupStateMachine:
         else:
             self._send_paste_template(roomid, to_external_userid=to_external_userid)
 
+    def _kf_send_identity(
+        self, roomid: str, to_external_userid: str | None = None
+    ) -> tuple[str, str]:
+        """返回 (open_kfid, external_userid) 供额度统计。"""
+        if is_kf_session(roomid):
+            parsed = parse_kf_roomid(roomid)
+            if parsed:
+                return parsed[0], parsed[1]
+            wm = to_external_userid or roomid.removeprefix("kf:")
+            return settings.wework_kf_default_open_kfid or "", wm or ""
+        wm = to_external_userid or ""
+        return "", wm
+
+    def _kf_quota_remaining(
+        self, roomid: str, to_external_userid: str | None = None
+    ) -> int | None:
+        """剩余可发条数；None 表示不限制。"""
+        quota = int(getattr(settings, "wework_kf_send_quota_48h", 0) or 0)
+        if quota <= 0 or not is_kf_session(roomid):
+            return None
+        kfid, wm = self._kf_send_identity(roomid, to_external_userid)
+        if not wm:
+            return None
+        used = self.store.count_kf_sends_48h(open_kfid=kfid, external_userid=wm)
+        return max(0, quota - used)
+
+    def _maybe_truncate_for_quota(
+        self, roomid: str, content: str, *, remaining: int | None
+    ) -> str:
+        """KF 额度紧时压缩长答为单条。"""
+        if remaining is None or remaining > 1:
+            max_b = int(getattr(settings, "wework_kf_long_reply_max_bytes", 0) or 0)
+            if max_b > 0 and is_kf_session(roomid):
+                raw = (content or "").encode("utf-8")
+                if len(raw) > max_b:
+                    cut = content.encode("utf-8")[:max_b].decode("utf-8", errors="ignore")
+                    for sep in ("。", "！", "？", "\n", "；"):
+                        idx = cut.rfind(sep)
+                        if idx > len(cut) // 2:
+                            cut = cut[: idx + 1]
+                            break
+                    return cut.rstrip() + "\n…（篇幅较长已摘要，详情可回复「转人工」）"
+            return content
+        # 仅剩 1 条：强制压缩
+        text = (content or "").strip()
+        if len(text.encode("utf-8")) <= 600:
+            return text
+        cut = text.encode("utf-8")[:600].decode("utf-8", errors="ignore")
+        return cut.rstrip() + "\n…客服消息额度将尽，详情请回复「转人工」。"
+
     def _safe_send(
         self,
         roomid: str,
@@ -200,12 +298,43 @@ class GroupStateMachine:
         *,
         to_external_userid: str | None = None,
         customer_fallback: bool = True,
+        count_quota: bool = True,
     ) -> bool:
         """发送文本（自动切分）；失败时可选向客户发一句兜底。返回是否全部成功。"""
-        chunks = _split_utf8_chunks(content)
+        import time as _time
+
+        remaining = self._kf_quota_remaining(roomid, to_external_userid)
+        if remaining is not None and remaining <= 0:
+            logger.warning("KF 发送额度已用尽 room=%s，跳过: %s", roomid, (content or "")[:60])
+            # 额度耗尽时仍尽量发一条提示（不计入？会计入也超限；企微可能拒发）
+            tip = "当前会话消息额度已用尽，请稍后再试或回复等待人工跟进。"
+            if (content or "").strip() != tip:
+                try:
+                    self.external.send_session_text(
+                        roomid,
+                        tip,
+                        sender_userid=self._owner(roomid),
+                        to_external_userid=to_external_userid,
+                    )
+                except Exception:
+                    pass
+            return False
+
+        body = self._maybe_truncate_for_quota(roomid, content, remaining=remaining)
+        # 额度紧张时只发 1 chunk
+        chunks = _split_utf8_chunks(body)
+        if remaining is not None and remaining <= 1:
+            chunks = chunks[:1]
+        elif remaining is not None:
+            chunks = chunks[: max(1, remaining)]
+
         ok = True
+        sent_any = False
+        delay = float(getattr(settings, "wework_send_chunk_delay_seconds", 0) or 0)
         try:
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                if i > 0 and delay > 0:
+                    _time.sleep(delay)
                 data = self.external.send_session_text(
                     roomid,
                     chunk,
@@ -213,7 +342,22 @@ class GroupStateMachine:
                     to_external_userid=to_external_userid,
                 )
                 if isinstance(data, dict) and int(data.get("errcode", 0) or 0) != 0:
-                    raise RuntimeError(f"send errcode={data.get('errcode')} {data.get('errmsg')}")
+                    raise RuntimeError(
+                        f"send errcode={data.get('errcode')} {data.get('errmsg')}"
+                    )
+                sent_any = True
+                if count_quota and is_kf_session(roomid):
+                    kfid, wm = self._kf_send_identity(roomid, to_external_userid)
+                    if wm:
+                        try:
+                            self.store.record_kf_send(
+                                open_kfid=kfid, external_userid=wm, roomid=roomid
+                            )
+                        except Exception:
+                            logger.debug("记录 kf 发送额度失败", exc_info=True)
+            if len(chunks) < len(_split_utf8_chunks(body)) and sent_any:
+                # 因额度截断未发完
+                logger.warning("会话 %s 因额度未发完全文", roomid)
         except Exception as e:
             ok = False
             logger.error(
@@ -222,6 +366,10 @@ class GroupStateMachine:
                 e,
                 (content or "")[:80],
             )
+            try:
+                self.store.record_send_failure(roomid, reason=str(e))
+            except Exception:
+                logger.debug("记录发送失败指标失败", exc_info=True)
             if (
                 customer_fallback
                 and (content or "").strip() != SEND_FAIL_FALLBACK
@@ -229,13 +377,15 @@ class GroupStateMachine:
                 try:
                     self.external.send_session_text(
                         roomid,
-                        SEND_FAIL_FALLBACK,
+                        SEND_FAIL_FALLBACK
+                        if not sent_any
+                        else "后半段消息可能未送达，请回复「转人工」或稍后再试。",
                         sender_userid=self._owner(roomid),
                         to_external_userid=to_external_userid,
                     )
                 except Exception as e2:
                     logger.error("会话 %s 兜底发送也失败: %s", roomid, e2)
-        return ok
+        return ok and sent_any
 
     def handle_group_created(self, roomid: str, *, force: bool = False) -> None:
         detail = self.external.get_group_chat(roomid) or {}
@@ -288,6 +438,14 @@ class GroupStateMachine:
             {"step": t.step, "attempt": t.attempt, "data": t.data}
             for t in result.trace
         ]
+        duration_ms = 0
+        for t in result.trace:
+            if t.step == "total":
+                try:
+                    duration_ms = int((t.data or {}).get("elapsed_ms") or 0)
+                except (TypeError, ValueError):
+                    duration_ms = 0
+                break
         self.store.insert_agent_run(
             run_id=result.run_id,
             roomid=roomid,
@@ -299,6 +457,7 @@ class GroupStateMachine:
             action=result.action.value,
             retries=result.retries,
             trace_json=json.dumps(trace_data, ensure_ascii=False),
+            duration_ms=duration_ms,
         )
 
     def _materials_summary(self, roomid: str) -> str:
@@ -358,23 +517,26 @@ class GroupStateMachine:
         return AgentContext(
             question=combined,
             roomid=roomid,
-            scope="hk",
+            scope=(settings.rag_scope or "hk").strip().lower() or "hk",
             history=history,
             group_meta=group_meta,
         )
 
     def _generate_ai_answer(self, combined: str, *, roomid: str = "") -> tuple[str, object | None]:
         from config.settings import settings
-        from src.agent.models import AgentAction
-        from src.agent.orchestrator import TaskOrchestrator
+        from src.agent.models import AgentAction, ABSTAIN_MESSAGE
 
         if not settings.rag_enabled:
             if settings.agent_silent_on_no_answer:
-                return "", None
+                # 生产仍禁止裸静默：给客户可见兜底
+                return (
+                    (settings.agent_abstain_message or "").strip() or ABSTAIN_MESSAGE,
+                    None,
+                )
             return self.llm.answer_material_question(combined), None
 
         try:
-            orchestrator = TaskOrchestrator()
+            orchestrator = self._get_orchestrator()
             ctx = self._build_agent_context(combined, roomid)
             result = orchestrator.run_qa(ctx)
             self._save_agent_run(roomid, combined, result)
@@ -385,8 +547,8 @@ class GroupStateMachine:
                     pass
             return result.answer, result
         except Exception as e:
-            logger.warning("QA Agent 失败，静默跳过: %s", e)
-            return "", None
+            logger.warning("QA Agent 失败，将使用兜底文案: %s", e)
+            raise
 
     def handle_kf_first_contact(
         self,
@@ -394,7 +556,7 @@ class GroupStateMachine:
         *,
         open_kfid: str = "",
     ) -> None:
-        """微信客服首次私聊：欢迎语 + 可选资料清单"""
+        """微信客服首次私聊：欢迎语 + 可选资料清单（可合并为 1 条省额度）"""
         kfid = open_kfid or settings.wework_kf_default_open_kfid
         roomid = build_kf_roomid(kfid, external_userid)
         existing = self.store.get_group(roomid)
@@ -414,7 +576,27 @@ class GroupStateMachine:
             welcome = build_welcome_message(
                 settings.wework_welcome_advisor_phone, channel="kf",
             )
-            self.external.send_kf_text(external_userid, welcome, open_kfid=kfid)
+            merge = bool(getattr(settings, "wework_kf_merge_welcome_checklist", True))
+            if merge and settings.wework_welcome_auto_checklist:
+                paste_hint = (
+                    "发送 /填表 获取填写模板并粘贴提交；证件请直接上传图片。"
+                    if not settings.collect_form_enabled
+                    else f"也可在线填表：{self._form_url(roomid)}"
+                )
+                welcome = (
+                    f"{welcome}\n\n"
+                    "【注册资料】请准备：拟用公司中英文名、香港注册地址、联络邮箱电话、"
+                    "股东/董事/秘书资料、业务描述、身份证明等。"
+                    f"{paste_hint}"
+                    "随时可发 /进度 查询缺项。"
+                )
+                self._safe_send(
+                    roomid, welcome, to_external_userid=external_userid
+                )
+            else:
+                self._safe_send(
+                    roomid, welcome, to_external_userid=external_userid
+                )
         except Exception as e:
             logger.exception("kf 客户 %s 欢迎语发送失败: %s", external_userid, e)
             return
@@ -425,7 +607,8 @@ class GroupStateMachine:
         )
         logger.info("kf 客户 [%s] %s 欢迎语已发送 → WELCOMED", kfid, external_userid)
 
-        if settings.wework_welcome_auto_checklist:
+        merge = bool(getattr(settings, "wework_kf_merge_welcome_checklist", True))
+        if settings.wework_welcome_auto_checklist and not merge:
             try:
                 self._send_checklist(roomid, to_external_userid=external_userid)
                 logger.info("kf 客户 %s 已自动发送注册资料清单", external_userid)
@@ -475,8 +658,43 @@ class GroupStateMachine:
         wm_target = self._resolve_external_userid(roomid, from_id)
 
         if status == GROUP_STATUS_HUMAN:
+            # 转人工后仍给客户可读确认，避免无声
+            if roomid not in self._human_acked:
+                self._human_acked.add(roomid)
+                self._safe_send(
+                    roomid,
+                    "您的会话已转接人工专员，老师会尽快回复；请稍候。"
+                    "紧急可拨打欢迎语中的服务电话。",
+                    to_external_userid=wm_target,
+                    customer_fallback=False,
+                )
             self.store.mark_message_processed(msgid)
             return
+
+        if status == GROUP_STATUS_FAILED:
+            # 允许继续 QA / 重新办理；首条闲聊给一句状态提示后走分流
+            cmd_like = text in (
+                "重新办理",
+                "/重新办理",
+                "重新注册",
+                "转人工",
+                "/转人工",
+                "/human",
+                "确认",
+                "确认无误",
+                "/确认",
+                "开始注册",
+                "/开始注册",
+            )
+            if not cmd_like and roomid not in self._failed_hinted:
+                self._failed_hinted.add(roomid)
+                self._safe_send(
+                    roomid,
+                    "当前自动办理未完成。您可继续咨询业务问题；"
+                    "若需再次排队请回复「重新办理」；也可回复「转人工」。",
+                    to_external_userid=wm_target,
+                    customer_fallback=False,
+                )
 
         if text in ("/资料", "/docs"):
             self._send_checklist(roomid, to_external_userid=wm_target)
@@ -597,7 +815,8 @@ class GroupStateMachine:
                 batch.from_id = from_id
             if batch.timer:
                 batch.timer.cancel()
-            batch.timer = threading.Timer(DEBOUNCE_SECONDS, self._flush_batch, args=(roomid,))
+            delay = _qa_debounce_seconds(text)
+            batch.timer = threading.Timer(delay, self._flush_batch, args=(roomid,))
             batch.timer.daemon = True
             batch.timer.start()
 
@@ -671,12 +890,32 @@ class GroupStateMachine:
 
     def _flush_batch(self, roomid: str) -> None:
         with self._lock:
+            if roomid in self._qa_inflight:
+                # 已有 QA 在跑：保留 pending，稍后再 flush
+                batch_wait = self._pending.get(roomid)
+                if batch_wait and (
+                    batch_wait.timer is None or not batch_wait.timer.is_alive()
+                ):
+                    last = batch_wait.texts[-1] if batch_wait.texts else ""
+                    delay = _qa_debounce_seconds(last)
+                    batch_wait.timer = threading.Timer(
+                        delay, self._flush_batch, args=(roomid,)
+                    )
+                    batch_wait.timer.daemon = True
+                    batch_wait.timer.start()
+                logger.info("会话 %s QA 进行中，延后 flush（防双答）", roomid)
+                return
             batch = self._pending.pop(roomid, None)
+            if batch and batch.texts:
+                self._qa_inflight.add(roomid)
         if not batch or not batch.texts:
             return
         combined = "\n".join(batch.texts)
         trigger_msgid = batch.msgids[-1] if batch.msgids else ""
         wm = batch.from_id if batch.from_id.startswith("wm") else None
+        from src.agent.models import AgentAction, ABSTAIN_MESSAGE
+
+        abstain = (settings.agent_abstain_message or "").strip() or ABSTAIN_MESSAGE
         try:
             if settings.wework_thinking_ack_enabled:
                 ack = (settings.wework_thinking_ack_text or "正在为您查询，请稍候…").strip()
@@ -688,25 +927,36 @@ class GroupStateMachine:
                         customer_fallback=False,
                     )
 
-            answer, qa_result = self._generate_ai_answer(combined, roomid=roomid)
-            from src.agent.models import AgentAction
+            try:
+                answer, qa_result = self._generate_ai_answer(combined, roomid=roomid)
+            except Exception as e:
+                logger.exception("会话 %s AI 生成失败: %s", roomid, e)
+                self._safe_send(
+                    roomid,
+                    QA_ERROR_FALLBACK,
+                    to_external_userid=wm,
+                    customer_fallback=False,
+                )
+                return
 
             if qa_result and qa_result.action == AgentAction.SILENT:
-                logger.info("会话 %s 问题静默跳过，待人工: %s", roomid, combined[:80])
-                return
+                logger.info(
+                    "会话 %s 原静默改为兜底可见: %s", roomid, combined[:80]
+                )
+                answer = abstain
             if qa_result and qa_result.action in (
                 AgentAction.ABSTAIN,
                 AgentAction.HUMAN,
             ):
                 answer = (answer or "").strip() or (
-                    settings.agent_abstain_message
+                    abstain
                     if qa_result.action == AgentAction.ABSTAIN
                     else "已为您转接人工服务，专属服务老师将尽快回复您。"
                 )
             if not (answer or "").strip():
-                logger.info("会话 %s 无回答，跳过发送", roomid)
-                return
-            reply = f"【AI 助手】{answer}"
+                logger.info("会话 %s 无回答，发送兜底", roomid)
+                answer = abstain
+            reply = _format_customer_answer(answer, qa_result)
             self._safe_send(roomid, reply, to_external_userid=wm)
             self.store.insert_ai_reply(
                 roomid, trigger_msgid, reply,
@@ -714,7 +964,14 @@ class GroupStateMachine:
                 run_id=qa_result.run_id if qa_result else "",
                 confidence=qa_result.confidence if qa_result else 0.0,
             )
-            self.store.set_group_status(roomid, GROUP_STATUS_QA)
+            cur = (self.store.get_group(roomid) or {}).get("status") or ""
+            if cur not in (
+                GROUP_STATUS_QUEUED,
+                GROUP_STATUS_HANDOFF,
+                GROUP_STATUS_HUMAN,
+                GROUP_STATUS_FAILED,
+            ):
+                self.store.set_group_status(roomid, GROUP_STATUS_QA)
         except Exception as e:
             logger.exception("会话 %s AI 回复失败: %s", roomid, e)
             self._safe_send(
@@ -724,6 +981,8 @@ class GroupStateMachine:
                 customer_fallback=False,
             )
         finally:
+            with self._lock:
+                self._qa_inflight.discard(roomid)
             for mid in batch.msgids:
                 self.store.mark_message_processed(mid)
 
