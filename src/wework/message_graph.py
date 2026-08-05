@@ -1,41 +1,43 @@
-"""LangGraph 消息意图分流：classify → material/progress/unclear/qa（无副作用）"""
+"""消息意图分流：classify(+veto) → ActionPlan（兼容旧 MessageRouteResult）"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypedDict
+from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
-
-from src.materials.form_parser import extract_material_fields
+from src.wework.intent_planner import (
+    STEP_ENQUEUE_QA,
+    STEP_QUEUED_TIP,
+    STEP_REPLY_PROGRESS,
+    STEP_SEND_GREETING,
+    STEP_SEND_UNCLEAR,
+    STEP_UPSERT_MATERIALS,
+    ActionPlan,
+    build_action_plan,
+)
 from src.wework.intent_router import (
     INTENT_ASK_PROGRESS,
+    INTENT_GREETING,
     INTENT_QA,
     INTENT_SUBMIT_MATERIAL,
     INTENT_UNCLEAR_MATERIAL,
+    REPLY_FULL_PROGRESS,
+    VALID_REPLY_MODES,
     classify_intent,
+    resolve_reply_mode,
 )
 
 logger = logging.getLogger(__name__)
 
-ReplyKind = Literal["progress", "material_update", "unclear_hint", "qa"]
+ReplyKind = Literal["progress", "material_update", "unclear_hint", "qa", "greeting"]
 RouteAction = Literal[
     "ask_progress",
     "submit_material",
     "unclear_material",
     "qa",
+    "greeting",
 ]
-
-
-class MessageGraphState(TypedDict, total=False):
-    text: str
-    status: str
-    intent: str
-    fields: dict[str, str]
-    source: str
-    action: str
-    reply_kind: str
 
 
 @dataclass
@@ -44,179 +46,110 @@ class MessageRouteResult:
     fields: dict[str, str] = field(default_factory=dict)
     source: str = "rule"
     reply_kind: ReplyKind = "qa"
+    reply_mode: str = ""
+    is_correction: bool = False
+    plan: ActionPlan | None = None
+    confidence: float = 0.0
+    veto_applied: list[str] = field(default_factory=list)
 
 
-def _node_classify(state: MessageGraphState) -> dict[str, Any]:
-    result = classify_intent(state.get("text") or "", status=state.get("status") or "")
-    return {
-        "intent": result.intent,
-        "fields": dict(result.fields or {}),
-        "source": result.source,
-    }
+def reset_message_graph() -> None:
+    """兼容旧测试钩子（图已简化为函数编排）。"""
+    return None
 
 
-def _route_by_intent(state: MessageGraphState) -> str:
-    intent = state.get("intent") or INTENT_QA
-    if intent == INTENT_ASK_PROGRESS:
-        return "prepare_progress"
-    if intent == INTENT_SUBMIT_MATERIAL:
-        return "extract_fields"
-    if intent == INTENT_UNCLEAR_MATERIAL:
-        return "prepare_unclear"
-    return "prepare_qa"
+def _primary_from_plan(plan: ActionPlan, text: str, status: str, has_materials: bool) -> MessageRouteResult:
+    signal = plan.signal
+    source = (signal.source if signal else "rule") or "rule"
+    confidence = float(signal.confidence if signal else 0.0)
+    veto = list(signal.veto_applied if signal else [])
+    fields = dict(signal.fields if signal else {})
+    is_corr = bool(signal.is_correction if signal else False)
 
-
-def _node_extract_fields(state: MessageGraphState) -> dict[str, Any]:
-    fields = dict(state.get("fields") or {})
-    if not fields:
-        fields = extract_material_fields(state.get("text") or "")
-    # 抽不出字段时降为 unclear，避免空 submit
-    if not fields:
-        return {
-            "fields": {},
-            "intent": INTENT_UNCLEAR_MATERIAL,
-            "action": INTENT_UNCLEAR_MATERIAL,
-            "reply_kind": "unclear_hint",
-        }
-    return {"fields": fields}
-
-
-def _node_prepare_progress(state: MessageGraphState) -> dict[str, Any]:
-    return {
-        "action": INTENT_ASK_PROGRESS,
-        "reply_kind": "progress",
-    }
-
-
-def _node_prepare_material(state: MessageGraphState) -> dict[str, Any]:
-    # extract 已可能改写为 unclear
-    if (state.get("action") == INTENT_UNCLEAR_MATERIAL) or (
-        state.get("intent") == INTENT_UNCLEAR_MATERIAL and not (state.get("fields") or {})
-    ):
-        return {
-            "action": INTENT_UNCLEAR_MATERIAL,
-            "reply_kind": "unclear_hint",
-        }
-    return {
-        "action": INTENT_SUBMIT_MATERIAL,
-        "reply_kind": "material_update",
-        "fields": dict(state.get("fields") or {}),
-    }
-
-
-def _node_prepare_unclear(state: MessageGraphState) -> dict[str, Any]:
-    # unclear 路径仍尝试补抽字段；有字段则升级为 material_update
-    fields = dict(state.get("fields") or {})
-    if not fields:
-        fields = extract_material_fields(state.get("text") or "")
-    if fields:
-        return {
-            "fields": fields,
-            "action": INTENT_SUBMIT_MATERIAL,
-            "reply_kind": "material_update",
-        }
-    return {
-        "fields": {},
-        "action": INTENT_UNCLEAR_MATERIAL,
-        "reply_kind": "unclear_hint",
-    }
-
-
-def _node_prepare_qa(state: MessageGraphState) -> dict[str, Any]:
-    return {
-        "action": INTENT_QA,
-        "reply_kind": "qa",
-    }
-
-
-def _after_extract(state: MessageGraphState) -> str:
-    if state.get("action") == INTENT_UNCLEAR_MATERIAL or (
-        state.get("intent") == INTENT_UNCLEAR_MATERIAL and not (state.get("fields") or {})
-    ):
-        return "prepare_unclear"
-    return "prepare_material"
-
-
-def build_message_graph():
-    g = StateGraph(MessageGraphState)
-    g.add_node("classify", _node_classify)
-    g.add_node("extract_fields", _node_extract_fields)
-    g.add_node("prepare_progress", _node_prepare_progress)
-    g.add_node("prepare_material", _node_prepare_material)
-    g.add_node("prepare_unclear", _node_prepare_unclear)
-    g.add_node("prepare_qa", _node_prepare_qa)
-
-    g.add_edge(START, "classify")
-    g.add_conditional_edges(
-        "classify",
-        _route_by_intent,
-        {
-            "prepare_progress": "prepare_progress",
-            "extract_fields": "extract_fields",
-            "prepare_unclear": "prepare_unclear",
-            "prepare_qa": "prepare_qa",
-        },
+    kinds = plan.step_kinds
+    if STEP_UPSERT_MATERIALS in kinds:
+        step = next(s for s in plan.steps if s.kind == STEP_UPSERT_MATERIALS)
+        return MessageRouteResult(
+            action=INTENT_SUBMIT_MATERIAL,
+            fields=dict(step.fields or fields),
+            source=source,
+            reply_kind="material_update",
+            is_correction=step.is_correction or is_corr,
+            plan=plan,
+            confidence=confidence,
+            veto_applied=veto,
+        )
+    if STEP_REPLY_PROGRESS in kinds:
+        step = next(s for s in plan.steps if s.kind == STEP_REPLY_PROGRESS)
+        mode = step.reply_mode or REPLY_FULL_PROGRESS
+        if mode not in VALID_REPLY_MODES:
+            mode = resolve_reply_mode(text, status, has_materials=has_materials)
+        return MessageRouteResult(
+            action=INTENT_ASK_PROGRESS,
+            source=source,
+            reply_kind="progress",
+            reply_mode=mode,
+            plan=plan,
+            confidence=confidence,
+            veto_applied=veto,
+        )
+    if STEP_SEND_UNCLEAR in kinds:
+        return MessageRouteResult(
+            action=INTENT_UNCLEAR_MATERIAL,
+            source=source,
+            reply_kind="unclear_hint",
+            plan=plan,
+            confidence=confidence,
+            veto_applied=veto,
+        )
+    if STEP_SEND_GREETING in kinds:
+        return MessageRouteResult(
+            action=INTENT_GREETING,
+            source=source,
+            reply_kind="greeting",
+            plan=plan,
+            confidence=confidence,
+            veto_applied=veto,
+        )
+    if STEP_ENQUEUE_QA in kinds or STEP_QUEUED_TIP in kinds:
+        return MessageRouteResult(
+            action=INTENT_QA,
+            source=source,
+            reply_kind="qa",
+            plan=plan,
+            confidence=confidence,
+            veto_applied=veto,
+        )
+    return MessageRouteResult(
+        action=INTENT_QA,
+        source=source,
+        reply_kind="qa",
+        plan=plan,
+        confidence=confidence,
+        veto_applied=veto,
     )
-    g.add_conditional_edges(
-        "extract_fields",
-        _after_extract,
-        {
-            "prepare_material": "prepare_material",
-            "prepare_unclear": "prepare_unclear",
-        },
+
+
+def route_incoming_text(
+    text: str,
+    status: str = "",
+    *,
+    has_materials: bool = False,
+) -> MessageRouteResult:
+    """分类 + 规划，返回供状态机执行的结果（含 ActionPlan）。"""
+    signal = classify_intent(
+        text, status=status, has_materials=has_materials,
     )
-    g.add_edge("prepare_progress", END)
-    g.add_edge("prepare_material", END)
-    g.add_edge("prepare_unclear", END)
-    g.add_edge("prepare_qa", END)
-    return g.compile()
-
-
-_compiled_graph = None
-
-
-def get_message_graph():
-    global _compiled_graph
-    if _compiled_graph is None:
-        _compiled_graph = build_message_graph()
-    return _compiled_graph
-
-
-def route_incoming_text(text: str, status: str = "") -> MessageRouteResult:
-    """运行意图分流图，返回供状态机执行的动作（无 IO）。"""
-    graph = get_message_graph()
-    out = graph.invoke(
-        {
-            "text": (text or "").strip(),
-            "status": status or "",
-            "fields": {},
-            "intent": "",
-            "source": "rule",
-            "action": "",
-            "reply_kind": "",
-        }
+    plan = build_action_plan(
+        signal, text, status, has_materials=has_materials,
     )
-    action = str(out.get("action") or INTENT_QA)
-    if action not in (
-        INTENT_ASK_PROGRESS,
-        INTENT_SUBMIT_MATERIAL,
-        INTENT_UNCLEAR_MATERIAL,
-        INTENT_QA,
-    ):
-        action = INTENT_QA
-    reply_kind = str(out.get("reply_kind") or "qa")
-    if reply_kind not in ("progress", "material_update", "unclear_hint", "qa"):
-        reply_kind = "qa"
-    result = MessageRouteResult(
-        action=action,  # type: ignore[arg-type]
-        fields=dict(out.get("fields") or {}),
-        source=str(out.get("source") or "rule"),
-        reply_kind=reply_kind,  # type: ignore[arg-type]
-    )
+    result = _primary_from_plan(plan, text, status, has_materials)
     logger.debug(
-        "message_graph action=%s source=%s fields=%s",
+        "message_route action=%s reply_mode=%s steps=%s source=%s veto=%s",
         result.action,
+        result.reply_mode,
+        plan.step_kinds,
         result.source,
-        list(result.fields.keys()),
+        result.veto_applied,
     )
     return result

@@ -163,6 +163,9 @@ class UnifiedWebServer:
                         "send_failures": 0,
                         "kf_sends": 0,
                     }
+                agent_mode = (
+                    getattr(settings, "wework_agent_mode", "normal") or "normal"
+                ).strip().lower()
                 data = {
                     "ok": True,
                     "service": "finance-ai-wework",
@@ -178,9 +181,14 @@ class UnifiedWebServer:
                     "wework_kf_mode": settings.wework_kf_mode_resolved,
                     "thinking_ack": bool(settings.wework_thinking_ack_enabled),
                     "agent_silent_on_no_answer": bool(settings.agent_silent_on_no_answer),
+                    "agent_mode": agent_mode,
                     "kf_send_quota_48h": int(settings.wework_kf_send_quota_48h or 0),
                     "conversation": convo,
                 }
+                if agent_mode == "disabled":
+                    warnings_pre = ["agent_mode=disabled (kill-switch)"]
+                else:
+                    warnings_pre = []
                 if icris_worker is not None and hasattr(icris_worker, "status_payload"):
                     data["icris_worker"] = icris_worker.status_payload()
                 else:
@@ -191,7 +199,7 @@ class UnifiedWebServer:
                         "pending_count": stats.get("pending_count", 0),
                         "running_job_id": stats.get("running_job_id"),
                     }
-                warnings: list[str] = []
+                warnings: list[str] = list(warnings_pre)
                 # crypt 未配置时进程可存活，但回调不可用
                 if crypt is None and settings.wework_channel_resolved in ("kf", "both"):
                     data["ok"] = False
@@ -204,6 +212,8 @@ class UnifiedWebServer:
                 backlog = int((convo or {}).get("inbox_unprocessed") or 0)
                 if backlog >= 50:
                     warnings.append(f"inbox backlog high ({backlog})")
+                if agent_mode == "shadow":
+                    warnings.append("agent_mode=shadow (audit only)")
                 if warnings:
                     data["warning"] = "; ".join(warnings)
                 self._send_json(data, 200 if data["ok"] else 503)

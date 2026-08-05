@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     wework_external_group_webhook_url: str = ""
     # 资料意图分流：规则不确定时是否单次 LLM 分类（失败回退 qa）
     wework_intent_llm_fallback: bool = True
+    # 意图小模型（空则回退 openai_model）；仅歧义分类，不生成对客正文
+    wework_intent_model: str = Field(default="", validation_alias="WEWORK_INTENT_MODEL")
+    wework_intent_timeout_seconds: float = Field(
+        default=8.0, validation_alias="WEWORK_INTENT_TIMEOUT_SECONDS"
+    )
+    wework_intent_min_confidence: float = Field(
+        default=0.55, validation_alias="WEWORK_INTENT_MIN_CONFIDENCE"
+    )
+    # normal=对客 | shadow=审计不发送 AI | disabled=静态话术熔断
+    wework_agent_mode: str = Field(default="normal", validation_alias="WEWORK_AGENT_MODE")
     # 上传证件图片时是否多模态识别类型（HKID/PRC_ID/PASSPORT）与号码
     wework_id_vision_enabled: bool = True
     # QA 生成前先发「思考中」提示（占客服额度 1 条；默认关闭）

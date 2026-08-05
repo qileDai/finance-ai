@@ -208,11 +208,36 @@ class ExternalGroupStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_send_fail_log_time
                     ON send_fail_log(created_at);
+
+                CREATE TABLE IF NOT EXISTS intent_routes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    roomid TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    channel TEXT NOT NULL DEFAULT '',
+                    text_hash TEXT NOT NULL DEFAULT '',
+                    rule_intent TEXT NOT NULL DEFAULT '',
+                    rule_mode TEXT NOT NULL DEFAULT '',
+                    model_intent TEXT NOT NULL DEFAULT '',
+                    model_mode TEXT NOT NULL DEFAULT '',
+                    model_confidence REAL NOT NULL DEFAULT 0,
+                    veto_applied TEXT NOT NULL DEFAULT '',
+                    plan_steps_json TEXT NOT NULL DEFAULT '[]',
+                    final_intent TEXT NOT NULL DEFAULT '',
+                    final_mode TEXT NOT NULL DEFAULT '',
+                    executed_ok INTEGER NOT NULL DEFAULT 1,
+                    agent_mode TEXT NOT NULL DEFAULT 'normal',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_intent_routes_created
+                    ON intent_routes(created_at);
+                CREATE INDEX IF NOT EXISTS idx_intent_routes_roomid
+                    ON intent_routes(roomid);
                 """
             )
             self._migrate_columns(conn)
             self._migrate_kf_cursor(conn)
             self._migrate_registration_jobs(conn)
+            self._migrate_intent_routes(conn)
 
     def _migrate_registration_jobs(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(registration_jobs)")}
@@ -223,6 +248,37 @@ class ExternalGroupStore:
                 "ALTER TABLE registration_jobs ADD COLUMN screenshot_path TEXT NOT NULL DEFAULT ''"
             )
 
+    def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(intent_routes)")}
+        if cols:
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intent_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                roomid TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                channel TEXT NOT NULL DEFAULT '',
+                text_hash TEXT NOT NULL DEFAULT '',
+                rule_intent TEXT NOT NULL DEFAULT '',
+                rule_mode TEXT NOT NULL DEFAULT '',
+                model_intent TEXT NOT NULL DEFAULT '',
+                model_mode TEXT NOT NULL DEFAULT '',
+                model_confidence REAL NOT NULL DEFAULT 0,
+                veto_applied TEXT NOT NULL DEFAULT '',
+                plan_steps_json TEXT NOT NULL DEFAULT '[]',
+                final_intent TEXT NOT NULL DEFAULT '',
+                final_mode TEXT NOT NULL DEFAULT '',
+                executed_ok INTEGER NOT NULL DEFAULT 1,
+                agent_mode TEXT NOT NULL DEFAULT 'normal',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intent_routes_created ON intent_routes(created_at)"
+        )
+
     def _migrate_columns(self, conn: sqlite3.Connection) -> None:
         """增量添加 Phase 2/3 列"""
         cols = {r[1] for r in conn.execute("PRAGMA table_info(external_groups)")}
@@ -231,6 +287,7 @@ class ExternalGroupStore:
             "company_name": "TEXT NOT NULL DEFAULT ''",
             "package_dir": "TEXT NOT NULL DEFAULT ''",
             "open_kfid": "TEXT NOT NULL DEFAULT ''",
+            "human_notified_at": "TEXT NOT NULL DEFAULT ''",
         }
         for col, typedef in migrations.items():
             if col not in cols:
@@ -298,6 +355,7 @@ class ExternalGroupStore:
         company_name: str | None = None,
         package_dir: str | None = None,
         open_kfid: str | None = None,
+        human_notified_at: str | None = None,
     ) -> None:
         now = _utc_now()
         with self._conn() as conn:
@@ -332,6 +390,9 @@ class ExternalGroupStore:
                 if open_kfid is not None:
                     updates.append("open_kfid = ?")
                     params.append(open_kfid)
+                if human_notified_at is not None:
+                    updates.append("human_notified_at = ?")
+                    params.append(human_notified_at)
                 params.append(roomid)
                 conn.execute(
                     f"UPDATE external_groups SET {', '.join(updates)} WHERE roomid = ?",
@@ -372,6 +433,16 @@ class ExternalGroupStore:
 
     def set_group_status(self, roomid: str, status: str) -> None:
         self.upsert_group(roomid, status=status)
+
+    def mark_human_notified(self, roomid: str, *, at: str | None = None) -> None:
+        """转人工提示已发送（持久化，防重启重复刷屏）。"""
+        self.upsert_group(
+            roomid,
+            human_notified_at=at or _utc_now(),
+        )
+
+    def clear_human_notified(self, roomid: str) -> None:
+        self.upsert_group(roomid, human_notified_at="")
 
     def insert_message_if_new(
         self,
@@ -548,17 +619,112 @@ class ExternalGroupStore:
         abstain_n = int(actions.get("abstain", 0))
         durations = [int(r["duration_ms"]) for r in dur_rows if r["duration_ms"]]
         latency = _percentile_stats(durations)
+        human_n = int(actions.get("human", 0))
+        route_stats = self.intent_route_stats(hours=hours)
         return {
             "hours": hours,
             "agent_runs_total": total,
             "actions": actions,
             "silent_rate": round(silent_n / total, 4) if total else 0.0,
             "abstain_rate": round(abstain_n / total, 4) if total else 0.0,
+            "human_transfer_rate": round(human_n / total, 4) if total else 0.0,
             "inbox_unprocessed": int(backlog["n"]) if backlog else 0,
             "send_failures": int(fail_row["n"]) if fail_row else 0,
             "kf_sends": int(send_row["n"]) if send_row else 0,
             "qa_latency_ms": latency,
+            "intent_routes": route_stats,
         }
+
+    def insert_intent_route(
+        self,
+        *,
+        roomid: str,
+        status: str = "",
+        channel: str = "",
+        text_hash: str = "",
+        rule_intent: str = "",
+        rule_mode: str = "",
+        model_intent: str = "",
+        model_mode: str = "",
+        model_confidence: float = 0.0,
+        veto_applied: str = "",
+        plan_steps_json: str = "[]",
+        final_intent: str = "",
+        final_mode: str = "",
+        executed_ok: bool = True,
+        agent_mode: str = "normal",
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO intent_routes (
+                    roomid, status, channel, text_hash,
+                    rule_intent, rule_mode, model_intent, model_mode, model_confidence,
+                    veto_applied, plan_steps_json, final_intent, final_mode,
+                    executed_ok, agent_mode, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    roomid or "",
+                    status or "",
+                    channel or "",
+                    text_hash or "",
+                    rule_intent or "",
+                    rule_mode or "",
+                    model_intent or "",
+                    model_mode or "",
+                    float(model_confidence or 0),
+                    veto_applied or "",
+                    plan_steps_json or "[]",
+                    final_intent or "",
+                    final_mode or "",
+                    1 if executed_ok else 0,
+                    agent_mode or "normal",
+                    now,
+                ),
+            )
+
+    def intent_route_stats(self, *, hours: float = 24.0) -> dict[str, Any]:
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=max(1.0, float(hours)))
+        ).isoformat()
+        try:
+            with self._conn() as conn:
+                total_row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM intent_routes WHERE created_at >= ?",
+                    (cutoff,),
+                ).fetchone()
+                model_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM intent_routes
+                    WHERE created_at >= ? AND model_intent != ''
+                    """,
+                    (cutoff,),
+                ).fetchone()
+                veto_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM intent_routes
+                    WHERE created_at >= ? AND veto_applied != ''
+                    """,
+                    (cutoff,),
+                ).fetchone()
+            total = int(total_row["n"]) if total_row else 0
+            model_n = int(model_row["n"]) if model_row else 0
+            veto_n = int(veto_row["n"]) if veto_row else 0
+            return {
+                "intent_routes_total": total,
+                "model_invoke_rate": round(model_n / total, 4) if total else 0.0,
+                "veto_rate": round(veto_n / total, 4) if total else 0.0,
+            }
+        except Exception:
+            return {
+                "intent_routes_total": 0,
+                "model_invoke_rate": 0.0,
+                "veto_rate": 0.0,
+            }
 
     def get_recent_messages(self, roomid: str, *, limit: int = 10) -> list[str]:
         """按时间交错合并客户消息与助手回复，供 QA 上下文。"""
@@ -598,9 +764,9 @@ class ExternalGroupStore:
             text = str(row["reply_text"] or "").strip()
             if not text:
                 continue
-            # 截断过长回复，避免撑爆 prompt
-            if len(text) > 300:
-                text = text[:300] + "…"
+            # 截断过长回复，避免撑爆 prompt（保留更长以便指代/上下文）
+            if len(text) > 500:
+                text = text[:500] + "…"
             events.append((str(row["created_at"] or ""), f"助手: {text}"))
 
         events.sort(key=lambda x: x[0])

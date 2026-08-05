@@ -166,6 +166,17 @@ def extract_material_fields(text: str) -> dict[str, str]:
                 continue
             fields[key] = val
 
+    # 2b) 「邮箱改成 xx」「公司名更正为 yy」
+    for m in re.finditer(
+        r"([^\s,:：,，。；;]{2,12})\s*(?:改成|改为|换成|修改为|修改成|更正为|更正成|更正)\s*"
+        r"([^\n,，；;]+)",
+        text,
+    ):
+        key = _label_to_field_key(m.group(1))
+        val = m.group(2).strip().rstrip("。.!！")
+        if key and val and len(val) <= 200:
+            fields[key] = val
+
     # 3) 「董事张三」「股东是李四」
     _role_stop = {
         "资料", "姓名", "信息", "相关", "文件", "证明", "身份证", "护照",

@@ -17,14 +17,23 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """封装 OpenAI 兼容 API，用于智能对话与表单字段推断"""
 
-    def __init__(self) -> None:
-        timeout = float(getattr(settings, "openai_timeout_seconds", 20.0) or 20.0)
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        timeout = float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else (getattr(settings, "openai_timeout_seconds", 20.0) or 20.0)
+        )
         self.client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_api_base,
             timeout=timeout,
         )
-        self.model = settings.openai_model
+        self.model = (model or "").strip() or settings.openai_model
 
     def chat(self, system: str, user: str, temperature: float = 0.3) -> str:
         response = self.client.chat.completions.create(
@@ -64,11 +73,13 @@ class LLMClient:
     ) -> str:
         system = (
             "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"
-            "用简洁专业的中文回答客户问题。"
-            "请优先依据「检索片段」作答，片段未提及的内容不要编造。"
+            "用简洁专业的中文回答客户问题。\n"
+            "事实优先级（必须遵守）：\n"
+            "1) 「会话材料/状态」中的事实（已收集、证件类型/号码、办理状态）——据实回答，"
+            "摘要没有则明确说尚未收到/未识别，禁止编造「您已提交某资料」。\n"
+            "2) 「检索片段」中的行业/流程知识（时效、注意事项等）——片段未提及不要编造。\n"
+            "3) 「近期对话」用于理解指代（刚才、那个、我的）。\n"
             "若片段中有编号列表或注意事项，请完整保留要点。"
-            "可结合「近期对话」与「已收集材料」理解指代（如刚才的身份证、我的号码）。"
-            "材料摘要中已有的证件类型/号码，可直接据实告知客户；摘要没有则勿编造。"
         )
         if re.search(r"注意|要注意|注意事项", question):
             system += (
@@ -89,10 +100,14 @@ class LLMClient:
         if group_meta:
             mat = (group_meta.get("materials_summary") or "").strip()
             if mat:
-                parts.append(f"已收集材料: {mat}")
+                parts.append(f"会话材料/状态:\n{mat}")
+            job = (group_meta.get("job_status") or "").strip()
+            if job:
+                parts.append(f"办理快照: {job}")
             meta = ", ".join(
-                f"{k}={v}" for k, v in group_meta.items()
-                if v and k != "materials_summary"
+                f"{k}={v}"
+                for k, v in group_meta.items()
+                if v and k not in ("materials_summary", "job_status")
             )
             if meta:
                 parts.append(f"会话信息: {meta}")

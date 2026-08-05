@@ -500,23 +500,63 @@ class WeWorkExternalClient:
         return self._send_via_mass(chat_id, content, sender)
 
     def send_text_to_user(self, userid: str, content: str) -> dict[str, Any]:
-        """通知企业成员（如转人工时通知群主）"""
+        """通知企业成员（如转人工时通知群主）。
+
+        使用自建应用 corpsecret + agentid，不能用微信客服 Secret。
+        """
         if self._mock_mode:
             logger.info("[Mock 企微] 通知成员 %s: %s", userid, content[:200])
             return {"errcode": 0, "errmsg": "ok (mock)"}
 
-        token = self._get_access_token()
+        uid = (userid or "").strip()
+        if not uid:
+            logger.warning("send_text_to_user 跳过：userid 为空")
+            return {"errcode": -1, "errmsg": "userid empty"}
+
+        if not (
+            (self.corp_id or "").strip()
+            and (self.corp_secret or "").strip()
+            and str(self.agent_id or "").strip()
+        ):
+            logger.warning(
+                "send_text_to_user 跳过：缺少 WEWORK_CORP_ID / WEWORK_CORP_SECRET / WEWORK_AGENT_ID"
+                "（须为自建应用 Secret，不能用 WEWORK_KF_SECRET）"
+            )
+            return {
+                "errcode": -1,
+                "errmsg": "app credentials not configured",
+            }
+
+        try:
+            agentid = int(self.agent_id)
+        except (TypeError, ValueError):
+            logger.warning("send_text_to_user 跳过：WEWORK_AGENT_ID 无效: %s", self.agent_id)
+            return {"errcode": -1, "errmsg": "invalid agentid"}
+
+        try:
+            token = self._get_access_token()
+        except Exception as exc:
+            logger.warning("send_text_to_user 获取应用 access_token 失败: %s", exc)
+            return {"errcode": 40001, "errmsg": str(exc)}
+
         url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
         payload = {
-            "touser": userid,
+            "touser": uid,
             "msgtype": "text",
-            "agentid": int(self.agent_id),
+            "agentid": agentid,
             "text": {"content": content},
             "safe": 0,
         }
-        resp = httpx.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = httpx.post(url, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if int(data.get("errcode") or 0) != 0:
+                logger.warning("send_text_to_user 发送失败 userid=%s: %s", uid, data)
+            return data
+        except Exception as exc:
+            logger.warning("send_text_to_user 请求异常 userid=%s: %s", uid, exc)
+            return {"errcode": -1, "errmsg": str(exc)}
 
     def send_material_checklist(
         self,
