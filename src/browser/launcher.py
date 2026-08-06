@@ -73,6 +73,9 @@ def _try_launch_cdp_chrome() -> bool:
                 f"--user-data-dir={profile}",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                f"--user-agent={USER_AGENT}",
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,
@@ -110,7 +113,7 @@ async def launch_browser(
             return browser
         except Exception as e:
             logger.warning(
-                "无法连接 CDP %s (%s)，回退到启动新浏览器",
+                "无法连接 CDP %s (%s)，尝试自动启动 Chrome CDP",
                 settings.chrome_cdp_url,
                 e,
             )
@@ -122,7 +125,17 @@ async def launch_browser(
                     logger.info("已自动启动并连接 Chrome CDP: %s", settings.chrome_cdp_url)
                     return browser
                 except Exception as e2:
-                    logger.warning("自动 CDP 连接仍失败: %s", e2)
+                    logger.warning("自动 CDP 连接仍失败: %s，回退到 Playwright 启动", e2)
+
+    # 非 CDP 模式：尝试自动启动 Chrome CDP（ICRIS 门户会检测 TLS 指纹）
+    if not force_isolated and not use_existing:
+        if _try_launch_cdp_chrome():
+            try:
+                browser = await playwright.chromium.connect_over_cdp(settings.chrome_cdp_url)
+                logger.info("自动启动 Chrome CDP 成功（绕过 TLS 指纹检测）: %s", settings.chrome_cdp_url)
+                return browser
+            except Exception as e:
+                logger.debug("自动 CDP 启动后连接失败: %s，回退到 Playwright 启动", e)
 
     if force_isolated:
         logger.info("强制独立浏览器（忽略 CHROME_USE_EXISTING）")
@@ -151,6 +164,7 @@ async def launch_browser(
                 "--disable-dev-shm-usage",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--disable-infobars",
             ],
         }
         if settings.browser_no_proxy:
@@ -180,19 +194,34 @@ async def create_browser_context(browser: Any) -> Any:
         logger.info("复用已有 Chrome 上下文 (CDP)")
         try:
             await setup_stealth_context(context)
+            logger.info("CDP 上下文已注入 stealth 脚本")
         except Exception as e:
             logger.debug("CDP 上下文 stealth 注入跳过: %s", e)
         return context
 
-    context = await browser.new_context(
-        viewport={"width": 1280, "height": 900},
-        locale="zh-CN",
-        user_agent=USER_AGENT,
-        extra_http_headers={
-            "Accept-Language": "zh-CN,zh;q=0.9,zh-HK;q=0.8,en;q=0.7",
-        },
-    )
-    await setup_stealth_context(context)
+    # 检测是否为自动启动的 CDP 浏览器
+    if browser.contexts:
+        context = browser.contexts[0]
+        logger.info("复用 CDP 浏览器上下文")
+        try:
+            await setup_stealth_context(context)
+            logger.info("CDP 上下文已注入 stealth 脚本")
+        except Exception as e:
+            logger.debug("CDP 上下文 stealth 注入跳过: %s", e)
+    else:
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            locale="zh-CN",
+            user_agent=USER_AGENT,
+            extra_http_headers={
+                "Accept-Language": "zh-CN,zh;q=0.9,zh-HK;q=0.8,en;q=0.7",
+                "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="99", "Google Chrome";v="131"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            },
+        )
+        await setup_stealth_context(context)
+
     try:
         await context.add_cookies(
             [

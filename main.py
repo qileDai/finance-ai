@@ -79,6 +79,12 @@ def check_captcha_deps(step: str | None) -> None:
 
     from config.settings import settings
 
+    if step in ("register", "login") and settings.browser_headless:
+        print(
+            "[警告] BROWSER_HEADLESS=true：看不到浏览器窗口。"
+            "本机调试请设 BROWSER_HEADLESS=false（Docker/Worker 可继续无头）"
+        )
+
     mode = (settings.captcha_mode or "auto").lower()
     if mode == "manual":
         print("[提示] 验证码模式: manual — 将在浏览器中手动输入")

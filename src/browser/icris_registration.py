@@ -258,6 +258,43 @@ class IcrisRegistrationBot:
         except Exception as e:
             return {"error": str(e)}
 
+    async def _dump_page_diagnostics(self, page: "Page", label: str = "") -> None:
+        """输出完整页面诊断信息（反自动化排查用）"""
+        try:
+            diag = await page.evaluate(
+                """() => {
+                    const body = document.body;
+                    return {
+                        url: window.location.href,
+                        title: document.title,
+                        bodyLen: body ? body.innerHTML.length : 0,
+                        bodySample: body ? body.innerText.slice(0, 300) : '',
+                        hasVue: !!window.__vue_app__ || !!document.querySelector('[data-v-]'),
+                        cookies: document.cookie.slice(0, 200),
+                        scripts: Array.from(document.querySelectorAll('script[src]'))
+                            .map(s => s.src.slice(0, 80)).slice(0, 10),
+                        forms: document.querySelectorAll('form').length,
+                        inputs: document.querySelectorAll('input').length,
+                    };
+                }"""
+            )
+            logger.warning(
+                "[%s诊断] url=%s title=%s bodyLen=%d vue=%s forms=%d inputs=%d "
+                "body=%s cookies=%s scripts=%s",
+                label,
+                diag.get("url", "")[:120],
+                diag.get("title", "")[:40],
+                diag.get("bodyLen", 0),
+                diag.get("hasVue", False),
+                diag.get("forms", 0),
+                diag.get("inputs", 0),
+                diag.get("bodySample", "")[:150],
+                diag.get("cookies", "")[:100],
+                diag.get("scripts", [])[:5],
+            )
+        except Exception as e:
+            logger.debug("诊断信息获取失败: %s", e)
+
     async def _registration_terms_ready(self, page: "Page") -> bool:
         """条款页是否可交互（比 _registration_terms_visible 更宽松）"""
         if await self._registration_terms_visible(page):
@@ -293,11 +330,30 @@ class IcrisRegistrationBot:
         await page.wait_for_timeout(_PAGE_PAUSE_MS)
 
     async def _wait_portal_session(self, page: "Page", timeout_ms: int = 20000) -> bool:
-        """等待门户 home.do 就绪（替代固定轮询）"""
+        """等待门户 home.do 就绪（替代固定轮询）
+
+        检测被重定向到 cr.gov.hk 公开站的情况，并输出诊断信息。
+        """
+        # 先检查是否被反自动化重定向到公开站
+        if self._is_cr_public_site(page.url):
+            logger.error(
+                "门户被重定向到公开站（反自动化检测）: %s — "
+                "ICRIS 检测到 Playwright TLS/HTTP 指纹，"
+                "请尝试: 1) 使用 CDP 连接真实 Chrome; 2) 增强 stealth 伪装",
+                page.url,
+            )
+            return False
+
         try:
             await page.wait_for_url("**/e-services.cr.gov.hk/**/home.do**", timeout=timeout_ms)
         except Exception:
             pass
+
+        # 再次检查重定向
+        if self._is_cr_public_site(page.url):
+            logger.error("门户在 wait_for_url 后被重定向到公开站: %s", page.url)
+            return False
+
         try:
             await page.wait_for_function(
                 """() => {
@@ -311,6 +367,9 @@ class IcrisRegistrationBot:
             )
             return True
         except Exception:
+            if self._is_cr_public_site(page.url):
+                logger.error("门户 wait_for_function 后被重定向到公开站: %s", page.url)
+                return False
             return "e-services.cr.gov.hk" in page.url and not self._is_cr_public_site(page.url)
 
     async def _wait_systemclock_in_url(self, page: "Page", timeout_ms: int = 15000) -> str | None:
@@ -345,6 +404,13 @@ class IcrisRegistrationBot:
         for attempt in range(1, 3):
             logger.info("打开注册页 (尝试 %d/2): %s", attempt, reg_url[:100])
             await page.goto(reg_url, wait_until="commit", timeout=45000)
+
+            # 检查是否被重定向到公开站
+            if self._is_cr_public_site(page.url):
+                logger.error("注册页被重定向到公开站（反自动化检测）: %s", page.url)
+                await self._dump_page_diagnostics(page, "注册页重定向")
+                return None
+
             vue_ok = await self._wait_registration_vue(page, timeout=45000)
             if not vue_ok:
                 probe = await self._registration_page_probe(page)
@@ -353,6 +419,8 @@ class IcrisRegistrationBot:
                     attempt,
                     {k: probe.get(k) for k in ("spinning", "checkCode", "checkbox", "bodySample")},
                 )
+                # 输出完整诊断信息
+                await self._dump_page_diagnostics(page, f"Vue未挂载-{attempt}")
                 if self._is_registration_page(page.url) and await self._registration_terms_ready(page):
                     logger.info("URL 已在 registration，按条款页就绪继续")
                     await self._log_page(page, "注册页加载")
@@ -814,6 +882,8 @@ class IcrisRegistrationBot:
     async def _navigate_to_registration(self, page: "Page") -> "Page | None":
         """
         进入注册页流程，成功返回当前 Page（可能是新标签页），失败返回 None。
+
+        增强了对反自动化重定向的检测和诊断。
         """
         logger.info("进入电子服务门户: %s", PORTAL_URL)
         for attempt in range(1, 3):
@@ -832,8 +902,30 @@ class IcrisRegistrationBot:
                     return None
                 await page.wait_for_timeout(1500)
 
+        # 检测是否被反自动化重定向
+        if self._is_cr_public_site(page.url):
+            logger.error(
+                "门户被重定向到公开站（HTTP 层反自动化检测）: %s — "
+                "ICRIS 服务端检测到 Playwright TLS/HTTP 指纹。"
+                "解决方案: 1) 确保本机安装了 Chrome; "
+                "2) 程序会自动尝试 CDP 连接真实 Chrome; "
+                "3) 或手动设置 CHROME_USE_EXISTING=true 连接已开的 Chrome",
+                page.url,
+            )
+            await self._dump_page_diagnostics(page, "门户重定向")
+            return None
+
         if not await self._wait_portal_session(page, timeout_ms=20000):
+            # 再次检查是否被重定向
+            if self._is_cr_public_site(page.url):
+                logger.error(
+                    "门户加载后重定向到公开站: %s — ICRIS 反自动化检测",
+                    page.url,
+                )
+                await self._dump_page_diagnostics(page, "门户加载后重定向")
+                return None
             await self._log_page(page, "门户加载失败")
+            await self._dump_page_diagnostics(page, "门户加载失败")
             return None
 
         await self._log_page(page, "门户加载")
