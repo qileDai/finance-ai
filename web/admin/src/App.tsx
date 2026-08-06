@@ -1,0 +1,63 @@
+import { useCallback, useEffect, useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider, RequireAuth } from "./auth";
+import { Layout } from "./components/Layout";
+import { JobsPage } from "./pages/JobsPage";
+import { LoginPage } from "./pages/LoginPage";
+import { OverviewPage } from "./pages/OverviewPage";
+import { QualityPage } from "./pages/QualityPage";
+import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
+
+export default function App() {
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [toast, setToast] = useState("");
+
+  const onRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  const onToast = useCallback((msg: string) => {
+    setToast(msg);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(""), 3200);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  return (
+    <BrowserRouter basename="/admin">
+      <AuthProvider>
+        <Routes>
+          <Route path="login" element={<LoginPage />} />
+          <Route
+            element={
+              <RequireAuth>
+                <Layout onRefresh={onRefresh} toast={toast} />
+              </RequireAuth>
+            }
+          >
+            <Route index element={<OverviewPage refreshKey={refreshKey} />} />
+            <Route path="sessions" element={<SessionsPage refreshKey={refreshKey} />} />
+            <Route
+              path="sessions/:roomid"
+              element={<SessionDetailPage refreshKey={refreshKey} />}
+            />
+            <Route
+              path="jobs"
+              element={
+                <JobsPage
+                  refreshKey={refreshKey}
+                  onToast={onToast}
+                  onRefresh={onRefresh}
+                />
+              }
+            />
+            <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />
+            <Route path="groups" element={<Navigate to="/sessions" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}

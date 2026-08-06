@@ -10,3 +10,6 @@ data/materials/
 .playwright/
 .pytest_cache/
 .ai-memory.md
+web/admin/node_modules/
+web/admin/dist/
+static/admin/

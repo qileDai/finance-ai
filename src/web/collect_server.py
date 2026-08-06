@@ -1,14 +1,12 @@
-"""H5 材料收集表单 + 管理后台 + 企微回调统一 HTTP 服务"""
+"""H5 材料收集表单 + 企微回调统一 HTTP 服务（管理后台见 admin_server）"""
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -30,7 +28,6 @@ CALLBACK_PATH = "/wework/external/callback"
 # 公网企微回调别名（如 http://szyingtai.cn/webhook）
 WEBHOOK_PATH = "/webhook"
 FORM_PREFIX = "/collect/form/"
-ADMIN_PATH = "/admin/groups"
 
 
 def _is_callback_path(path: str) -> bool:
@@ -102,37 +99,6 @@ class UnifiedWebServer:
                 )
                 self._send_html(html, 404)
 
-            def _check_admin_auth(self) -> bool:
-                """Basic Auth；未配置 ADMIN_PASSWORD 时拒绝访问"""
-                pwd = (settings.admin_password or "").strip()
-                if not pwd:
-                    self.send_response(401)
-                    self.send_header("WWW-Authenticate", 'Basic realm="finance-ai-admin"')
-                    self.end_headers()
-                    self.wfile.write(
-                        "Admin disabled: set ADMIN_PASSWORD in .env".encode("utf-8")
-                    )
-                    return False
-                auth = self.headers.get("Authorization") or ""
-                if not auth.startswith("Basic "):
-                    self.send_response(401)
-                    self.send_header("WWW-Authenticate", 'Basic realm="finance-ai-admin"')
-                    self.end_headers()
-                    return False
-                try:
-                    raw = base64.b64decode(auth[6:].strip()).decode("utf-8")
-                    user, _, password = raw.partition(":")
-                except Exception:
-                    self.send_response(401)
-                    self.end_headers()
-                    return False
-                expect_user = (settings.admin_username or "admin").strip() or "admin"
-                if user != expect_user or password != pwd:
-                    self.send_response(403)
-                    self.end_headers()
-                    return False
-                return True
-
             def _handle_health(self) -> None:
                 from src.storage.file_store import materials_root
 
@@ -157,11 +123,33 @@ class UnifiedWebServer:
                         "hours": 24.0,
                         "agent_runs_total": 0,
                         "actions": {},
+                        "reply_rate": 0.0,
                         "silent_rate": 0.0,
                         "abstain_rate": 0.0,
+                        "human_transfer_rate": 0.0,
+                        "avg_confidence": 0.0,
+                        "avg_answer_score": 0.0,
+                        "avg_retrieval_score": 0.0,
+                        "low_confidence_count": 0,
                         "inbox_unprocessed": store.count_unprocessed_messages(),
                         "send_failures": 0,
                         "kf_sends": 0,
+                        "qa_latency_ms": {},
+                        "intent_routes": {},
+                    }
+                try:
+                    reg_stats = store.registration_job_stats(hours=24.0)
+                except Exception:
+                    reg_stats = {
+                        "counts": {},
+                        "pending_count": 0,
+                        "running_count": 0,
+                        "running_job_id": None,
+                        "running_roomid": "",
+                        "hours": 24.0,
+                        "window_counts": {},
+                        "success_rate": 0.0,
+                        "recent_failures": [],
                     }
                 agent_mode = (
                     getattr(settings, "wework_agent_mode", "normal") or "normal"
@@ -184,6 +172,7 @@ class UnifiedWebServer:
                     "agent_mode": agent_mode,
                     "kf_send_quota_48h": int(settings.wework_kf_send_quota_48h or 0),
                     "conversation": convo,
+                    "registration": reg_stats,
                 }
                 if agent_mode == "disabled":
                     warnings_pre = ["agent_mode=disabled (kill-switch)"]
@@ -192,12 +181,11 @@ class UnifiedWebServer:
                 if icris_worker is not None and hasattr(icris_worker, "status_payload"):
                     data["icris_worker"] = icris_worker.status_payload()
                 else:
-                    stats = store.registration_job_stats()
                     data["icris_worker"] = {
                         "enabled": bool(settings.icris_worker_enabled),
                         "alive": False,
-                        "pending_count": stats.get("pending_count", 0),
-                        "running_job_id": stats.get("running_job_id"),
+                        "pending_count": reg_stats.get("pending_count", 0),
+                        "running_job_id": reg_stats.get("running_job_id"),
                     }
                 warnings: list[str] = list(warnings_pre)
                 # crypt 未配置时进程可存活，但回调不可用
@@ -229,10 +217,6 @@ class UnifiedWebServer:
                         return self._form_disabled_response()
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_get(token)
-                if path == ADMIN_PATH or path == "/admin":
-                    if not self._check_admin_auth():
-                        return
-                    return self._handle_admin()
                 self.send_response(404)
                 self.end_headers()
 
@@ -245,61 +229,8 @@ class UnifiedWebServer:
                         return self._form_disabled_response()
                     token = path[len(FORM_PREFIX) :].strip("/")
                     return self._handle_form_post(token)
-                if path.rstrip("/") == "/admin/jobs":
-                    if not self._check_admin_auth():
-                        return
-                    return self._handle_admin_job_action()
                 self.send_response(404)
                 self.end_headers()
-
-            def _handle_admin_job_action(self) -> None:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length).decode("utf-8", errors="replace")
-                params = parse_qs(body)
-                action = (params.get("action", [""])[0] or "").strip().lower()
-                try:
-                    job_id = int(params.get("job_id", ["0"])[0])
-                except ValueError:
-                    job_id = 0
-                if not job_id or action not in ("cancel", "requeue"):
-                    return self._send_html(
-                        "<h1>参数错误</h1><p>需要 action=cancel|requeue 与 job_id</p>"
-                        "<a href='/admin/groups'>返回</a>",
-                        400,
-                    )
-                if action == "cancel":
-                    job = store.cancel_registration_job(job_id)
-                    if not job:
-                        return self._send_html("<h1>任务不存在</h1>", 404)
-                    if job.get("status") != "cancelled":
-                        msg = (
-                            f"无法取消（当前状态 {job.get('status')}，仅 pending 可取消）"
-                        )
-                    else:
-                        msg = f"已取消任务 #{job_id}"
-                        rid = str(job.get("roomid") or "")
-                        if rid:
-                            store.set_group_status(rid, "FAILED")
-                else:
-                    job = store.requeue_registration_job(job_id)
-                    if not job:
-                        return self._send_html("<h1>任务不存在</h1>", 404)
-                    if job.get("status") != "pending":
-                        msg = (
-                            f"无法重跑（当前 {job.get('status')}；"
-                            "需 failed/cancelled 且同会话无活跃任务）"
-                        )
-                    else:
-                        msg = f"已重新入队任务 #{job_id}"
-                        rid = str(job.get("roomid") or "")
-                        if rid:
-                            store.set_group_status(rid, "QUEUED")
-                html = (
-                    f"<h1>{msg}</h1>"
-                    f"<p>status={job.get('status')} roomid={job.get('roomid')}</p>"
-                    "<p><a href='/admin/groups'>返回管理后台</a></p>"
-                )
-                self._send_html(html)
 
             def _handle_callback_get(self):
                 if crypt is None:
@@ -419,85 +350,6 @@ button{{padding:0.6em 1.2em;font-size:1em}}
                 html = f"<h1>提交成功</h1><pre>{progress}</pre><p>请返回微信群查看进度，可发送 /进度 查询。</p>"
                 self._send_html(html)
 
-            def _handle_admin(self):
-                query = parse_qs(urlparse(self.path).query)
-                channel = query.get("channel", ["all"])[0]
-                rows = store.list_all_materials_summary(channel=channel)
-                jobs = store.list_registration_jobs(limit=30)
-                filter_links = (
-                    f"<p>筛选: "
-                    f"<a href='?channel=all'>全部</a> | "
-                    f"<a href='?channel=group'>群(wr*)</a> | "
-                    f"<a href='?channel=kf'>客服(kf:*)</a>"
-                    f" （当前: {channel}）</p>"
-                )
-                trs = "".join(
-                    f"<tr><td>{r.get('channel', '')}</td>"
-                    f"<td>{r.get('open_kfid') or ''}</td>"
-                    f"<td>{r.get('roomid')}</td>"
-                    f"<td>{self._kf_account_label(r)}</td>"
-                    f"<td>{r.get('status')}</td><td>{r.get('material_count')}</td>"
-                    f"<td>{r.get('company_name') or ''}</td></tr>"
-                    for r in rows
-                )
-                job_trs = "".join(
-                    f"<tr><td>{j.get('id')}</td>"
-                    f"<td>{j.get('roomid')}</td>"
-                    f"<td>{j.get('status')}</td>"
-                    f"<td>{j.get('attempts')}/{j.get('max_attempts')}</td>"
-                    f"<td>{'Y' if j.get('dry_run') else 'N'}/"
-                    f"{'Y' if j.get('allow_submit') else 'N'}</td>"
-                    f"<td>{(j.get('last_error') or '')[:80]}</td>"
-                    f"<td>{(j.get('screenshot_path') or '')[:50]}</td>"
-                    f"<td>{j.get('updated_at') or ''}</td>"
-                    f"<td>{self._job_actions(j)}</td></tr>"
-                    for j in jobs
-                )
-                html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>外部群/客服管理</title>
-<style>table{{border-collapse:collapse;width:100%;font-size:14px}}
-td,th{{border:1px solid #ccc;padding:6px}}form.inline{{display:inline}}</style>
-</head><body><h1>外部客户群 / 微信客服 材料管理</h1>
-{filter_links}
-<table><tr><th>通道</th><th>open_kfid</th><th>roomid</th><th>账号/名称</th><th>状态</th><th>材料项</th><th>公司</th></tr>
-{trs or '<tr><td colspan=7>暂无数据</td></tr>'}
-</table>
-<h2>ICRIS 注册任务队列</h2>
-<table><tr><th>ID</th><th>roomid</th><th>状态</th><th>尝试</th><th>dry/submit</th>
-<th>错误</th><th>截图</th><th>更新时间</th><th>操作</th></tr>
-{job_trs or '<tr><td colspan=9>暂无任务</td></tr>'}
-</table></body></html>"""
-                self._send_html(html)
-
-            def _job_actions(self, job: dict) -> str:
-                jid = job.get("id")
-                st = str(job.get("status") or "")
-                parts: list[str] = []
-                if st == "pending":
-                    parts.append(
-                        f"<form class='inline' method='post' action='/admin/jobs'>"
-                        f"<input type='hidden' name='job_id' value='{jid}'/>"
-                        f"<input type='hidden' name='action' value='cancel'/>"
-                        f"<button type='submit'>取消</button></form>"
-                    )
-                if st in ("failed", "cancelled"):
-                    parts.append(
-                        f"<form class='inline' method='post' action='/admin/jobs'>"
-                        f"<input type='hidden' name='job_id' value='{jid}'/>"
-                        f"<input type='hidden' name='action' value='requeue'/>"
-                        f"<button type='submit'>重跑</button></form>"
-                    )
-                return " ".join(parts) or "-"
-
-            def _kf_account_label(self, row: dict) -> str:
-                name = row.get("name") or ""
-                kfid = row.get("open_kfid") or ""
-                if kfid:
-                    acc = settings.get_kf_account(str(kfid))
-                    if acc and acc.label:
-                        return f"{name} ({acc.label})"
-                return str(name)
-
         server = ThreadingHTTPServer((self.host, self.port), Handler)
         collect_mode = "H5 在线表单" if settings.collect_form_enabled else "群内粘贴（H5 已关闭）"
         logger.info(
@@ -513,6 +365,10 @@ td,th{{border:1px solid #ccc;padding:6px}}form.inline{{display:inline}}</style>
             WEBHOOK_PATH,
             self.port,
             WEBHOOK_PATH,
+        )
+        logger.info(
+            "[Web] 管理后台请另启: python main.py admin （默认端口 %s）",
+            getattr(settings, "admin_port", 8082),
         )
         if blocking:
             try:

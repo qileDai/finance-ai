@@ -13,6 +13,30 @@
 - [ ] 企微后台回调 URL：`https://你的域名/webhook`
 - [ ] 探活：`curl -sS https://你的域名/health` 返回 `"ok": true`
 
+### 1.1 管理后台怎么打开（独立进程）
+
+Agent 与管理后台**分进程**：
+
+```bash
+# 终端 1：Agent（回调端口默认 8081）
+python main.py wework-external-bot
+
+# 终端 2：管理后台（默认 ADMIN_PORT=8082）
+cd web/admin && npm install && npm run build   # 首次或前端变更后
+cd ../..
+python main.py admin
+```
+
+| 用途 | URL |
+|------|-----|
+| 管理后台 SPA | `http://127.0.0.1:8082/admin` |
+| Admin 探活 | `http://127.0.0.1:8082/health` |
+| Agent 探活 / 指标 | `http://127.0.0.1:8081/health` |
+
+登录：打开 `/admin` 进入登录页，使用 `ADMIN_USERNAME` / `ADMIN_PASSWORD`（Cookie 会话，默认 12h）。
+
+Nginx：`/admin` 反代到 **8082**，`/webhook` 仍反代 **8081**（见 `deploy/nginx-wework.conf.example`）。
+
 ## 2. 密钥与安全
 
 - [ ] `.env` 中配置 `WEWORK_KF_SECRET`、`WEWORK_KF_OPEN_KFID`（或 `WEWORK_KF_ACCOUNTS`）
@@ -88,7 +112,8 @@ CHROME_USE_EXISTING=false
 
 ### 5.3 SLO / 观测
 
-- [ ] `/health` 含：`agent_mode`、`conversation.silent_rate`、`abstain_rate`、`human_transfer_rate`、`qa_latency_ms`、`intent_routes`（total / model_invoke_rate / veto_rate）  
+- [ ] `/admin` React 后台可打开：概览 KPI、会话材料、注册任务取消/重跑、回答质量与低置信表；无数据时显示空态不报错  
+- [ ] `/health` 含：`agent_mode`、`conversation`（`reply_rate` / `silent_rate` / `abstain_rate` / `human_transfer_rate` / `avg_confidence` / `low_confidence_count` / `qa_latency_ms` / `intent_routes`）、`registration`（`success_rate` / `window_counts` / `recent_failures`）  
 - [ ] 首周抽检「路径正确率」≥ 90%（进度/清单/业务是否走对轨优先于文案）  
 - [ ] 对客静默率 ≈ 0（`AGENT_SILENT_ON_NO_ANSWER=false`）  
 

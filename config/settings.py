@@ -28,9 +28,14 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_vision_model: str = ""  # 空则回退 openai_model；证件看图识别用
 
-    # 管理后台 Basic Auth（空密码则拒绝访问 /admin）
+    # 管理后台登录（空密码则无法登录 /admin）
     admin_username: str = Field(default="admin", validation_alias="ADMIN_USERNAME")
     admin_password: str = Field(default="", validation_alias="ADMIN_PASSWORD")
+    # 独立管理后台端口（python main.py admin）；与 bot 回调端口分离
+    admin_port: int = Field(default=8082, validation_alias="ADMIN_PORT")
+    # Cookie 会话：可选独立密钥；空则由 ADMIN_PASSWORD 派生
+    admin_session_secret: str = Field(default="", validation_alias="ADMIN_SESSION_SECRET")
+    admin_session_hours: float = Field(default=12.0, validation_alias="ADMIN_SESSION_HOURS")
 
     # 企业微信
     wework_corp_id: str = ""

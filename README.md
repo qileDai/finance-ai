@@ -125,9 +125,28 @@ ICRIS 验证码为 `data:image/gif` + 输入框 `#checkCode`，需 **ddddocr** �
 python main.py wework-external-bot
 ```
 
-运维清单见 [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md)；systemd / Nginx 样例见 [`deploy/`](deploy/)。
+运维清单见 [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md)；systemd / Nginx / **Docker** 样例见 [`deploy/`](deploy/)（Docker 详见 [`deploy/DOCKER.md`](deploy/DOCKER.md)）。
 
-探活：`GET /health`（或 `/healthz`）。管理后台 `/admin` 需配置 `ADMIN_PASSWORD`。
+```bash
+# Docker：bot(:8081) + admin(:8082)，共享 ./data
+docker compose up -d --build
+```
+
+探活：`GET /health`（或 `/healthz`），含近 24h 回答质量与注册成败聚合字段。
+
+**双进程：**
+
+| 角色 | 命令 | 默认地址 |
+|------|------|----------|
+| Agent（回调 / KF / ICRIS） | `python main.py wework-external-bot` | `:8081` `/health` |
+| 管理后台 | `python main.py admin` | `:8082` `/admin` |
+
+1. 构建前端（若尚未构建）：`cd web/admin && npm install && npm run build`
+2. `.env`：`ADMIN_USERNAME`、`ADMIN_PASSWORD`（必填）、可选 `ADMIN_PORT=8082`
+3. 另开终端启动后台：`python main.py admin`
+4. 浏览器打开 `http://127.0.0.1:8082/admin` — 登录页填写 `ADMIN_USERNAME` / `ADMIN_PASSWORD`（Cookie 会话）
+
+勿将 `/admin` 裸暴露公网；细则见 [`docs/PRODUCTION_CHECKLIST.md`](docs/PRODUCTION_CHECKLIST.md) 与 [`web/admin/README.md`](web/admin/README.md)。
 
 ## 注意事项
 

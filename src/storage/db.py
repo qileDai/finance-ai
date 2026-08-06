@@ -573,7 +573,7 @@ class ExternalGroupStore:
             )
 
     def conversation_quality_stats(self, *, hours: float = 24.0) -> dict[str, Any]:
-        """近 N 小时 QA action 分布 + inbox 积压 + 发送失败。"""
+        """近 N 小时 QA action 分布 + inbox 积压 + 发送失败 + 质量分。"""
         from datetime import timedelta
 
         cutoff = (
@@ -613,21 +613,53 @@ class ExternalGroupStore:
                 """,
                 (cutoff,),
             ).fetchall()
+            score_row = conn.execute(
+                """
+                SELECT
+                    AVG(confidence) AS avg_confidence,
+                    AVG(answer_score) AS avg_answer_score,
+                    AVG(retrieval_score) AS avg_retrieval_score,
+                    SUM(CASE WHEN confidence < 0.5 OR action != 'reply' THEN 1 ELSE 0 END)
+                        AS low_confidence_count
+                FROM agent_runs
+                WHERE created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()
         actions = {str(r["action"]): int(r["n"]) for r in rows}
         total = sum(actions.values()) or 0
         silent_n = int(actions.get("silent", 0))
         abstain_n = int(actions.get("abstain", 0))
+        reply_n = int(actions.get("reply", 0))
         durations = [int(r["duration_ms"]) for r in dur_rows if r["duration_ms"]]
         latency = _percentile_stats(durations)
         human_n = int(actions.get("human", 0))
         route_stats = self.intent_route_stats(hours=hours)
+
+        def _avg(val: Any) -> float:
+            if val is None:
+                return 0.0
+            try:
+                return round(float(val), 4)
+            except (TypeError, ValueError):
+                return 0.0
+
         return {
             "hours": hours,
             "agent_runs_total": total,
             "actions": actions,
+            "reply_rate": round(reply_n / total, 4) if total else 0.0,
             "silent_rate": round(silent_n / total, 4) if total else 0.0,
             "abstain_rate": round(abstain_n / total, 4) if total else 0.0,
             "human_transfer_rate": round(human_n / total, 4) if total else 0.0,
+            "avg_confidence": _avg(score_row["avg_confidence"] if score_row else None),
+            "avg_answer_score": _avg(score_row["avg_answer_score"] if score_row else None),
+            "avg_retrieval_score": _avg(
+                score_row["avg_retrieval_score"] if score_row else None
+            ),
+            "low_confidence_count": int(
+                (score_row["low_confidence_count"] if score_row else 0) or 0
+            ),
             "inbox_unprocessed": int(backlog["n"]) if backlog else 0,
             "send_failures": int(fail_row["n"]) if fail_row else 0,
             "kf_sends": int(send_row["n"]) if send_row else 0,
@@ -1338,7 +1370,10 @@ class ExternalGroupStore:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def registration_job_stats(self) -> dict[str, Any]:
+    def registration_job_stats(self, *, hours: float | None = None) -> dict[str, Any]:
+        """注册任务统计；hours 不为空时增加近 N 小时成功率与最近失败列表。"""
+        from datetime import timedelta
+
         with self._conn() as conn:
             rows = conn.execute(
                 """
@@ -1354,14 +1389,52 @@ class ExternalGroupStore:
                 ORDER BY id DESC LIMIT 1
                 """
             ).fetchone()
+            recent_failures: list[dict[str, Any]] = []
+            window_counts: dict[str, int] = {}
+            if hours is not None and float(hours) > 0:
+                cutoff = (
+                    datetime.now(timezone.utc)
+                    - timedelta(hours=max(1.0, float(hours)))
+                ).isoformat()
+                win_rows = conn.execute(
+                    """
+                    SELECT status, COUNT(*) AS n
+                    FROM registration_jobs
+                    WHERE COALESCE(finished_at, updated_at, created_at) >= ?
+                    GROUP BY status
+                    """,
+                    (cutoff,),
+                ).fetchall()
+                window_counts = {str(r["status"]): int(r["n"]) for r in win_rows}
+                fail_rows = conn.execute(
+                    """
+                    SELECT id, roomid, last_error, screenshot_path, updated_at, finished_at
+                    FROM registration_jobs
+                    WHERE status = 'failed'
+                      AND COALESCE(finished_at, updated_at, created_at) >= ?
+                    ORDER BY COALESCE(finished_at, updated_at, created_at) DESC
+                    LIMIT 10
+                    """,
+                    (cutoff,),
+                ).fetchall()
+                recent_failures = [dict(r) for r in fail_rows]
         counts = {str(r["status"]): int(r["n"]) for r in rows}
-        return {
+        out: dict[str, Any] = {
             "counts": counts,
             "pending_count": int(counts.get("pending", 0)),
             "running_count": int(counts.get("running", 0)),
             "running_job_id": int(running["id"]) if running else None,
             "running_roomid": str(running["roomid"]) if running else "",
         }
+        if hours is not None and float(hours) > 0:
+            succ = int(window_counts.get("succeeded", 0))
+            fail = int(window_counts.get("failed", 0))
+            done = succ + fail
+            out["hours"] = float(hours)
+            out["window_counts"] = window_counts
+            out["success_rate"] = round(succ / done, 4) if done else 0.0
+            out["recent_failures"] = recent_failures
+        return out
 
     def reset_stale_running_jobs(self, *, older_than_minutes: int = 120) -> int:
         """进程重启后把卡住的 running 回收为 pending。

@@ -1,0 +1,25 @@
+# Build context exclusions
+.git
+.venv
+venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+.ai-memory.md
+.env
+.env.*
+!.env.example
+data/
+output/
+*.log
+.playwright/
+.chrome-debug-profile
+.cursor
+node_modules
+web/admin/node_modules
+web/admin/dist
+static/admin
+*.egg-info
+.pytest_cache
+msvc-runtime*

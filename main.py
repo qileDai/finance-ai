@@ -407,6 +407,29 @@ def cmd_feishu_push(_args: argparse.Namespace) -> None:
     print(f"已向群发送 ICRIS 填写模板（via {via}）")
 
 
+def cmd_admin(_args: argparse.Namespace) -> None:
+    """启动独立管理后台（React SPA + /admin/api，与 agent 分进程）。"""
+    import logging
+
+    from config.settings import settings
+    from src.web.admin_server import AdminWebServer
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    port = int(settings.admin_port or 8082)
+    print("=" * 60)
+    print("Finance AI Ops - 管理后台")
+    print("=" * 60)
+    print(f"[Admin] 端口: {port}")
+    print(f"[Admin] URL: http://127.0.0.1:{port}/admin")
+    print("[Admin] 打开 /admin 登录页（ADMIN_USERNAME / ADMIN_PASSWORD）；与 wework-external-bot 共用 SQLite")
+    print("[Admin] Agent 请另开终端: python main.py wework-external-bot")
+    print("[Admin] 按 Ctrl+C 退出\n")
+    AdminWebServer(port=port).start(blocking=True)
+
+
 def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     """启动企业微信外部群机器人（客户群回调 + 存档 + AI 回复）"""
     import logging
@@ -418,7 +441,6 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         UnifiedWebServer,
         CALLBACK_PATH,
         WEBHOOK_PATH,
-        ADMIN_PATH,
         FORM_PREFIX,
     )
     from src.wework.message_router import MessageRouter
@@ -453,7 +475,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
         print(f"[外部群] 表单公网地址: {settings.collect_form_base_url or '(使用本机 8081)'}")
     else:
         print(f"[外部群] 材料收集: 群内粘贴（/填表 发模板，H5 已关闭）")
-    print(f"[外部群] 管理后台: {ADMIN_PATH}")
+    print(f"[外部群] 管理后台: 请另启 python main.py admin （默认端口 {settings.admin_port}）")
     print(f"[外部群] 存档轮询间隔: {settings.wework_archive_poll_interval}s")
     print(f"[外部群] 默认群主: {settings.wework_default_group_owner_userid or '(未配置)'}")
 
@@ -552,7 +574,7 @@ def cmd_wework_external_bot(_args: argparse.Namespace) -> None:
     )
     print(f"\n[外部群] 开始监听… 公网回调: http://szyingtai.cn{WEBHOOK_PATH}")
     print(f"[外部群] 本机回调: http://127.0.0.1:{port}{WEBHOOK_PATH} 或 {CALLBACK_PATH}")
-    print(f"[外部群] 管理后台: http://127.0.0.1:{port}{ADMIN_PATH}")
+    print(f"[外部群] 管理后台: python main.py admin → http://127.0.0.1:{settings.admin_port}/admin")
     print("[外部群] 按 Ctrl+C 退出\n")
     try:
         web.start(blocking=True)
@@ -1021,6 +1043,12 @@ def main() -> None:
     )
     ext_bot.set_defaults(func=cmd_wework_external_bot)
 
+    admin_parser = sub.add_parser(
+        "admin",
+        help="启动独立管理后台（React SPA，默认端口 ADMIN_PORT=8082）",
+    )
+    admin_parser.set_defaults(func=cmd_admin)
+
     ext_mock = sub.add_parser(
         "wework-external-mock",
         help="Mock：注入客户群消息或模拟建群（开发联调）",
@@ -1138,6 +1166,8 @@ def main() -> None:
         cmd_feishu_push(args)
     elif args.command == "wework-external-bot":
         cmd_wework_external_bot(args)
+    elif args.command == "admin":
+        cmd_admin(args)
     elif args.command == "wework-external-mock":
         cmd_wework_external_mock(args)
     elif args.command == "wework-kf-mock":

@@ -1,9 +1,16 @@
-# 示例：HTTPS 反代企微回调到本机 8081
-# 将 szyingtai.cn 换成你的域名；证书路径按实际修改。
+# 示例：HTTPS 反代
+# - 企微回调 / health → 本机 8081（wework-external-bot 或 docker compose 服务 bot）
+# - 管理后台 /admin → 本机 8082（python main.py admin 或 compose 服务 admin）
+# Docker 部署见 deploy/DOCKER.md；将 szyingtai.cn 换成你的域名；证书路径按实际修改。
 
 upstream finance_ai_wework {
     server 127.0.0.1:8081;
     keepalive 8;
+}
+
+upstream finance_ai_admin {
+    server 127.0.0.1:8082;
+    keepalive 4;
 }
 
 server {
@@ -32,18 +39,22 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # 探活（勿暴露 admin）
+    # Agent 探活（勿把公网 /admin 裸暴露）
     location /health {
         proxy_pass http://finance_ai_wework;
         access_log off;
     }
 
-    # 管理后台建议仅内网或加 IP 白名单
+    # 管理后台（独立进程 ADMIN_PORT=8082；建议仅内网或 IP 白名单）
     # location /admin {
     #     allow 10.0.0.0/8;
     #     deny all;
-    #     proxy_pass http://finance_ai_wework;
+    #     proxy_pass http://finance_ai_admin;
+    #     proxy_http_version 1.1;
+    #     proxy_set_header Host $host;
     #     proxy_set_header Authorization $http_authorization;
+    #     proxy_set_header X-Real-IP $remote_addr;
+    #     proxy_set_header X-Forwarded-Proto $scheme;
     # }
 }
 
