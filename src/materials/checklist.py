@@ -151,7 +151,144 @@ def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "needs_review_labels": needs_review,
         "needs_review_details": needs_review_details,
         "complete": len(missing) == 0,
+        "cross_field_issues": validate_cross_fields(materials),
     }
+
+
+def _field_value(materials: dict[str, dict[str, Any]], key: str) -> str:
+    """从 materials 行 dict 中取字段值（优化 11 辅助）。"""
+    row = materials.get(key) or {}
+    return str(row.get("field_value") or "").strip()
+
+
+def validate_cross_fields(
+    materials: dict[str, dict[str, Any]]
+) -> list[dict[str, str]]:
+    """跨字段一致性校验（优化 11）。
+
+    返回问题列表，每项 {"level": "error"|"warning", "field": key, "message": "..."}。
+    error 级问题应阻止进入 REVIEW；warning 级仅提示。
+    """
+    issues: list[dict[str, str]] = []
+    id_type = _field_value(materials, "id_type").upper()
+    id_number = _field_value(materials, "id_number")
+
+    # 规则 1（error）：证件类型与号码格式一致性
+    if id_type and id_number:
+        if id_type == "HKID" and not re.match(r"^[A-Z]{1,2}\d{6}\(?[\dA]\)?$", id_number):
+            issues.append({
+                "level": "error", "field": "id_number",
+                "message": "香港身份证号码格式不符（应为 1-2 位字母+6 位数字+校验位）",
+            })
+        elif id_type == "PRC_ID" and not re.match(r"^\d{17}[\dXx]$", id_number):
+            issues.append({
+                "level": "error", "field": "id_number",
+                "message": "内地身份证号码应为 18 位",
+            })
+        elif id_type == "PASSPORT" and not re.match(r"^[A-Z0-9]{5,15}$", id_number):
+            issues.append({
+                "level": "error", "field": "id_number",
+                "message": "护照号码格式不符（应为 5-15 位字母或数字）",
+            })
+
+    # 规则 2（warning）：联系邮箱与申请人邮箱域名差异（仅个人邮箱域）
+    contact_email = _field_value(materials, "contact_email")
+    applicant_email = _field_value(materials, "applicant_email")
+    personal_domains = {
+        "gmail.com", "qq.com", "163.com", "outlook.com",
+        "hotmail.com", "foxmail.com", "sina.com",
+    }
+    if (
+        contact_email
+        and applicant_email
+        and "@" in contact_email
+        and "@" in applicant_email
+    ):
+        c_domain = contact_email.split("@", 1)[1].lower()
+        a_domain = applicant_email.split("@", 1)[1].lower()
+        if (
+            c_domain != a_domain
+            and c_domain in personal_domains
+            and a_domain in personal_domains
+        ):
+            issues.append({
+                "level": "warning", "field": "applicant_email",
+                "message": "联系邮箱与申请人邮箱域名不一致，请确认是否同一主体",
+            })
+
+    # 规则 3（warning）：电话区号与证件类型一致性
+    contact_phone = _field_value(materials, "contact_phone")
+    applicant_phone = _field_value(materials, "applicant_phone")
+    phone = contact_phone or applicant_phone
+    if id_type and phone:
+        is_hk_phone = phone.startswith("+852") or phone.startswith("852")
+        is_cn_phone = phone.startswith("+86") or bool(
+            re.match(r"^1[3-9]\d{9}$", phone.lstrip("+"))
+        )
+        if id_type == "HKID" and is_cn_phone and not is_hk_phone:
+            issues.append({
+                "level": "warning", "field": "contact_phone",
+                "message": "证件为香港身份证但电话为内地号码，请确认",
+            })
+        elif id_type == "PRC_ID" and is_hk_phone and not is_cn_phone:
+            issues.append({
+                "level": "warning", "field": "contact_phone",
+                "message": "证件为内地身份证但电话为香港号码，请确认",
+            })
+
+    # 规则 4（error）：商业登记证年限应为 1 或 3
+    br_years = _field_value(materials, "br_certificate_years")
+    if br_years and br_years not in ("1", "3"):
+        issues.append({
+            "level": "error", "field": "br_certificate_years",
+            "message": "商业登记证年限应为 1 年或 3 年",
+        })
+
+    return issues
+
+
+# === 优化 12：智能缺失材料提醒 ===
+# 必填字段优先级（数字越小越优先提醒）
+FIELD_PRIORITY: dict[str, int] = {
+    "company_name_en": 1,
+    "registered_office": 2,
+    "directors": 3,
+    "contact_email": 4,
+    "founder_members": 5,
+    "company_secretary": 6,
+    "applicant_name": 7,
+    "applicant_email": 8,
+    "applicant_phone": 9,
+    "contact_phone": 10,
+    "business_desc": 11,
+}
+CRITICAL_FIELD_KEYS = {"company_name_en", "registered_office", "directors"}
+
+
+def prioritized_missing(
+    materials: dict[str, dict[str, Any]], *, limit: int = 3
+) -> list[dict[str, str]]:
+    """按优先级返回缺失的必填字段（优化 12）。
+
+    返回列表，每项 {"key": ..., "label": ..., "critical": bool}，按优先级升序。
+    """
+    missing: list[tuple[int, str, str, bool]] = []
+    for f in MATERIAL_FIELDS:
+        if not f.required:
+            continue
+        row = materials.get(f.key) or {}
+        status = row.get("status", "missing")
+        has_value = bool(row.get("field_value") or row.get("file_path"))
+        if status in ("received", "confirmed") and has_value:
+            continue
+        priority = FIELD_PRIORITY.get(f.key, 99)
+        critical = f.key in CRITICAL_FIELD_KEYS
+        missing.append((priority, f.key, f.label, critical))
+    missing.sort(key=lambda x: (x[0], x[2]))
+    return [
+        {"key": k, "label": lbl, "critical": crit}
+        for _, k, lbl, crit in missing[:limit]
+    ]
 
 
 def format_materials_snapshot(materials: dict[str, dict[str, Any]], *, max_chars: int = 1200) -> str:
@@ -437,6 +574,20 @@ def format_progress_text(
 
     if status == "REVIEW" and p.get("complete"):
         lines.append("当前为确认阶段，可直接回复「确认」或「开始注册」。")
+
+    # 跨字段校验问题（优化 11）
+    cross_issues = p.get("cross_field_issues") or []
+    if cross_issues:
+        errors = [i for i in cross_issues if i.get("level") == "error"]
+        warnings = [i for i in cross_issues if i.get("level") == "warning"]
+        if errors:
+            lines.append("⚠️ 校验错误（需修正后才能注册）：")
+            for i in errors:
+                lines.append(f"  ✗ {i.get('message')}")
+        if warnings:
+            lines.append("提醒（请确认）：")
+            for i in warnings:
+                lines.append(f"  · {i.get('message')}")
 
     hint = _linked_channel_hint(linked_hint)
     if hint:

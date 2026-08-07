@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from config.settings import settings
 from src.feishu.icris_form_parser import extract_kv_fields
+
+logger = logging.getLogger(__name__)
 
 # 标准中文标签 → field_key
 FIELD_MAP = {
@@ -221,11 +225,100 @@ def extract_material_fields(text: str) -> dict[str, str]:
             if ph2 and ("电话" in text or "手机" in text or "联络" in text):
                 fields["contact_phone"] = ph2.group(1)
 
+    # 5) LLM 辅助字段提取兜底（优化 10）
+    regex_field_count = sum(1 for v in fields.values() if v)
+    min_fields = int(getattr(settings, "materials_llm_extraction_min_fields", 2) or 2)
+    if (
+        getattr(settings, "materials_llm_extraction_enabled", True)
+        and regex_field_count < min_fields
+        and len(text.strip()) >= 10
+    ):
+        llm_fields = _llm_extract_fields(text)
+        if llm_fields:
+            for k, v in llm_fields.items():
+                if k in FIELD_MAP.values() and v and not fields.get(k):
+                    fields[k] = v
+
+    return _normalize_fields(fields)
+
+
+def _llm_extract_fields(text: str) -> dict[str, str]:
+    """LLM 辅助提取字段（优化 10）。不可用时静默返回空。"""
+    try:
+        from src.llm.openai_client import LLMClient
+
+        client = LLMClient()
+        return client.extract_material_fields_llm(text)
+    except Exception as e:
+        logger.debug("LLM 字段提取兜底不可用: %s", e)
+        return {}
+
+
+def _normalize_phone(raw: str) -> str:
+    """统一电话格式：去空格/横线，补国际前缀。
+
+    - 已有 + 前缀：保留
+    - 852 开头（8 位）：补 +852
+    - 1[3-9] 开头的 11 位大陆号码：补 +86
+    - 其他：保持原样（去空格横线后）
+    """
+    s = re.sub(r"[\s\-()+]+", "", (raw or "")).strip()
+    if not s:
+        return ""
+    if s.startswith("+"):
+        return s
+    # 香港号码：852 + 8 位
+    if s.startswith("852") and len(s) == 11:
+        return f"+{s}"
+    # 大陆号码：1[3-9]xxxxxxxxx
+    if re.match(r"^1[3-9]\d{9}$", s):
+        return f"+86{s}"
+    # 已是 8 位香港号码（无 852 前缀）难以判断，保守不加前缀
+    return s
+
+
+def _normalize_email(raw: str) -> str:
+    """统一邮箱格式：去空格、转小写、去尾部多余标点。"""
+    s = (raw or "").strip().lower()
+    s = s.rstrip(".,;:。；：，")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def _normalize_company_name(raw: str) -> str:
+    """统一公司名格式：全角→半角括号，压缩空格，去首尾标点。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # 全角括号 → 半角
+    s = s.translate(str.maketrans({"（": "(", "）": ")"}))
+    # 压缩连续空格
+    s = re.sub(r"\s+", " ", s).strip()
+    # 去首尾标点
+    s = s.strip(".,;:。；：，()（）")
+    return s
+
+
+def _normalize_fields(fields: dict[str, str]) -> dict[str, str]:
+    """统一字段标准化入口：id_type/id_number + phone/email/company_name。
+
+    供正则提取后与 LLM 提取兜底后复用（见优化 10）。
+    """
+    if not fields:
+        return fields
     if "id_type" in fields:
         fields["id_type"] = _normalize_id_type_value(fields["id_type"])
     if "id_number" in fields:
         fields["id_number"] = fields["id_number"].strip().replace(" ", "")
-
+    for key in ("contact_phone", "applicant_phone"):
+        if fields.get(key):
+            fields[key] = _normalize_phone(fields[key])
+    for key in ("contact_email", "applicant_email"):
+        if fields.get(key):
+            fields[key] = _normalize_email(fields[key])
+    for key in ("company_name_en", "company_name_cn"):
+        if fields.get(key):
+            fields[key] = _normalize_company_name(fields[key])
     return fields
 
 

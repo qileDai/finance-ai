@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 REJECTED_NON_ID = "rejected_non_id"
 REJECTED_UPLOAD = "rejected_upload"
+REJECTED_BLUR = "rejected_blur"
+DUPLICATE_FILE = "duplicate"
 
 CLASSIFY_RULES: list[tuple[str, str]] = [
     (r"身份证|id.?card|hkid", "id_card_front"),
@@ -35,6 +38,30 @@ _VISION_HARD_ERRORS = frozenset({
     "no_api_key",
     "not_image",
 })
+
+
+def _check_image_quality(data: bytes) -> tuple[bool, float]:
+    """图片清晰度预检（优化 8）：Laplacian 方差法。
+
+    返回 (is_acceptable, variance)；cv2 不可用时安全降级返回 (True, -1.0)。
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return True, -1.0
+    try:
+        arr = np.frombuffer(data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return True, -1.0
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        threshold = float(getattr(settings, "materials_blur_threshold", 100.0) or 100.0)
+        return variance >= threshold, variance
+    except Exception as e:
+        logger.debug("图片质量检查失败，降级放行: %s", e)
+        return True, -1.0
 
 
 @dataclass
@@ -87,6 +114,7 @@ class MaterialHandler:
         status: str,
         *,
         folder_label: str,
+        file_hash: str = "",
     ) -> str:
         try:
             dest = save_bytes(
@@ -106,6 +134,7 @@ class MaterialHandler:
             file_path=str(dest),
             source="chat_file",
             status=status,
+            file_hash=file_hash,
         )
         logger.info("群 %s 文件已入库 field=%s path=%s", roomid, field_key, dest)
         return field_key
@@ -131,6 +160,32 @@ class MaterialHandler:
             logger.warning("上传校验拒绝 room=%s file=%s: %s", roomid, filename, e)
             return REJECTED_UPLOAD
 
+        # 文件哈希去重（优化 7）
+        file_hash = hashlib.sha256(data).hexdigest()
+        if getattr(settings, "materials_dedup_enabled", True):
+            existing = self.store.find_material_by_hash(roomid, file_hash)
+            if existing:
+                logger.info(
+                    "群 %s 重复文件跳过 field=%s hash=%s",
+                    roomid, existing.get("field_key"), file_hash[:12],
+                )
+                self._last_upload_reject_reason = "duplicate"
+                return DUPLICATE_FILE
+
+        # 图片清晰度预检（优化 8）
+        if (
+            getattr(settings, "materials_image_quality_enabled", True)
+            and is_image_bytes(filename, data)
+        ):
+            ok, variance = _check_image_quality(data)
+            if not ok:
+                logger.info(
+                    "群 %s 图片模糊拒绝 filename=%s variance=%.1f",
+                    roomid, filename, variance,
+                )
+                self._last_upload_reject_reason = f"blur variance={variance:.1f}"
+                return REJECTED_BLUR
+
         filename_key = (
             self.classify_by_llm(filename, roomid)
             if use_llm
@@ -142,7 +197,7 @@ class MaterialHandler:
         if filename_key == "address_proof":
             return self._persist_file(
                 roomid, msgid, filename, data, "address_proof", "received",
-                folder_label=folder_label,
+                folder_label=folder_label, file_hash=file_hash,
             )
 
         vision_enabled = (
@@ -206,7 +261,7 @@ class MaterialHandler:
                 )
                 return self._persist_file(
                     roomid, msgid, filename, data, field_key, status,
-                    folder_label=folder_label,
+                    folder_label=folder_label, file_hash=file_hash,
                 )
 
             if not api_failed and not hard_err:
@@ -226,7 +281,7 @@ class MaterialHandler:
             field_key = f"file_{msgid[:8]}"
         return self._persist_file(
             roomid, msgid, filename, data, field_key, status,
-            folder_label=folder_label,
+            folder_label=folder_label, file_hash=file_hash,
         )
 
     def notify_classification(
@@ -252,6 +307,13 @@ class MaterialHandler:
         if field_key == REJECTED_UPLOAD:
             reason = getattr(self, "_last_upload_reject_reason", "") or "文件不符合要求"
             return f"文件「{filename}」未保存：{reason}"
+        if field_key == DUPLICATE_FILE:
+            return f"文件「{filename}」与已收材料内容相同，已跳过重复存档。"
+        if field_key == REJECTED_BLUR:
+            return (
+                f"图片「{filename}」清晰度不足，未能存档。"
+                "请重新拍摄清晰正反面后上传。"
+            )
 
         if id_type in ID_TYPE_LABELS and id_number:
             return (

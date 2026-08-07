@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from config.settings import settings
@@ -20,7 +21,7 @@ from src.agent.domain import (
     hits_have_timeline_content,
     is_registration_domain,
 )
-from src.agent.query_rewriter import QueryRewriter
+from src.agent.query_rewriter import RETRY_STRATEGIES, QueryRewriter
 from src.agent.scoring.answer_scorer import AnswerScorer
 from src.agent.scoring.retrieval_scorer import RetrievalScorer
 from src.llm.openai_client import LLMClient
@@ -68,6 +69,18 @@ def _elapsed_ms(t0: float) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """向量余弦相似度（优化 4 一致性检查用）。"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
 class QAAgent:
     def __init__(
         self,
@@ -77,12 +90,18 @@ class QAAgent:
         retrieval_scorer: RetrievalScorer | None = None,
         answer_scorer: AnswerScorer | None = None,
         query_rewriter: QueryRewriter | None = None,
+        store=None,
     ) -> None:
         self.llm = llm or LLMClient()
         self.retriever = retriever or HybridRetriever()
         self.retrieval_scorer = retrieval_scorer or RetrievalScorer(llm=self.llm)
         self.answer_scorer = answer_scorer or AnswerScorer(llm=self.llm)
         self.query_rewriter = query_rewriter or QueryRewriter(llm=self.llm)
+        # ExternalGroupStore 实例（可选，用于一致性检查优化 4）
+        self._store = store
+        # Embedder 懒加载（一致性检查优化 4）
+        self._embedder = None
+        self._embedder_unavailable = False
 
     def _resolve_failure_action(self) -> AgentAction:
         if settings.agent_escalate_to_human:
@@ -98,6 +117,146 @@ class QAAgent:
             msg = (settings.agent_abstain_message or "").strip()
             return msg or ABSTAIN_MESSAGE
         return ""
+
+    def _enforce_response_length(
+        self,
+        question: str,
+        answer: str,
+        *,
+        trace: list[AgentTraceStep] | None = None,
+    ) -> str:
+        """超长回答自适应压缩（优化 5）。
+
+        先尝试 LLM 摘要，仍超长则 UTF-8 安全截断。短回答原样返回。
+        """
+        max_bytes = int(getattr(settings, "agent_response_max_bytes", 1800) or 0)
+        if max_bytes <= 0 or not answer:
+            return answer
+        original_bytes = len(answer.encode("utf-8"))
+        if original_bytes <= max_bytes:
+            return answer
+        action = "none"
+        summarize = bool(
+            getattr(settings, "agent_response_summarize_enabled", True)
+        )
+        if summarize:
+            # UTF-8 中文约 3 字节/字符，估算目标字符数
+            target_chars = max(40, max_bytes // 3)
+            summarized = self.llm.summarize_answer(question, answer, target_chars)
+            if summarized and summarized != answer:
+                answer = summarized
+                action = "summarize"
+        if len(answer.encode("utf-8")) > max_bytes:
+            answer = self._truncate_utf8(answer, max_bytes)
+            action = (
+                f"{action}+truncate" if action != "none" else "truncate"
+            )
+        if trace is not None:
+            trace.append(
+                AgentTraceStep(
+                    step="enforce_length",
+                    attempt=0,
+                    data={
+                        "original_bytes": original_bytes,
+                        "final_bytes": len(answer.encode("utf-8")),
+                        "max_bytes": max_bytes,
+                        "action": action,
+                    },
+                )
+            )
+        return answer
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int) -> str:
+        """UTF-8 安全截断：在句号/换行处截断并追加提示（优化 5）。"""
+        if max_bytes <= 0 or len(text.encode("utf-8")) <= max_bytes:
+            return text
+        hint = "…（内容较长已截断，详情可回复「转人工」）"
+        hint_bytes = len(hint.encode("utf-8"))
+        budget = max(0, max_bytes - hint_bytes)
+        truncated = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        # 在最近的句号/换行处截断，避免半句
+        for sep in ("\n", "。", "；", "！", "，"):
+            idx = truncated.rfind(sep)
+            if idx >= budget // 2:
+                truncated = truncated[: idx + len(sep)]
+                break
+        return f"{truncated}{hint}"
+
+    def _get_embedder(self):
+        """懒加载 Embedder 用于一致性检查（优化 4）。不可用返回 None。"""
+        if self._embedder_unavailable:
+            return None
+        if self._embedder is None:
+            try:
+                from src.rag.embedder import Embedder
+
+                self._embedder = Embedder()
+            except Exception as e:
+                logger.debug("Embedder 不可用，一致性检查跳过: %s", e)
+                self._embedder_unavailable = True
+                return None
+        return self._embedder
+
+    def _check_consistency(
+        self, question: str, answer: str, roomid: str
+    ) -> tuple[bool, str]:
+        """检测当前回答与历史相似问题的回答是否矛盾（优化 4）。
+
+        返回 (is_contradictory, reason)。任何依赖不可用时返回 (False, "")。
+        """
+        if not roomid or not answer:
+            return False, ""
+        if not getattr(settings, "agent_consistency_check_enabled", True):
+            return False, ""
+        if self._store is None:
+            return False, ""
+        embedder = self._get_embedder()
+        if embedder is None:
+            return False, ""
+        threshold = float(
+            getattr(settings, "agent_consistency_similarity_threshold", 0.85) or 0.85
+        )
+        history_limit = int(
+            getattr(settings, "agent_consistency_history_limit", 20) or 20
+        )
+        try:
+            runs = self._store.get_recent_agent_runs(roomid, limit=history_limit)
+        except Exception as e:
+            logger.debug("获取历史 agent_runs 失败: %s", e)
+            return False, ""
+        if not runs:
+            return False, ""
+        hist_questions = [r.get("question", "") for r in runs]
+        try:
+            vecs = embedder.embed_texts([question] + hist_questions)
+        except Exception as e:
+            logger.debug("一致性检查 embedding 失败: %s", e)
+            return False, ""
+        if len(vecs) < len(runs) + 1:
+            return False, ""
+        cur_vec = vecs[0]
+        best_idx = -1
+        best_sim = 0.0
+        for i, hv in enumerate(vecs[1:]):
+            sim = _cosine_similarity(cur_vec, hv)
+            if sim > best_sim:
+                best_sim = sim
+                best_idx = i
+        if best_idx < 0 or best_sim < threshold:
+            return False, ""
+        hist = runs[best_idx]
+        hist_q = hist.get("question", "")
+        hist_a = hist.get("final_answer", "")
+        if not hist_a:
+            return False, ""
+        contradictory = self.llm.check_answer_contradiction(
+            question, answer, hist_q, hist_a
+        )
+        if not contradictory:
+            return False, ""
+        reason = f"与历史相似问题(sim={best_sim:.2f})回答矛盾"
+        return True, reason
 
     def _domain_abstain_or_silent(
         self,
@@ -217,6 +376,10 @@ class QAAgent:
         skip_rewrite_th = float(
             getattr(settings, "agent_high_confidence_skip_rewrite", 0.70) or 0.70
         )
+        # 多策略重试链（优化 2）
+        multi_strategy = bool(
+            getattr(settings, "agent_multi_strategy_retry_enabled", True)
+        )
 
         for attempt in range(max_retries + 1):
             t_ret = time.monotonic()
@@ -233,6 +396,7 @@ class QAAgent:
                     attempt=attempt,
                     data={
                         "query": query,
+                        "scope": scope,
                         "score": r_eval.score,
                         "passed": r_eval.passed,
                         "hit_count": r_eval.hit_count,
@@ -248,13 +412,28 @@ class QAAgent:
             if high_conf:
                 break
             t_rw = time.monotonic()
-            query = self.query_rewriter.rewrite(question, hits, r_eval)
+            if multi_strategy and attempt < len(RETRY_STRATEGIES):
+                strategy = RETRY_STRATEGIES[attempt]
+                new_query, new_scope = self.query_rewriter.rewrite_with_strategy(
+                    question, hits, r_eval, strategy, scope=scope,
+                )
+                if new_scope:
+                    scope = new_scope
+                query = new_query
+            else:
+                strategy = "rewrite"
+                query = self.query_rewriter.rewrite(question, hits, r_eval)
             total_retries += 1
             trace.append(
                 AgentTraceStep(
                     step="rewrite",
                     attempt=attempt,
-                    data={"query": query, "elapsed_ms": _elapsed_ms(t_rw)},
+                    data={
+                        "query": query,
+                        "strategy": strategy,
+                        "scope": scope,
+                        "elapsed_ms": _elapsed_ms(t_rw),
+                    },
                 )
             )
 
@@ -280,6 +459,7 @@ class QAAgent:
                 soft=use_soft_knowledge,
                 history=history,
                 group_meta=group_meta or {},
+                roomid=roomid,
                 skip_llm_judge=retrieval_score
                 >= float(getattr(settings, "agent_high_confidence_skip_judge", 0.75) or 0.75),
             )
@@ -305,6 +485,7 @@ class QAAgent:
                 total_retries=total_retries,
                 history=history,
                 group_meta=group_meta or {},
+                roomid=roomid,
             )
             result.trace.append(
                 AgentTraceStep(
@@ -339,6 +520,7 @@ class QAAgent:
         soft: bool = False,
         history: list[str] | None = None,
         group_meta: dict[str, str] | None = None,
+        roomid: str = "",
         skip_llm_judge: bool = False,
     ) -> QAResult:
         context = format_hits_for_prompt(hits)
@@ -411,6 +593,7 @@ class QAAgent:
                             total_retries=total_retries,
                             history=history,
                             group_meta=group_meta,
+                            roomid=roomid,
                             allow_soft_fallback=False,
                         )
                     final_action = self._resolve_failure_action()
@@ -437,6 +620,30 @@ class QAAgent:
             )
 
         confidence = min(retrieval_score, answer_score)
+        # 回答一致性检查（优化 4）：矛盾时追加免责声明
+        if final_action == AgentAction.REPLY and answer:
+            contradictory, c_reason = self._check_consistency(
+                question, answer, roomid
+            )
+            if contradictory:
+                trace.append(
+                    AgentTraceStep(
+                        step="consistency",
+                        attempt=0,
+                        data={"contradictory": True, "reason": c_reason},
+                    )
+                )
+                if getattr(
+                    settings, "agent_consistency_append_disclaimer", True
+                ):
+                    disclaimer = (
+                        "（注：本次回答与此前略有差异，具体以专员核实为准；"
+                        "也可回复「转人工」。）"
+                    )
+                    if disclaimer not in answer:
+                        answer = f"{answer}\n{disclaimer}"
+        # 自适应长度控制（优化 5）
+        answer = self._enforce_response_length(question, answer, trace=trace)
         return QAResult(
             run_id=run_id,
             question=question,
@@ -465,6 +672,7 @@ class QAAgent:
         total_retries: int,
         history: list[str],
         group_meta: dict[str, str],
+        roomid: str = "",
         allow_soft_fallback: bool = True,
     ) -> QAResult:
         t_ctx = time.monotonic()
@@ -501,6 +709,7 @@ class QAAgent:
                     total_retries=total_retries,
                     max_retries=0,
                     soft=True,
+                    roomid=roomid,
                 )
             return self._domain_abstain_or_silent(
                 run_id=run_id,
@@ -556,6 +765,8 @@ class QAAgent:
                     reason="上下文回答质检未通过",
                 )
 
+        # 自适应长度控制（优化 5）
+        answer = self._enforce_response_length(question, answer, trace=trace)
         return QAResult(
             run_id=run_id,
             question=question,

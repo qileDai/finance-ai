@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -17,7 +18,9 @@ from src.materials.checklist import (
     format_case_status_text,
     format_knowledge_checklist_text,
     format_progress_text,
+    prioritized_missing,
     progress_summary,
+    validate_cross_fields,
 )
 from src.materials.form_parser import fields_to_material_rows
 from src.storage.db import ExternalGroupStore
@@ -192,12 +195,15 @@ class GroupStateMachine:
     _human_acked: set[str] = field(default_factory=set)
     _failed_hinted: set[str] = field(default_factory=set)
     _orchestrator: object | None = field(default=None, repr=False)
+    # 优化 12：主动缺失材料提醒的计数与速率限制（内存态，重启重置）
+    _message_counts: dict[str, int] = field(default_factory=dict)
+    _last_reminder_at: dict[str, float] = field(default_factory=dict)
 
     def _get_orchestrator(self):
         if self._orchestrator is None:
             from src.agent.orchestrator import TaskOrchestrator
 
-            self._orchestrator = TaskOrchestrator()
+            self._orchestrator = TaskOrchestrator(store=self.store)
         return self._orchestrator
 
     def _owner(self, roomid: str) -> str | None:
@@ -716,6 +722,9 @@ class GroupStateMachine:
             self.store.mark_message_processed(msgid)
             return
 
+        # 优化 12：累计每群消息计数（主动提醒触发依据）
+        self._message_counts[roomid] = self._message_counts.get(roomid, 0) + 1
+
         if is_kf_session(roomid):
             parsed = parse_kf_roomid(roomid)
             if parsed:
@@ -1066,6 +1075,8 @@ class GroupStateMachine:
                 GROUP_STATUS_FAILED,
             ):
                 self.store.set_group_status(roomid, GROUP_STATUS_QA)
+            # 优化 12：QA 回复后主动提醒缺失材料
+            self._maybe_proactive_reminder(roomid, to_external_userid=wm)
         except Exception as e:
             logger.exception("会话 %s AI 回复失败: %s", roomid, e)
             self._safe_send(
@@ -1285,6 +1296,10 @@ class GroupStateMachine:
 
         if not enqueued_qa:
             self.store.mark_message_processed(msgid)
+
+        # 优化 12：材料收集阶段主动提醒缺失材料（shadow 模式不发）
+        if not shadow:
+            self._maybe_proactive_reminder(roomid, to_external_userid=wm)
 
     def _ground_qa_answer(self, answer: str, roomid: str) -> str | None:
         """发前轻量护栏：若答案编造办理/收齐状态且与 DB 不符 → 弃权。"""
@@ -1552,6 +1567,19 @@ class GroupStateMachine:
         to_external_userid: str | None = None,
     ) -> None:
         materials = self.store.get_materials(roomid)
+        # 跨字段校验（优化 11）：error 级问题阻止进入 REVIEW
+        cross_issues = validate_cross_fields(materials)
+        errors = [i for i in cross_issues if i.get("level") == "error"]
+        if errors:
+            err_lines = "\n".join(f"  ✗ {i.get('message')}" for i in errors)
+            self._safe_send(
+                roomid,
+                "【材料校验】资料项已收齐，但存在以下校验错误，请修正后再确认：\n"
+                f"{err_lines}\n\n"
+                "修正后我会再次核对。如需帮助可回复「转人工」。",
+                to_external_userid=to_external_userid,
+            )
+            return
         company_data = aggregate_company_data(materials)
         summary = self.llm.confirm_materials_summary(company_data)
         self.store.set_group_status(roomid, GROUP_STATUS_REVIEW)
@@ -1560,6 +1588,58 @@ class GroupStateMachine:
             f"【材料确认】资料已齐全，可以开始注册。\n{summary}\n\n"
             f"请核对无误后回复「确认」或「开始注册」。",
             to_external_userid=to_external_userid,
+        )
+
+    def _maybe_proactive_reminder(
+        self, roomid: str, *, to_external_userid: str | None = None
+    ) -> None:
+        """COLLECTING 等状态下按消息计数/速率限制主动提醒缺失材料（优化 12）。"""
+        if not getattr(settings, "materials_proactive_reminder_enabled", True):
+            return
+        status = (self.store.get_group(roomid) or {}).get("status") or ""
+        if status not in (
+            GROUP_STATUS_WELCOMED,
+            GROUP_STATUS_QA,
+            GROUP_STATUS_COLLECTING,
+        ):
+            return
+        # 速率限制：距上次提醒不足间隔则跳过
+        interval = float(
+            getattr(settings, "materials_proactive_reminder_interval", 3600.0)
+            or 3600.0
+        )
+        now = time.monotonic()
+        if now - self._last_reminder_at.get(roomid, 0.0) < interval:
+            return
+        # 消息计数门槛：每 N 条消息触发一次检查
+        every_n = int(
+            getattr(settings, "materials_proactive_reminder_every_n_messages", 5) or 5
+        )
+        count = self._message_counts.get(roomid, 0)
+        if count < every_n or count % every_n != 0:
+            return
+        max_items = int(
+            getattr(settings, "materials_proactive_reminder_max_items", 3) or 3
+        )
+        materials = self.store.get_materials(roomid)
+        missing = prioritized_missing(materials, limit=max_items)
+        if not missing:
+            return
+        self._last_reminder_at[roomid] = now
+        lines = ["📌 温馨提醒：以下材料尚未收到，补齐后即可开始注册："]
+        for m in missing:
+            mark = "（关键）" if m.get("critical") else ""
+            lines.append(f"  - {m.get('label')}{mark}")
+        if not all(m.get("critical") for m in missing) and any(
+            m.get("critical") for m in missing
+        ):
+            lines.append("标「关键」为必填核心项，请优先补充。")
+        lines.append("可发送「/资料」查看完整清单，或按「键=值」提交。")
+        self._safe_send(
+            roomid,
+            "\n".join(lines),
+            to_external_userid=to_external_userid,
+            enforce_quota=True,
         )
 
     def _handle_confirm(

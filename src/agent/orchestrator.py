@@ -12,8 +12,8 @@ HUMAN_COMMANDS = {"转人工", "/转人工", "/human"}
 
 
 class TaskOrchestrator:
-    def __init__(self, qa_agent: QAAgent | None = None) -> None:
-        self.qa_agent = qa_agent or QAAgent()
+    def __init__(self, qa_agent: QAAgent | None = None, store=None) -> None:
+        self.qa_agent = qa_agent or QAAgent(store=store)
 
     @staticmethod
     def classify(text: str) -> TaskType:

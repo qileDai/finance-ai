@@ -125,6 +125,17 @@ class Settings(BaseSettings):
         default=".jpg,.jpeg,.png,.pdf,.webp,.gif",
         validation_alias="MATERIALS_UPLOAD_ALLOWED_EXT",
     )
+    materials_dedup_enabled: bool = True
+    materials_image_quality_enabled: bool = True
+    materials_blur_threshold: float = 100.0  # Laplacian 方差阈值
+    # LLM 辅助字段提取兜底（优化 10）
+    materials_llm_extraction_enabled: bool = True
+    materials_llm_extraction_min_fields: int = 2  # 正则提取 < 此值时触发 LLM
+    # 智能缺失材料主动提醒（优化 12）
+    materials_proactive_reminder_enabled: bool = True
+    materials_proactive_reminder_interval: float = 3600.0  # 最短提醒间隔（秒）
+    materials_proactive_reminder_every_n_messages: int = 5  # 每 N 条消息触发检查
+    materials_proactive_reminder_max_items: int = 3  # 提醒最多列出几个缺失项
     # 对象存储（可选，未配置则使用 materials_dir 本地存储）
     oss_endpoint: str = ""
     oss_bucket: str = ""
@@ -195,6 +206,8 @@ class Settings(BaseSettings):
     rag_scope: str = "hk"  # hk | cn | all
     rag_primary_sources: str = "docs/knowledge/注册.md"
     rag_primary_boost: float = 1.5
+    rag_mmr_enabled: bool = True
+    rag_mmr_lambda: float = 0.6  # 0=最大多样性, 1=最大相关性
     rag_exclude_patterns: str = "~$*,*.docx"
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: str = ""
@@ -212,6 +225,16 @@ class Settings(BaseSettings):
     agent_answer_faithfulness_threshold: float = 0.7
     agent_answer_completeness_threshold: float = 0.6
     agent_answer_llm_threshold: float = 0.65
+    # Embedding 忠实度融合（优化 3）
+    agent_embedding_faithfulness_enabled: bool = True
+    agent_embedding_faithfulness_weight: float = 0.4  # 0=仅 bigram, 1=仅 embedding
+    # 多策略重试链 rewrite -> relax_scope -> keyword_extract（优化 2）
+    agent_multi_strategy_retry_enabled: bool = True
+    # 回答一致性检查（优化 4）：与历史相似问题回答矛盾时追加免责声明
+    agent_consistency_check_enabled: bool = True
+    agent_consistency_similarity_threshold: float = 0.85  # 问题 embedding 相似度阈值
+    agent_consistency_history_limit: int = 20  # 取最近 N 条历史回复比对
+    agent_consistency_append_disclaimer: bool = True
     # 检索分达到该值：跳过 rewrite；答案启发式过线则跳过 LLM judge
     agent_high_confidence_skip_rewrite: float = 0.70
     agent_high_confidence_skip_judge: float = 0.75
@@ -238,6 +261,9 @@ class Settings(BaseSettings):
     )
     # 对客回复末尾附短引用
     agent_show_citations: bool = True
+    # 自适应回答长度控制（优化 5）
+    agent_response_max_bytes: int = 1800  # 0=不限制
+    agent_response_summarize_enabled: bool = True
 
     def rag_primary_source_list(self) -> list[str]:
         return [p.strip() for p in (self.rag_primary_sources or "").split(",") if p.strip()]

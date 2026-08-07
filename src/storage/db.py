@@ -307,6 +307,17 @@ class ExternalGroupStore:
                 "ALTER TABLE agent_runs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0"
             )
 
+        # group_materials: 文件哈希去重（优化 7）
+        gm_cols = {r[1] for r in conn.execute("PRAGMA table_info(group_materials)")}
+        if gm_cols and "file_hash" not in gm_cols:
+            conn.execute(
+                "ALTER TABLE group_materials ADD COLUMN file_hash TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_materials_hash "
+            "ON group_materials(roomid, file_hash)"
+        )
+
     def _migrate_kf_cursor(self, conn: sqlite3.Connection) -> None:
         """将 kf_cursor 从单例 id=1 迁移为 open_kfid 主键"""
         cols = {r[1] for r in conn.execute("PRAGMA table_info(kf_cursor)")}
@@ -867,6 +878,26 @@ class ExternalGroupStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_recent_agent_runs(
+        self, roomid: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """查询某群最近 N 条已回复的 agent_runs 记录（优化 4 一致性检查）。"""
+        if not roomid:
+            return []
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT question, final_answer, confidence, action, created_at
+                FROM agent_runs
+                WHERE roomid = ? AND action = 'reply'
+                  AND final_answer != ''
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (roomid, int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_archive_seq(self) -> int:
         with self._conn() as conn:
             row = conn.execute("SELECT seq FROM archive_cursor WHERE id = 1").fetchone()
@@ -955,23 +986,39 @@ class ExternalGroupStore:
         file_path: str = "",
         source: str = "form",
         status: str = "received",
+        file_hash: str = "",
     ) -> None:
         now = _utc_now()
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO group_materials
-                    (roomid, field_key, field_value, file_path, source, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (roomid, field_key, field_value, file_path, source, status, file_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(roomid, field_key) DO UPDATE SET
                     field_value = excluded.field_value,
                     file_path = CASE WHEN excluded.file_path != '' THEN excluded.file_path ELSE file_path END,
                     source = excluded.source,
                     status = excluded.status,
+                    file_hash = CASE WHEN excluded.file_hash != '' THEN excluded.file_hash ELSE file_hash END,
                     updated_at = excluded.updated_at
                 """,
-                (roomid, field_key, field_value, file_path, source, status, now, now),
+                (roomid, field_key, field_value, file_path, source, status, file_hash, now, now),
             )
+
+    def find_material_by_hash(
+        self, roomid: str, file_hash: str
+    ) -> dict[str, Any] | None:
+        """按文件 SHA-256 哈希查重（优化 7）。命中返回材料行，否则 None。"""
+        if not file_hash:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM group_materials WHERE roomid = ? AND file_hash = ? "
+                "AND file_hash != '' LIMIT 1",
+                (roomid, file_hash),
+            ).fetchone()
+        return dict(row) if row else None
 
     def get_materials(self, roomid: str) -> dict[str, dict[str, Any]]:
         with self._conn() as conn:

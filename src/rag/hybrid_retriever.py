@@ -17,6 +17,24 @@ DURATION_QUERY_RE = re.compile(r"多久|周期|多长时间")
 DURATION_CHUNK_MARKERS = ("审核周期", "3-4 周", "3-4周", "工作日", "正式提交")
 
 
+def _bigram_set(text: str) -> set[str]:
+    """提取 2 字 bigram 集合（去空白后）。"""
+    t = re.sub(r"\s+", "", (text or ""))
+    if len(t) < 2:
+        return {t} if t else set()
+    return {t[i : i + 2] for i in range(len(t) - 1)}
+
+
+def _bigram_jaccard(text_a: str, text_b: str) -> float:
+    """两个文本的 2 字 bigram Jaccard 相似度。空集返回 0.0。"""
+    a = _bigram_set(text_a)
+    b = _bigram_set(text_b)
+    if not a or not b:
+        return 0.0
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
 def _duration_supplement_queries(query: str) -> list[str]:
     if not _is_duration_query(query):
         return []
@@ -174,6 +192,51 @@ class HybridRetriever:
                 )
             )
         return self._rerank_with_query_boosts(query, expanded)
+
+    def _mmr_rerank(
+        self,
+        candidates: list[RetrievedChunk],
+        top_k: int,
+        lambda_: float,
+    ) -> list[RetrievedChunk]:
+        """MMR 贪心选择：平衡相关性与多样性。
+
+        mmr = lambda_ * score(d_i) - (1 - lambda_) * max(sim(d_i, d_j) for d_j in selected)
+        首轮选 score 最高的；预计算候选对 bigram Jaccard 缓存。
+        """
+        if not candidates or len(candidates) <= top_k:
+            return candidates
+        bigrams = [_bigram_set(c.text) for c in candidates]
+        n = len(candidates)
+        # 预计算成对 Jaccard 相似度
+        sim: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                union = bigrams[i] | bigrams[j]
+                s = len(bigrams[i] & bigrams[j]) / len(union) if union else 0.0
+                sim[i][j] = s
+                sim[j][i] = s
+        selected: list[int] = []
+        remaining = set(range(n))
+        while remaining and len(selected) < top_k:
+            best_idx = -1
+            best_score = -float("inf")
+            for i in remaining:
+                rel = candidates[i].score
+                if not selected:
+                    mmr = rel
+                else:
+                    max_sim = max(sim[i][j] for j in selected)
+                    mmr = lambda_ * rel - (1.0 - lambda_) * max_sim
+                if mmr > best_score:
+                    best_score = mmr
+                    best_idx = i
+            if best_idx < 0:
+                break
+            selected.append(best_idx)
+            remaining.discard(best_idx)
+        return [candidates[i] for i in selected]
+
     def retrieve(
         self,
         query: str,
@@ -255,10 +318,19 @@ class HybridRetriever:
             if len(results) >= top_k:
                 break
         results.sort(key=lambda r: r.score, reverse=True)
-        return self._expand_step_siblings(
+        expanded = self._expand_step_siblings(
             results,
             query=query,
             scope=scope,
             fused_scores=fused_scores,
             channel_scores=channel_scores,
         )
+        if (
+            getattr(settings, "rag_mmr_enabled", True)
+            and len(expanded) > top_k
+        ):
+            pool_size = max(top_k * 2, 20)
+            candidates = expanded[:pool_size]
+            lambda_ = float(getattr(settings, "rag_mmr_lambda", 0.6) or 0.6)
+            return self._mmr_rerank(candidates, top_k, lambda_)
+        return expanded

@@ -235,6 +235,88 @@ class LLMClient:
             "feedback": str(data.get("feedback") or ""),
         }
 
+    def summarize_answer(self, question: str, answer: str, max_chars: int) -> str:
+        """LLM 摘要压缩回答到指定字数内（优化 5）。
+
+        保留核心结论、关键步骤、编号要点与重要数字。失败时返回原文由调用方截断。
+        """
+        if max_chars <= 0 or not answer.strip():
+            return answer
+        system = (
+            "你是回答压缩助手。在不丢失核心结论、关键步骤、编号要点和重要数字的前提下，"
+            f"将回答压缩到 {max_chars} 个字符以内。保持专业简洁，保留要点编号，"
+            "不要添加解释或客套。直接输出压缩后的回答。"
+        )
+        user = f"客户问题: {question}\n\n原回答:\n{answer}"
+        try:
+            summary = self.chat(system, user, temperature=0.2).strip()
+            if summary:
+                return summary
+        except Exception as e:
+            logger.warning("LLM 摘要失败，回退截断: %s", e)
+        return answer
+
+    def check_answer_contradiction(
+        self, q1: str, a1: str, q2: str, a2: str
+    ) -> bool:
+        """判断两个相似问题的回答是否矛盾（优化 4）。返回 True 表示矛盾。"""
+        system = (
+            "你是回答一致性审核员。判断同一客户两个相似问题的两个回答是否矛盾。"
+            "关注核心事实结论（时效、费用、流程步骤、所需材料等）是否冲突；"
+            "措辞差异或详略不同不算矛盾。"
+            '输出 JSON: {"contradictory": true/false, "reason": "..."}'
+        )
+        user = (
+            f"问题1: {q1}\n回答1:\n{a1}\n\n"
+            f"问题2: {q2}\n回答2:\n{a2}\n\n"
+            "两个回答的核心事实结论是否矛盾？"
+        )
+        try:
+            data = self.chat_json(system, user)
+            return bool(data.get("contradictory", False))
+        except Exception as e:
+            logger.warning("一致性检查 LLM 调用失败: %s", e)
+            return False
+
+    def extract_material_fields_llm(self, text: str) -> dict[str, str]:
+        """LLM 从自然语言提取材料字段（优化 10 兜底）。
+
+        返回 dict，key 为标准 field_key，过滤无效 key 与空值。
+        """
+        system = (
+            "你是注册材料信息提取助手。从客户自然语言中提取公司注册相关字段。"
+            "可提取字段（仅输出这些 key，无法确定则省略）：\n"
+            "company_name_en(公司英文名), company_name_cn(公司中文名), "
+            "registered_office(注册地址), contact_email(联络邮箱), "
+            "contact_phone(联络电话), founder_members(股东资料), "
+            "directors(董事资料), company_secretary(秘书资料), "
+            "business_desc(业务性质), br_certificate_years(商业登记证年限 1或3), "
+            "applicant_name(申请人姓名), applicant_email(申请人电邮), "
+            "applicant_phone(申请人电话), id_type(证件类型 HKID/PRC_ID/PASSPORT), "
+            "id_number(证件号码)\n"
+            '输出 JSON: {"field_key": "value", ...}，只包含能确定的字段。'
+        )
+        user = f"客户消息:\n{text}"
+        try:
+            data = self.chat_json(system, user)
+        except Exception as e:
+            logger.warning("LLM 字段提取失败: %s", e)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        valid_keys = {
+            "company_name_en", "company_name_cn", "registered_office",
+            "contact_email", "contact_phone", "founder_members", "directors",
+            "company_secretary", "business_desc", "br_certificate_years",
+            "applicant_name", "applicant_email", "applicant_phone",
+            "id_type", "id_number",
+        }
+        result: dict[str, str] = {}
+        for k, v in data.items():
+            if k in valid_keys and isinstance(v, str) and v.strip():
+                result[k] = v.strip()
+        return result
+
     def answer_material_question(self, question: str, context: str = "") -> str:
         system = (
             "你是香港公司注册顾问助手，熟悉 ICRIS 电子注册流程及所需材料。"

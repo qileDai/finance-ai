@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 
 from config.settings import settings
 from src.agent.models import AnswerEval
 from src.llm.openai_client import LLMClient
 from src.rag.models import RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 CAUTION_QUERY_RE = re.compile(r"注意|要注意|注意事项")
 NUMBERED_RE = re.compile(r"[1-9][、.)．]")
@@ -33,6 +37,17 @@ def _faithfulness_heuristic(answer: str, hits: list[RetrievedChunk]) -> float:
     return overlap / len(answer_terms)
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
 def _completeness_heuristic(question: str, answer: str) -> float:
     if not answer.strip():
         return 0.0
@@ -53,6 +68,44 @@ def _completeness_heuristic(question: str, answer: str) -> float:
 class AnswerScorer:
     def __init__(self, llm: LLMClient | None = None) -> None:
         self._llm = llm
+        # Embedder 懒加载（优化 3）
+        self._embedder = None
+        self._embedder_unavailable = False
+
+    def _get_embedder(self):
+        """懒加载 Embedder；不可用时返回 None。"""
+        if self._embedder_unavailable:
+            return None
+        if self._embedder is None:
+            try:
+                from src.rag.embedder import Embedder
+
+                self._embedder = Embedder()
+            except Exception as e:
+                logger.debug("Embedder 不可用，忠实度回退纯 bigram: %s", e)
+                self._embedder_unavailable = True
+                return None
+        return self._embedder
+
+    def _embedding_faithfulness(
+        self, answer: str, hits: list[RetrievedChunk]
+    ) -> float:
+        """回答与检索上下文的 embedding 余弦相似度（优化 3）。
+
+        不可用或异常返回 -1.0，调用方回退到纯 bigram。
+        """
+        embedder = self._get_embedder()
+        if embedder is None:
+            return -1.0
+        context = "\n".join(h.text for h in hits)[:8000]
+        try:
+            vecs = embedder.embed_texts([answer, context])
+            if len(vecs) < 2:
+                return -1.0
+            return _cosine_similarity(vecs[0], vecs[1])
+        except Exception as e:
+            logger.debug("embedding faithfulness 计算失败: %s", e)
+            return -1.0
 
     def score(
         self,
@@ -63,6 +116,14 @@ class AnswerScorer:
         skip_llm_judge: bool = False,
     ) -> AnswerEval:
         faith_h = _faithfulness_heuristic(answer, hits)
+        # Embedding 忠实度融合（优化 3）
+        if getattr(settings, "agent_embedding_faithfulness_enabled", True) and hits:
+            emb_faith = self._embedding_faithfulness(answer, hits)
+            if emb_faith >= 0.0:
+                weight = float(
+                    getattr(settings, "agent_embedding_faithfulness_weight", 0.4) or 0.4
+                )
+                faith_h = (1.0 - weight) * faith_h + weight * emb_faith
         comp_h = _completeness_heuristic(question, answer)
         grounded = faith_h >= 0.35 or not hits
 
