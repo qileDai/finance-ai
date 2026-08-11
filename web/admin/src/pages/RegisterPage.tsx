@@ -62,6 +62,24 @@ function looksLikeEnglishAddress(s: string): boolean {
 }
 
 /**
+ * 检测是否香港地址：含 香港/Hong Kong/Kowloon/九龍/新界 → True。
+ * 与后端 src.browser.icris_registration.detect_hk_address 同款逻辑。
+ */
+function detectHkAddress(cn: string, en: string): boolean {
+  const addr = `${en || ""} ${cn || ""}`.toLowerCase();
+  const keywords = [
+    "hong kong",
+    "kowloon",
+    "new territories",
+    "香港",
+    "九龍",
+    "九龙",
+    "新界",
+  ];
+  return keywords.some((k) => addr.includes(k));
+}
+
+/**
  * 把整段注册信息解析为字段映射。
  * 支持「中文名：」「英文名：」「注册资本：」「经营范围：」「注册地址：」
  * 「董事：」「身份证号码：」「住址中文：」「住址英文：」等关键字。
@@ -304,6 +322,26 @@ export function RegisterPage({ onToast }: Props) {
                   onChange={(e) => setField(f.key, e.target.value)}
                   disabled={isRunning || submitting}
                 />
+                {f.key === "director_address_en" &&
+                (fields.director_address_cn || fields.director_address_en) ? (
+                  <small
+                    className={
+                      detectHkAddress(
+                        fields.director_address_cn || "",
+                        fields.director_address_en || ""
+                      )
+                        ? "badge ok"
+                        : "badge warn"
+                    }
+                  >
+                    {detectHkAddress(
+                      fields.director_address_cn || "",
+                      fields.director_address_en || ""
+                    )
+                      ? "香港地址（本地地址）"
+                      : "非香港地址 · 国家/地区=中国"}
+                  </small>
+                ) : null}
               </label>
             ))}
             <label className="reg-field">

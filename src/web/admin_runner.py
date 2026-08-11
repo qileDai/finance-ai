@@ -91,6 +91,24 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 住址香港/非香港判断关键词（与 src.browser.icris_registration.detect_hk_address 同款）
+_HK_ADDR_KEYWORDS = (
+    "hong kong",
+    "kowloon",
+    "new territories",
+    "香港",
+    "九龍",
+    "九龙",
+    "新界",
+)
+
+
+def _detect_hk_address(addr_en: str, addr_cn: str) -> bool:
+    """检测是否香港地址：含 香港/Hong Kong/Kowloon/九龍/新界 → True。"""
+    addr = f"{addr_en or ''} {addr_cn or ''}".lower()
+    return any(k in addr for k in _HK_ADDR_KEYWORDS)
+
+
 def _ext_from_mime(mime: str) -> str:
     return _MIME_EXT.get((mime or "").lower(), "bin")
 
@@ -265,11 +283,28 @@ def _run(company_data: dict[str, Any], case_id: str) -> None:
 
         wf = RegistrationWorkflow()
         ctx = WorkflowContext(chat_id=case_id, company_data=company_data)
+
+        # 住址判断（提前 log，让前端状态面板可见）
+        director = (company_data.get("directors") or [{}])[0] or {}
+        addr_cn = str(director.get("address_cn") or "").strip()
+        addr_en = str(director.get("address_en") or "").strip()
+        if addr_cn or addr_en:
+            is_hk = _detect_hk_address(addr_en, addr_cn)
+            ctx.log(
+                f"住址判断: {'香港地址（本地地址）' if is_hk else '非香港地址（国家/地区=中国）'}"
+            )
+            if addr_cn:
+                ctx.log(f"  住址中文: {addr_cn[:80]}")
+            if addr_en:
+                ctx.log(f"  住址英文: {addr_en[:80]}")
+
         wf.step_icris_register(
             ctx,
             dry_run=True,
             allow_submit=False,
-            force_isolated_browser=True,
+            # 走 CDP 路径（与 `python main.py --step register` 一致）：
+            # 自动启动 Chrome CDP（绕过 TLS 指纹检测）+ 注入 stealth 脚本
+            force_isolated_browser=False,
         )
         with _lock:
             _state.status = "succeeded"

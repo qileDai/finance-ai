@@ -235,6 +235,8 @@ class IcrisRegistrationBot:
         # 双重开关：DRY_RUN=false 且 ICRIS_ALLOW_SUBMIT=true 才允许最终提交
         self.allow_submit = (not settings.dry_run) and bool(settings.icris_allow_submit)
         self._locale: str | None = None
+        self._user_info_filled: bool = False
+        self._identity_proof_filled: bool = False
 
     async def _log_page(self, page: "Page", label: str) -> None:
         logger.info("[%s] URL: %s", label, page.url)
@@ -625,11 +627,20 @@ class IcrisRegistrationBot:
 
     async def _page_language_state(self, page: "Page") -> str:
         """返回页面语言状态: simplified | traditional | unknown"""
+        url = (page.url or "").lower()
+        if "locale=zh_tw" in url or "lang=zh_tw" in url:
+            return "traditional"
+        if "locale=zh_cn" in url or "lang=zh_cn" in url:
+            return "simplified"
         return await page.evaluate(
             """() => {
                 const text = document.body ? document.body.innerText : '';
-                if (/用戶類別|擬訂用的服務|帳戶資料|公司註冊處|首頁/.test(text)) return 'traditional';
-                if (/用户类别|拟订用的服务|账户资料|公司注册处|首页/.test(text)) return 'simplified';
+                // S02/门户 + S03 用户资料繁体特征
+                if (/用戶類別|擬訂用的服務|帳戶資料|公司註冊處|首頁|填寫用戶資料|英文姓氏|通訊語言|非香港地址|國家／地區|國家\\/地區|稱謂/.test(text))
+                    return 'traditional';
+                if (/用户类别|拟订用的服务|账户资料|公司注册处|首页|填写用户资料|英文姓氏|通讯语言|非香港地址|国家\\/地区|称谓/.test(text)
+                    && !/用戶類別|填寫用戶資料|通訊語言|稱謂/.test(text))
+                    return 'simplified';
                 const header = document.querySelector('header, .header, #header');
                 const headerText = header ? header.innerText : '';
                 if (/公司註冊處|首頁/.test(headerText)) return 'traditional';
@@ -808,14 +819,24 @@ class IcrisRegistrationBot:
         return await self._is_simplified_chinese_active(page)
 
     async def _is_traditional_chinese_active(self, page: "Page") -> bool:
+        url = (page.url or "").lower()
+        if "locale=zh_tw" in url or "lang=zh_tw" in url:
+            return True
+        if self._locale == "traditional":
+            return True
         state = await self._page_language_state(page)
         if state == "traditional":
             return True
-        if state == "simplified":
-            return False
+        # 页头有「简」可点 → 当前已是繁体（即使正文特征被误判为简体也不要 URL 重载）
         jian = page.locator("a").filter(has_text=re.compile(r"^简$"))
         if await jian.count() > 0 and await jian.first.is_visible():
             return True
+        fan = page.locator("a").filter(has_text=re.compile(r"^繁$"))
+        # 有「繁」可点 → 当前是简体
+        if await fan.count() > 0 and await fan.first.is_visible():
+            return False
+        if state == "simplified":
+            return False
         return False
 
     async def _wait_language_traditional(self, page: "Page", timeout_ms: int = 15000) -> bool:
@@ -823,8 +844,11 @@ class IcrisRegistrationBot:
             await page.wait_for_function(
                 """() => {
                     const text = document.body ? document.body.innerText : '';
-                    if (/用户类别|拟订用的服务|公司注册处|首页/.test(text)) return false;
-                    return /用戶類別|擬訂用的服務|公司註冊處|首頁/.test(text);
+                    if (/用户类别|拟订用的服务|公司注册处|首页|填写用户资料/.test(text)
+                        && !/用戶類別|公司註冊處|填寫用戶資料|通訊語言/.test(text))
+                        return false;
+                    return /用戶類別|擬訂用的服務|公司註冊處|首頁|填寫用戶資料|通訊語言|稱謂/.test(text)
+                        || /locale=zh_TW/i.test(location.href);
                 }""",
                 timeout=timeout_ms,
             )
@@ -937,15 +961,27 @@ class IcrisRegistrationBot:
         return await self._is_traditional_chinese_active(page)
 
     async def _ensure_traditional_chinese(self, page: "Page") -> bool:
-        """点击页头右上角「繁」切换为繁体中文；已是繁体则跳过"""
+        """点击页头右上角「繁」切换为繁体中文；已是繁体则跳过（避免 URL 重载打回 s03）。"""
         if await self._is_traditional_chinese_active(page):
+            self._locale = "traditional"
             logger.info("页面已是繁体中文，跳过语言切换")
             return True
 
         info = await self._find_fan_link_info(page)
         if not info:
+            # 无「繁」且已在注册表单：勿用 URL 重载，以免清空已填 s03
+            if self._is_user_info_url(page.url) or self._is_identity_proof_url(page.url):
+                logger.info(
+                    "未找到「繁」链接且已在注册步骤，跳过 URL 切繁以免重载 (url=%s)",
+                    page.url[:100],
+                )
+                self._locale = "traditional"
+                return True
             logger.warning("未找到页头「繁」链接 (state=%s)", await self._page_language_state(page))
-            return await self._fallback_traditional_locale_url(page)
+            ok = await self._fallback_traditional_locale_url(page)
+            if ok:
+                self._locale = "traditional"
+            return ok
 
         logger.info(
             "找到「繁」入口: tag=%s href=%s class=%s",
@@ -960,6 +996,7 @@ class IcrisRegistrationBot:
                 logger.info("已触发「繁」切换 (尝试 %d/3, 方式=%s)", attempt, method)
                 if await self._wait_language_traditional(page, timeout_ms=12000):
                     logger.info("语言已切换为繁体中文")
+                    self._locale = "traditional"
                     return True
                 await page.wait_for_timeout(800)
             except Exception as e:
@@ -967,7 +1004,14 @@ class IcrisRegistrationBot:
                 await page.wait_for_timeout(500)
 
         logger.warning("点击「繁」后页面仍为简体 (state=%s)", await self._page_language_state(page))
-        return await self._fallback_traditional_locale_url(page)
+        if self._is_user_info_url(page.url) or self._is_identity_proof_url(page.url):
+            logger.info("注册步骤上跳过 URL 切繁重载")
+            self._locale = "traditional"
+            return True
+        ok = await self._fallback_traditional_locale_url(page)
+        if ok:
+            self._locale = "traditional"
+        return ok
 
     async def _navigate_to_registration(self, page: "Page") -> "Page | None":
         """
@@ -1635,6 +1679,90 @@ class IcrisRegistrationBot:
 
         logger.warning("未能选择下拉 %s → %s", keywords, option)
         return await self._select_dropdown_by_rowtitle_playwright(page, keywords, option)
+
+    async def _wait_country_select_visible(self, page: "Page", timeout_ms: int = 15000) -> bool:
+        """非香港地址勾选后，等待「國家／地區」下拉出现。"""
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const norm = s => (s || '').replace(/[\\s/／:*：－-]/g, '');
+                    const kws = ['国家', '國家', '国家地区', '國家地區'];
+                    const titles = [...document.querySelectorAll(
+                        '.rowTitle, th, label, .ant-form-item-label, .control-label'
+                    )];
+                    for (const title of titles) {
+                        const tt = norm((title.innerText || '').trim());
+                        if (!kws.some(k => k && tt.includes(k))) continue;
+                        const row = title.closest('tr, .ant-form-item, .content, .row, .form-group')
+                            || title.parentElement;
+                        if (!row) continue;
+                        const sel = row.querySelector(
+                            '.ant-select:not(.ant-select-disabled), [role=combobox], select'
+                        );
+                        if (sel) return true;
+                        const td = title.closest('td');
+                        const next = td && td.nextElementSibling;
+                        if (next && next.querySelector(
+                            '.ant-select:not(.ant-select-disabled), [role=combobox], select'
+                        )) return true;
+                    }
+                    // 占位「請選擇」且邻近含国家文案
+                    const phs = [...document.querySelectorAll(
+                        '.ant-select-selection-placeholder, .ant-select-selection-item'
+                    )];
+                    for (const ph of phs) {
+                        const t = (ph.innerText || '').trim();
+                        if (!/請選擇|请选择|Select/i.test(t) && t) continue;
+                        let p = ph.closest('.ant-select, [role=combobox]');
+                        if (!p) continue;
+                        let ctx = '';
+                        let n = p.parentElement;
+                        for (let d = 0; d < 6 && n; d++) {
+                            ctx += ' ' + (n.innerText || '');
+                            n = n.parentElement;
+                        }
+                        if (kws.some(k => norm(ctx).includes(k))) return true;
+                    }
+                    return false;
+                }""",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            logger.debug("等待国家/地区下拉超时", exc_info=True)
+            return False
+
+    async def _select_non_hk_country_china(self, page: "Page") -> bool:
+        """非香港地址：國家／地區选中国（兼容简繁/全称/英文）。"""
+        country_kws = [
+            "国家",
+            "國家",
+            "国家/地区",
+            "國家/地區",
+            "国家／地区",
+            "國家／地區",
+        ]
+        options = ("中国", "中國", "中華人民共和國", "China")
+
+        await self._wait_country_select_visible(page, timeout_ms=15000)
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+
+        for option in options:
+            if await self._select_ant_select_by_keywords(page, country_kws, option):
+                logger.info("国家/地区已选: %s", option)
+                return True
+
+        # 兜底：rowTitle Playwright 再试一轮
+        for option in options:
+            if await self._select_dropdown_by_rowtitle_playwright(
+                page, country_kws, option
+            ):
+                logger.info("国家/地区兜底已选: %s", option)
+                return True
+
+        await self._log_ant_selects(page, "国家/地区失败")
+        logger.warning("国家/地区：未能选中中国（非香港地址）")
+        return False
 
     async def _select_dropdown_by_rowtitle_playwright(
         self, page: "Page", keywords: list[str], option: str
@@ -2528,14 +2656,16 @@ class IcrisRegistrationBot:
         # JS 回退：在用户类别区域内点击「个人」
         ok = await page.evaluate(
             """([sectionLabel, optionText]) => {
+                const root = document.body || document.documentElement;
+                if (!root) return false;
                 const secRe = new RegExp(sectionLabel, 'i');
                 const optRe = new RegExp(optionText, 'i');
                 const excludeRe = /机构|機構|团体|團體|法人|公司|组织|組織/i;
-                const blocks = [...document.querySelectorAll(
+                const blocks = [...root.querySelectorAll(
                     '.ant-form-item, .ant-row, tr, fieldset, .form-group'
                 )];
                 const section = blocks.find(el => secRe.test(el.innerText || ''));
-                const scope = section || document.body;
+                const scope = section || root;
                 const wrappers = [...scope.querySelectorAll('.ant-radio-wrapper, label')];
                 for (const w of wrappers) {
                     const t = (w.innerText || '').trim();
@@ -2555,13 +2685,6 @@ class IcrisRegistrationBot:
                         return optRe.test((wrap && wrap.innerText) || '');
                     }
                 }
-                const radios = [...scope.querySelectorAll('input[type=radio]')];
-                if (radios[0]) {
-                    radios[0].click();
-                    radios[0].checked = true;
-                    radios[0].dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
-                }
                 return false;
             }""",
             [section_label, option_pattern],
@@ -2572,6 +2695,136 @@ class IcrisRegistrationBot:
             return True
 
         logger.warning("未能选择 [%s] → %s", section_label, option_pattern)
+        return False
+
+    async def _select_address_type_radio(self, page: "Page", *, is_hk: bool) -> bool:
+        """地址类型：香港→本地地址；否则→非香港地址（全页精确匹配，禁止误点第一项）。"""
+        if is_hk:
+            labels = ("本地地址", "本地位址")
+            pattern = r"本地地址|本地位址"
+            # 避免「非香港地址」被「本地」子串误匹配
+            exclude = re.compile(r"非香港")
+        else:
+            labels = ("非香港地址", "非本地地址")
+            pattern = r"非香港地址|非本地地址"
+            exclude = None
+
+        if await self._verify_option_selected(page, pattern, option_type="radio"):
+            logger.info("地址类型已是目标: %s", pattern)
+            return True
+
+        # 1) Playwright：短文案 radio wrapper
+        wrappers = page.locator(".ant-radio-wrapper, label.ant-radio-wrapper")
+        for i in range(await wrappers.count()):
+            item = wrappers.nth(i)
+            if not await item.is_visible():
+                continue
+            txt = (await item.inner_text()).strip().replace("\n", "")
+            if exclude and exclude.search(txt):
+                continue
+            if not any(lab in txt for lab in labels):
+                continue
+            if len(txt) > 40:
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                await item.click(timeout=3000)
+                await page.wait_for_timeout(500)
+                if await self._verify_option_selected(page, pattern, option_type="radio"):
+                    logger.info("已选择地址类型: %s", txt)
+                    return True
+                inp = item.locator("input[type='radio']").first
+                if await inp.count() > 0:
+                    await inp.check(force=True)
+                    await inp.dispatch_event("click")
+                    await inp.dispatch_event("change")
+                    await page.wait_for_timeout(500)
+                    if await self._verify_option_selected(
+                        page, pattern, option_type="radio"
+                    ):
+                        logger.info("已 force 选择地址类型: %s", txt)
+                        return True
+            except Exception as exc:
+                logger.debug("地址类型点击失败 txt=%s: %s", txt[:20], exc)
+
+        # 2) get_by_text / role
+        for lab in labels:
+            try:
+                loc = page.get_by_text(lab, exact=False)
+                for j in range(min(await loc.count(), 5)):
+                    el = loc.nth(j)
+                    if not await el.is_visible():
+                        continue
+                    t = (await el.inner_text()).strip()
+                    if exclude and exclude.search(t):
+                        continue
+                    if lab not in t or len(t) > 40:
+                        continue
+                    await el.scroll_into_view_if_needed()
+                    await el.click(timeout=3000)
+                    await page.wait_for_timeout(500)
+                    if await self._verify_option_selected(
+                        page, pattern, option_type="radio"
+                    ):
+                        logger.info("已点文字选择地址类型: %s", lab)
+                        return True
+            except Exception:
+                pass
+
+        # 3) JS：精确匹配，绝不回退到 radios[0]
+        ok = await page.evaluate(
+            """([labels, wantNonHk]) => {
+                const root = document.body || document.documentElement;
+                if (!root) return false;
+                const labs = labels || [];
+                const wrappers = [...root.querySelectorAll(
+                    '.ant-radio-wrapper, label.ant-radio-wrapper, label'
+                )];
+                const norm = s => (s || '').replace(/\\s+/g, '').trim();
+                for (const w of wrappers) {
+                    const t = norm(w.innerText || '');
+                    if (!t || t.length > 40) continue;
+                    if (wantNonHk) {
+                        if (!t.includes('非香港') && !labs.some(l => t.includes(l))) continue;
+                    } else {
+                        if (t.includes('非香港')) continue;
+                        if (!labs.some(l => t.includes(l))) continue;
+                    }
+                    w.scrollIntoView({ block: 'center' });
+                    const inner = w.querySelector('.ant-radio, .ant-radio-input, span.ant-radio');
+                    if (inner) inner.click();
+                    w.click();
+                    const inp = w.querySelector('input[type=radio]');
+                    if (inp) {
+                        inp.checked = true;
+                        inp.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    const checked = w.classList.contains('ant-radio-wrapper-checked')
+                        || (inp && inp.checked)
+                        || !!(w.querySelector('.ant-radio-checked'));
+                    if (checked) return true;
+                }
+                return false;
+            }""",
+            [list(labels), (not is_hk)],
+        )
+        await page.wait_for_timeout(500)
+        if ok or await self._verify_option_selected(page, pattern, option_type="radio"):
+            logger.info("JS 已选择地址类型 is_hk=%s", is_hk)
+            return True
+
+        # 4) 通用 section（仅作最后手段；已去掉误点 radios[0]）
+        section_pat = r"地址|住址|Address"
+        opt_pat = pattern
+        if await self._select_radio_in_section(page, section_pat, opt_pat):
+            if await self._verify_option_selected(page, pattern, option_type="radio"):
+                return True
+
+        logger.warning(
+            "未能选择地址类型 is_hk=%s target=%s", is_hk, pattern
+        )
         return False
 
     async def _select_user_category_individual(self, page: "Page") -> bool:
@@ -3078,6 +3331,11 @@ class IcrisRegistrationBot:
 
     async def _fill_user_info_step(self, page: "Page", data: dict[str, Any]) -> int:
         """填写用户资料（s03）：称谓/姓名/地址/联络资料"""
+        if self._user_info_filled and self._is_user_info_url(page.url):
+            logger.info("s03 已填写过，不再重填；尝试继续进入 s04")
+            await self._advance_from_user_info_to_identity(page)
+            return 0
+
         if not await self._is_user_info_step(page):
             if not await self._wait_for_user_info_form(page, timeout_ms=30000):
                 logger.warning("当前不在用户资料步骤, url=%s", page.url)
@@ -3168,17 +3426,17 @@ class IcrisRegistrationBot:
                 name,
             )
 
-        # 地址类型：香港→本地地址；否则→非香港地址
-        if is_hk:
-            addr_radio_ok = await self._select_radio_in_section(
-                page, r"地址", r"本地地址|本地"
+        # 地址类型：香港→本地地址；否则→非香港地址（专用逻辑，避免误点第一项）
+        addr_radio_ok = await self._select_address_type_radio(page, is_hk=is_hk)
+        await _inc(
+            addr_radio_ok,
+            "本地地址" if is_hk else "非香港地址",
+        )
+        if not addr_radio_ok:
+            logger.warning(
+                "用户资料: 地址类型未选中 is_hk=%s，后续国家/地区可能不可用",
+                is_hk,
             )
-            await _inc(addr_radio_ok, "本地地址")
-        else:
-            addr_radio_ok = await self._select_radio_in_section(
-                page, r"地址", r"非香港地址|非香港"
-            )
-            await _inc(addr_radio_ok, "非香港地址")
         try:
             await page.wait_for_function(
                 """() => {
@@ -3223,16 +3481,14 @@ class IcrisRegistrationBot:
                 )
             await _inc(reg_ok, "区/市/省")
 
-        # 国家/地区（仅非香港地址时选「中国」）
-        if not is_hk and await page.locator(".ant-select").count() > 1:
-            country_ok = await self._select_ant_select_by_keywords(
-                page, ["国家", "國家", "国家/地区", "國家/地區"], "中国"
-            )
-            if not country_ok:
-                country_ok = await self._select_ant_select_by_keywords(
-                    page, ["国家", "國家", "国家/地区", "國家/地區"], "中國"
-                )
+        # 国家/地区（仅非香港地址时选「中国」；不依赖 ant-select 数量门槛）
+        if not is_hk:
+            country_ok = await self._select_non_hk_country_china(page)
             await _inc(country_ok, "国家/地区")
+            if not country_ok:
+                logger.warning(
+                    "用户资料: 国家/地区未选中（非香港地址仍为請選擇），请检查 ICRIS 下拉选项文案"
+                )
 
         # 电邮 + 确认电邮
         for pat, name in [
@@ -3282,12 +3538,66 @@ class IcrisRegistrationBot:
         logger.info("用户资料已填写 %d 项", filled)
 
         if filled > 0:
-            if await self._click_continue(page):
+            self._user_info_filled = True
+            if await self._advance_from_user_info_to_identity(page):
                 await self._log_page(page, "用户资料继续后")
             else:
-                logger.warning("用户资料填写后未能点击「继续」")
+                logger.warning(
+                    "用户资料填写后未能进入 s04（仍停在 %s）",
+                    page.url[:120],
+                )
+                errs = await self._get_validation_errors(page)
+                if errs:
+                    logger.warning("s03 校验错误: %s", errs)
 
         return filled
+
+    async def _wait_for_identity_proof_step(
+        self, page: "Page", timeout_ms: int = 45000
+    ) -> bool:
+        """等待进入 s04 身份证明页。"""
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const url = (location.href || '').toLowerCase();
+                    if (/registration\\/s04/.test(url)) return true;
+                    const t = document.body ? document.body.innerText : '';
+                    return /身分證明|身份证明/.test(t)
+                        && /證明文件|证明文件/.test(t)
+                        && /網上提交|网上提交|親身到公司註冊處|亲身到公司注册处/.test(t);
+                }""",
+                timeout=timeout_ms,
+            )
+            await self._wait_spin_clear(page, timeout_ms=15000)
+            return True
+        except Exception:
+            return await self._is_identity_proof_step(page)
+
+    async def _advance_from_user_info_to_identity(self, page: "Page") -> bool:
+        """s03 点继续并等待进入 s04；不重填、不切语言重载。"""
+        if await self._is_identity_proof_step(page):
+            return True
+        if not self._is_user_info_url(page.url) and not await self._is_user_info_step(page):
+            return await self._is_identity_proof_step(page)
+
+        for attempt in range(1, 4):
+            before = page.url
+            ok = await self._click_continue(page)
+            if not ok:
+                logger.warning("s03→s04 继续点击失败 (尝试 %d/3)", attempt)
+            if await self._wait_for_identity_proof_step(page, timeout_ms=25000):
+                logger.info("已从用户资料进入身份证明页")
+                return True
+            if self._is_home_or_portal(page.url):
+                logger.error("s03 继续后跳转首页")
+                return False
+            errs = await self._get_validation_errors(page)
+            if errs:
+                logger.warning("s03→s04 仍有校验: %s", errs)
+                break
+            if page.url == before:
+                await page.wait_for_timeout(800)
+        return await self._is_identity_proof_step(page)
 
     def _is_identity_proof_url(self, url: str) -> bool:
         return bool(re.search(r"registration/s04", url.lower()))
@@ -3306,18 +3616,61 @@ class IcrisRegistrationBot:
             )
         )
 
+    def _normalize_icris_id_type(self, raw: str, id_number: str = "") -> str:
+        """归一证件类型：HKID / PRC_ID / PASSPORT。"""
+        t = (raw or "").strip().upper().replace("-", "_").replace(" ", "")
+        aliases = {
+            "HKID": "HKID",
+            "HK_ID": "HKID",
+            "HONGKONG": "HKID",
+            "HONG_KONG": "HKID",
+            "PRC_ID": "PRC_ID",
+            "PRC": "PRC_ID",
+            "CN_ID": "PRC_ID",
+            "CHINA_ID": "PRC_ID",
+            "CHINA": "PRC_ID",
+            "PASSPORT": "PASSPORT",
+            "PP": "PASSPORT",
+            "护照": "PASSPORT",
+            "護照": "PASSPORT",
+        }
+        if t in aliases:
+            return aliases[t]
+        for key, val in aliases.items():
+            if key and key in t:
+                return val
+        num = (id_number or "").strip()
+        if re.match(r"^\d{17}[\dXx]$", num):
+            return "PRC_ID"
+        if re.match(r"^[A-Z]{1,2}\d{6}\(?[\dA]\)?$", num, re.I):
+            return "HKID"
+        if num and re.match(r"^[A-Z0-9]{5,15}$", num, re.I):
+            return "PASSPORT"
+        return "PRC_ID"
+
     def _derive_identity_proof(self, data: dict[str, Any]) -> dict[str, Any]:
-        """从 mock 解析身份证明选项（默认：中国身份证 + 网上提交 + 经核证真实副本）"""
+        """解析身份证明选项：按 HKID / 中国身份证 / 护照勾选对应项。"""
         proof = data.get("identity_proof") or {}
         applicant = data.get("applicant") or {}
-        id_type = str(proof.get("id_type") or applicant.get("id_type") or "PRC_ID").upper()
-        # 无号码时保持空，避免用演示假号上生产；由材料视觉识别或客户补充写入
-        id_number = str(proof.get("id_number") or applicant.get("id_number") or "").strip()
+        id_number = str(
+            proof.get("id_number") or applicant.get("id_number") or ""
+        ).strip()
+        id_type = self._normalize_icris_id_type(
+            str(proof.get("id_type") or applicant.get("id_type") or ""),
+            id_number,
+        )
 
+        # ICRIS s04 常见文案：香港身分證號碼 / 中華人民共和國身分證號碼 / 護照
         type_labels = {
-            "HKID": r"香港身分證|香港身份証|香港身份证",
-            "PRC_ID": r"中華人民共和國身分證|中华人民共和国身份证|中國身分證|中国身份证",
-            "PASSPORT": r"護照號碼|护照号码|護照|护照",
+            "HKID": (
+                r"香港身分證號碼|香港身份证号码|香港身分證|香港身份証|香港身份证"
+            ),
+            "PRC_ID": (
+                r"中華人民共和國身分證號碼|中华人民共和国身份证号码|"
+                r"中華人民共和國身分證|中华人民共和国身份证|"
+                r"中國身分證|中国身份证"
+            ),
+            "PASSPORT": r"護照號碼|护照号码|^護照$|^护照$|護照|护照",
         }
         id_type_pat = type_labels.get(id_type, type_labels["PRC_ID"])
         if proof.get("id_type_label"):
@@ -3532,12 +3885,172 @@ class IcrisRegistrationBot:
                     return True
         return False
 
+    async def _select_identity_id_type_radio(
+        self,
+        page: "Page",
+        id_type: str,
+        id_type_pat: str,
+    ) -> bool:
+        """s04 勾选身份证明类型：香港身分證 / 中華人民共和國身分證 / 護照。"""
+        preferred: dict[str, tuple[str, ...]] = {
+            "HKID": (
+                "香港身分證號碼",
+                "香港身份证号码",
+                "香港身分證",
+                "香港身份证",
+            ),
+            "PRC_ID": (
+                "中華人民共和國身分證號碼",
+                "中华人民共和国身份证号码",
+                "中華人民共和國身分證",
+                "中华人民共和国身份证",
+            ),
+            "PASSPORT": (
+                "護照號碼",
+                "护照号码",
+                "護照",
+                "护照",
+            ),
+        }
+        labels = preferred.get(id_type, preferred["PRC_ID"])
+
+        # 等待 s04 证件类型 radio 出现（body 未就绪时勿 evaluate）
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return false;
+                    const t = root.innerText || '';
+                    if (!/身分證明|身份证明|香港身分證|中華人民共和國|護照|护照/.test(t))
+                        return false;
+                    return root.querySelectorAll(
+                        "input[type='radio'], .ant-radio-wrapper"
+                    ).length > 0;
+                }""",
+                timeout=20000,
+            )
+        except Exception:
+            logger.debug("等待 s04 证件类型 radio 超时", exc_info=True)
+
+        try:
+            # 1) 安全 JS：按完整标签点选
+            ok = await page.evaluate(
+                """([labels, idType]) => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return false;
+                    const labs = labels || [];
+                    const wrappers = [...root.querySelectorAll(
+                        '.ant-radio-wrapper, label.ant-radio-wrapper, label'
+                    )];
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                    for (const lab of labs) {
+                        for (const w of wrappers) {
+                            const t = norm(w.innerText || '');
+                            if (!t || t.length > 80) continue;
+                            if (!t.includes(lab)) continue;
+                            if (idType === 'PASSPORT' && /身分證|身份证/.test(t)) continue;
+                            if (idType === 'HKID' && /中華|中华|人民/.test(t)) continue;
+                            if (idType === 'PRC_ID' && /香港/.test(t)) continue;
+                            w.scrollIntoView({ block: 'center' });
+                            const inner = w.querySelector(
+                                '.ant-radio, .ant-radio-input, span.ant-radio'
+                            );
+                            if (inner) inner.click();
+                            w.click();
+                            const inp = w.querySelector('input[type=radio]');
+                            if (inp) {
+                                inp.checked = true;
+                                inp.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                            if (
+                                w.classList.contains('ant-radio-wrapper-checked')
+                                || (inp && inp.checked)
+                                || !!w.querySelector('.ant-radio-checked')
+                            ) {
+                                return lab;
+                            }
+                        }
+                    }
+                    return '';
+                }""",
+                [list(labels), id_type],
+            )
+            if ok:
+                logger.info("已勾选身份证明类型: %s (%s)", id_type, ok)
+                await page.wait_for_timeout(400)
+                return True
+        except Exception as exc:
+            logger.warning("s04 证件类型 JS 选择失败: %s", exc)
+
+        # 2) Playwright 精确文案
+        try:
+            for lab in labels:
+                wrappers = page.locator(".ant-radio-wrapper, label.ant-radio-wrapper").filter(
+                    has_text=lab
+                )
+                for i in range(await wrappers.count()):
+                    item = wrappers.nth(i)
+                    try:
+                        if not await item.is_visible():
+                            continue
+                        txt = (await item.inner_text()).strip().replace("\n", " ")
+                    except Exception:
+                        continue
+                    if len(txt) > 80:
+                        continue
+                    if id_type == "PASSPORT" and ("身分證" in txt or "身份证" in txt):
+                        continue
+                    if id_type == "HKID" and (
+                        "中華" in txt or "中华" in txt or "人民" in txt
+                    ):
+                        continue
+                    if id_type == "PRC_ID" and ("香港" in txt):
+                        continue
+                    try:
+                        await item.scroll_into_view_if_needed()
+                        await item.click(timeout=3000)
+                        await page.wait_for_timeout(400)
+                        logger.info("已勾选身份证明类型: %s (%s)", id_type, lab)
+                        return True
+                    except Exception as exc:
+                        logger.debug("身份证明类型点击失败 %s: %s", lab, exc)
+                        try:
+                            inp = item.locator("input[type='radio']").first
+                            if await inp.count() > 0:
+                                await inp.check(force=True)
+                                await page.wait_for_timeout(300)
+                                logger.info(
+                                    "已 force 勾选身份证明类型: %s (%s)", id_type, lab
+                                )
+                                return True
+                        except Exception:
+                            pass
+        except Exception as exc:
+            logger.warning("s04 证件类型 Playwright 选择失败: %s", exc)
+
+        # 3) 正则回退（内部已 null-safe）
+        try:
+            if await self._click_radio_by_text(page, id_type_pat):
+                logger.info("已按正则勾选身份证明类型: %s", id_type)
+                return True
+        except Exception as exc:
+            logger.warning("s04 证件类型正则选择失败: %s", exc)
+        return False
+
     async def _fill_identity_proof_step(self, page: "Page", data: dict[str, Any]) -> int:
         """填写身份证明（s04）：证件类型 / 号码 / 证明文件提交方式"""
-        if not await self._is_identity_proof_step(page):
-            logger.warning("当前不在身份证明步骤, url=%s", page.url)
+        if self._identity_proof_filled and await self._is_identity_proof_step(page):
+            logger.info("s04 已填写过，跳过重复填写")
             return 0
 
+        if not await self._is_identity_proof_step(page):
+            if not await self._wait_for_identity_proof_step(page, timeout_ms=20000):
+                logger.warning("当前不在身份证明步骤, url=%s", page.url)
+                return 0
+
+        # s04 勿再切语言/URL 重载
         await self._wait_spin_clear(page, timeout_ms=15000)
         proof = self._derive_identity_proof(data)
         logger.info(
@@ -3549,9 +4062,22 @@ class IcrisRegistrationBot:
 
         filled = 0
 
-        if await self._click_radio_by_text(page, proof["id_type_pat"]):
+        try:
+            type_ok = await self._select_identity_id_type_radio(
+                page, proof["id_type"], proof["id_type_pat"]
+            )
+        except Exception as exc:
+            logger.warning("勾选身份证明类型异常 type=%s: %s", proof["id_type"], exc)
+            type_ok = False
+        if type_ok:
             filled += 1
-            await page.wait_for_timeout(400)
+            await page.wait_for_timeout(500)
+        else:
+            logger.warning(
+                "未能勾选身份证明类型 type=%s pat=%s",
+                proof["id_type"],
+                proof["id_type_pat"],
+            )
 
         # 选择证件类型后可能出现号码输入框
         id_ok = False
@@ -3607,6 +4133,7 @@ class IcrisRegistrationBot:
 
         logger.info("身份证明已填写 %d 项", filled)
         if filled > 0:
+            self._identity_proof_filled = True
             if await self._click_continue(page):
                 await self._log_page(page, "身份证明继续后")
             else:
@@ -3897,7 +4424,7 @@ class IcrisRegistrationBot:
                 else:
                     logger.warning("条款通过后未进入账户资料页, url=%s", page.url)
 
-                # Step 3: 用户资料（s03）— 填写后自动点继续
+                # Step 3: 用户资料（s03）— 填写后自动点继续进入 s04
                 await self._wait_for_user_info_form(page, timeout_ms=45000)
                 if await self._is_user_info_step(page):
                     logger.info("=== 填写用户资料步骤 ===")
@@ -3905,23 +4432,36 @@ class IcrisRegistrationBot:
                 else:
                     logger.warning("账户资料继续后未进入用户资料页, url=%s", page.url)
 
-                # Step 4: 身份证明（s04）
+                # Step 4: 身份证明（s04）— 等待导航，勿回填 s03 / 切繁重载
                 await self._wait_spin_clear(page, timeout_ms=20000)
+                if not await self._is_identity_proof_step(page):
+                    await self._advance_from_user_info_to_identity(page)
                 if await self._is_identity_proof_step(page):
                     logger.info("=== 填写身份证明步骤 ===")
                     await self._fill_identity_proof_step(page, data)
                 else:
                     logger.info("暂未进入身份证明页, url=%s", page.url)
 
-                # Step 5+: 其余多步表单
+                # Step 5+: 其余多步表单（已填 s03/s04 不再重跑）
                 max_steps = 6
                 for step in range(max_steps):
                     if self._is_home_or_portal(page.url):
                         logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
                         break
                     if await self._is_identity_proof_step(page):
-                        await self._fill_identity_proof_step(page, data)
+                        if self._identity_proof_filled:
+                            if not await self._click_continue(page):
+                                break
+                        else:
+                            await self._fill_identity_proof_step(page, data)
                     elif await self._is_user_info_step(page):
+                        if self._user_info_filled:
+                            logger.info(
+                                "仍在 s03 但已填过，仅尝试进入 s04（不切语言重载）"
+                            )
+                            if not await self._advance_from_user_info_to_identity(page):
+                                break
+                            continue
                         await self._fill_user_info_step(page, data)
                     elif await self._is_account_profile_step(page):
                         await self._fill_user_profile_step(page, data)
