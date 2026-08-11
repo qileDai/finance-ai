@@ -55,7 +55,11 @@ def append_random_username_suffix(username: str, length: int = 2) -> str:
 
 
 def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
-    """从 mock 数据生成 ICRIS 用户名与符合规则的密码（同一次流程用户名保持一致）"""
+    """从 company_data 生成 ICRIS 用户名与符合规则的密码（同一次流程用户名保持一致）。
+
+    若 aggregator 已预生成 icris_account.username + password（yingtai 模式），
+    直接使用，不追加随机后缀、不重新派生密码。
+    """
     session = data.setdefault("_icris_session", {})
     if session.get("username") and session.get("password"):
         return session["username"], session["password"]
@@ -64,6 +68,15 @@ def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
     applicant = data.get("applicant", {})
 
     username = (acct.get("username") or "").strip()
+    password_raw = (acct.get("password") or "").strip()
+
+    # 预生成凭证（yingtai 模式）：username + password 均非空 → 原样使用
+    if username and password_raw:
+        session["username"] = username
+        session["password"] = password_raw
+        return username, password_raw
+
+    # 旧逻辑：邮箱用户名 + 随机后缀 + 姓名派生密码
     if not username:
         email = applicant.get("email", "")
         if "@" in email:
@@ -73,7 +86,7 @@ def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
             username = parts.lower() or "icrisuser"
 
     username = append_random_username_suffix(username, length=2)
-    password = ensure_icris_password(acct.get("password") or data.get("password_hint", ""))
+    password = ensure_icris_password(password_raw or data.get("password_hint", ""))
     session["username"] = username
     session["password"] = password
     return username, password

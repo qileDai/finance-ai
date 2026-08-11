@@ -17,25 +17,33 @@ class MaterialField:
     field_type: str = "text"  # text | file
 
 
-# Phase 2/3 结构化检查项
+# 对客收集字段（单董事兼股东）；秘书/联络默认由配置注入，不对客必填
+# 身份证明正面/反面必填性由 _is_field_required 按 id_type 动态判定
 MATERIAL_FIELDS: list[MaterialField] = [
-    MaterialField("company_name_en", "拟用公司英文名"),
-    MaterialField("company_name_cn", "拟用公司中文名", required=False),
-    MaterialField("registered_office", "公司注册地址（香港）"),
-    MaterialField("contact_email", "公司联络邮箱"),
-    MaterialField("contact_phone", "公司联络电话"),
-    MaterialField("founder_members", "股东/创办成员资料"),
-    MaterialField("directors", "董事资料"),
-    MaterialField("company_secretary", "公司秘书资料"),
-    MaterialField("business_desc", "业务性质描述"),
+    MaterialField("company_name_cn", "公司中文名"),
+    MaterialField("company_name_en", "公司英文名"),
+    MaterialField("registered_capital", "注册资本", required=False),
+    MaterialField("business_desc", "经营范围"),
+    MaterialField("registered_office_cn", "注册地址（中文）"),
+    MaterialField("registered_office_en", "注册地址（英文）"),
+    MaterialField("registered_office", "公司注册地址（香港）", required=False),  # 旧键兼容
+    MaterialField("director_name", "董事兼股东姓名"),
+    MaterialField("directors", "董事资料", required=False),  # 旧键兼容
+    MaterialField("founder_members", "股东/创办成员资料", required=False),  # 旧键兼容
+    MaterialField("id_number", "身份证号码"),
+    MaterialField("director_address_cn", "住址中文"),
+    MaterialField("director_address_en", "住址英文"),
+    MaterialField("contact_email", "邮箱", required=False),
+    MaterialField("contact_phone", "香港联络电话", required=False),
+    MaterialField("company_secretary", "公司秘书资料", required=False),
     MaterialField("br_certificate_years", "商业登记证有效期（1或3年）", required=False),
-    MaterialField("applicant_name", "ICRIS 申请人姓名"),
-    MaterialField("applicant_email", "ICRIS 申请人电邮"),
-    MaterialField("applicant_phone", "ICRIS 申请人电话"),
+    MaterialField("applicant_name", "ICRIS 申请人姓名", required=False),
+    MaterialField("applicant_email", "ICRIS 申请人电邮", required=False),
+    MaterialField("applicant_phone", "ICRIS 申请人电话", required=False),
     MaterialField("id_type", "身份证明类型（HKID/PRC_ID/PASSPORT）", required=False),
-    MaterialField("id_number", "身份证明号码", required=False),
-    MaterialField("id_card_front", "身份证明（正面）", field_type="file"),
-    MaterialField("id_card_back", "身份证明（反面）", field_type="file", required=False),
+    MaterialField("id_card_front", "身份证正面", field_type="file", required=False),
+    MaterialField("id_card_back", "身份证反面", field_type="file", required=False),
+    MaterialField("id_card_handheld", "手持身份证明照片", field_type="file", required=False),
     MaterialField("address_proof", "地址证明", field_type="file", required=False),
     MaterialField("passport", "护照复印件", field_type="file", required=False),
 ]
@@ -105,8 +113,62 @@ def _mask_phone(s: str) -> str:
     return digits[:3] + "****" + digits[-2:]
 
 
+def _field_value(materials: dict[str, dict[str, Any]], key: str) -> str:
+    """从 materials 行 dict 中取字段值（优化 11 辅助）。"""
+    row = materials.get(key) or {}
+    return str(row.get("field_value") or "").strip()
+
+
+def _effective_text(materials: dict[str, dict[str, Any]], key: str) -> str:
+    """解析字段有效值（含旧键兼容）。"""
+    if key == "director_name":
+        return (
+            _field_value(materials, "director_name")
+            or _field_value(materials, "directors")
+            or _field_value(materials, "founder_members")
+        )
+    if key == "registered_office_cn":
+        return _field_value(materials, "registered_office_cn") or _field_value(
+            materials, "registered_office"
+        )
+    if key == "registered_office_en":
+        return _field_value(materials, "registered_office_en")
+    return _field_value(materials, key)
+
+
+def _row_has_value(materials: dict[str, dict[str, Any]], field: MaterialField) -> bool:
+    row = materials.get(field.key) or {}
+    if field.field_type == "file":
+        return bool(row.get("file_path") or row.get("field_value"))
+    if field.key in ("director_name", "registered_office_cn", "registered_office_en"):
+        return bool(_effective_text(materials, field.key))
+    return bool(row.get("field_value") or row.get("file_path"))
+
+
+def _is_field_required(field: MaterialField, materials: dict[str, dict[str, Any]]) -> bool:
+    """动态判定字段是否必填。
+
+    身份证明（本期）：
+      - 内地/香港身份证（含未提供类型，默认按身份证）：正面 + 反面必收；
+      - 手持照可选；
+      - 护照：仅护照页。
+    """
+    id_type = _field_value(materials, "id_type").upper()
+    if field.key in ("id_card_front", "id_card_back"):
+        return id_type in ("", "PRC_ID", "HKID")
+    if field.key == "id_card_handheld":
+        return False
+    if field.key == "passport":
+        return id_type == "PASSPORT"
+    return field.required
+
+
 def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """根据 group_materials 计算进度。needs_review 不计入齐全。"""
+    """根据 group_materials 计算进度。
+
+    needs_review 有值时不进 missing_labels（对客「还需要」仅未收项），
+    也不计入 complete；确认仍由 is_ready_for_confirm 拦截待复核。
+    """
     received = 0
     received_labels: list[str] = []
     received_details: list[dict[str, str]] = []
@@ -114,16 +176,44 @@ def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
     needs_review: list[str] = []
     needs_review_details: list[dict[str, str]] = []
     for f in MATERIAL_FIELDS:
+        # 旧键/内部字段不出现在对客进度明细（仍可入库）
+        if f.key in (
+            "registered_office",
+            "directors",
+            "founder_members",
+            "company_secretary",
+            "applicant_name",
+            "applicant_email",
+            "applicant_phone",
+            "id_card_handheld",
+        ):
+            if not _is_field_required(f, materials):
+                continue
         row = materials.get(f.key) or {}
         status = row.get("status", "missing")
-        has_value = bool(row.get("field_value") or row.get("file_path"))
+        # 兼容：director_name 等可能落在旧键上
+        has_value = _row_has_value(materials, f)
+        if f.key == "director_name" and has_value and not (row.get("field_value") or "").strip():
+            # 值在 directors/founder_members：按已收展示
+            status = "received"
+            for alt in ("directors", "founder_members"):
+                alt_row = materials.get(alt) or {}
+                if alt_row.get("status") in ("received", "confirmed", "needs_review"):
+                    status = alt_row.get("status") or status
+                    break
+        if f.key == "registered_office_cn" and has_value and not (
+            (materials.get("registered_office_cn") or {}).get("field_value") or ""
+        ).strip():
+            status = str(
+                (materials.get("registered_office") or {}).get("status") or "received"
+            )
         if status in ("received", "confirmed") and has_value:
             received += 1
             received_labels.append(f.label)
             if f.field_type == "file":
                 preview = "已上传"
             else:
-                preview = str(row.get("field_value") or "").strip()
+                preview = _effective_text(materials, f.key)
             received_details.append(
                 {"key": f.key, "label": f.label, "value_preview": preview}
             )
@@ -132,15 +222,14 @@ def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
             if f.field_type == "file":
                 preview = "已上传（待复核）"
             else:
-                preview = str(row.get("field_value") or "").strip()
+                preview = _effective_text(materials, f.key)
             needs_review_details.append(
                 {"key": f.key, "label": f.label, "value_preview": preview}
             )
-            if f.required:
-                missing.append(f"{f.label}（待复核）")
-        elif f.required:
+            # 待复核单独列出；不进 missing，避免对客「还需要：…（待复核）」
+        elif _is_field_required(f, materials):
             missing.append(f.label)
-    total_required = len(REQUIRED_FIELD_KEYS)
+    total_required = sum(1 for f in MATERIAL_FIELDS if _is_field_required(f, materials))
     return {
         "received": received,
         "total": len(MATERIAL_FIELDS),
@@ -150,15 +239,9 @@ def progress_summary(materials: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "missing_labels": missing,
         "needs_review_labels": needs_review,
         "needs_review_details": needs_review_details,
-        "complete": len(missing) == 0,
+        "complete": len(missing) == 0 and len(needs_review) == 0,
         "cross_field_issues": validate_cross_fields(materials),
     }
-
-
-def _field_value(materials: dict[str, dict[str, Any]], key: str) -> str:
-    """从 materials 行 dict 中取字段值（优化 11 辅助）。"""
-    row = materials.get(key) or {}
-    return str(row.get("field_value") or "").strip()
 
 
 def validate_cross_fields(
@@ -244,25 +327,42 @@ def validate_cross_fields(
             "message": "商业登记证年限应为 1 年或 3 年",
         })
 
+    # 规则 5（error）：证件识别与填写的姓名/号码不一致
+    verify = _field_value(materials, "id_verify_status").lower()
+    if verify == "mismatch":
+        detail = _field_value(materials, "id_verify_detail") or "证件识别信息与所填姓名/号码不一致"
+        issues.append({
+            "level": "error",
+            "field": "id_number",
+            "message": detail,
+        })
+
     return issues
 
 
 # === 优化 12：智能缺失材料提醒 ===
-# 必填字段优先级（数字越小越优先提醒）
+# 必填字段优先级（数字越小越优先提醒）；按收窄后的必填集排序。
 FIELD_PRIORITY: dict[str, int] = {
-    "company_name_en": 1,
-    "registered_office": 2,
-    "directors": 3,
-    "contact_email": 4,
-    "founder_members": 5,
-    "company_secretary": 6,
-    "applicant_name": 7,
-    "applicant_email": 8,
-    "applicant_phone": 9,
-    "contact_phone": 10,
-    "business_desc": 11,
+    "company_name_cn": 1,
+    "company_name_en": 2,
+    "registered_office_cn": 3,
+    "registered_office_en": 4,
+    "director_name": 5,
+    "id_number": 6,
+    "director_address_cn": 7,
+    "director_address_en": 8,
+    "business_desc": 9,
+    "registered_capital": 10,
+    "id_card_front": 11,
+    "id_card_back": 12,
+    "passport": 13,
 }
-CRITICAL_FIELD_KEYS = {"company_name_en", "registered_office", "directors"}
+CRITICAL_FIELD_KEYS = {
+    "company_name_en",
+    "company_name_cn",
+    "registered_office_cn",
+    "director_name",
+}
 
 
 def prioritized_missing(
@@ -274,12 +374,18 @@ def prioritized_missing(
     """
     missing: list[tuple[int, str, str, bool]] = []
     for f in MATERIAL_FIELDS:
-        if not f.required:
+        if not _is_field_required(f, materials):
             continue
         row = materials.get(f.key) or {}
         status = row.get("status", "missing")
-        has_value = bool(row.get("field_value") or row.get("file_path"))
+        has_value = _row_has_value(materials, f)
         if status in ("received", "confirmed") and has_value:
+            continue
+        if status == "needs_review" and has_value:
+            # 已收待复核：不进「尚未收到」提醒（与 progress_summary 一致）
+            continue
+        if has_value and f.key in ("director_name", "registered_office_cn"):
+            # 旧键已填则不算缺失
             continue
         priority = FIELD_PRIORITY.get(f.key, 99)
         critical = f.key in CRITICAL_FIELD_KEYS

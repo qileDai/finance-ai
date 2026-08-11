@@ -167,7 +167,12 @@ def _handle_session_detail(
     if not group:
         return _err("session not found", 404)
     materials = store.get_materials(roomid)
-    material_items = list(materials.values())
+    material_items = []
+    for row in materials.values():
+        item = dict(row)
+        fv = str(item.get("field_value") or "")
+        item["value_text"] = fv
+        material_items.append(item)
     material_items.sort(key=lambda x: str(x.get("field_key") or ""))
     out = dict(group)
     out["label"] = _session_label(group)

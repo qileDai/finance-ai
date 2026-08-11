@@ -35,6 +35,7 @@ export type SessionDetailResponse = ApiOk<{
 export type MaterialRow = {
   field_key?: string;
   status?: string;
+  field_value?: string;
   value_text?: string;
   file_path?: string;
   updated_at?: string;

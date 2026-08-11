@@ -10,10 +10,16 @@ from dataclasses import dataclass, field
 from config.settings import settings
 from src.llm.openai_client import LLMClient
 from src.materials.checklist import FILE_FIELD_KEYS
+from src.materials.id_document_ocr import enrich_number_from_ocr
 from src.materials.id_document_vision import (
     ID_TYPE_LABELS,
+    ID_TYPE_UNKNOWN,
+    IdDocumentResult,
+    id_numbers_match,
     is_image_bytes,
+    names_match,
     recognize_id_document,
+    validate_id_number,
 )
 from src.storage.db import ExternalGroupStore
 from src.storage.file_store import save_bytes
@@ -26,13 +32,18 @@ REJECTED_BLUR = "rejected_blur"
 DUPLICATE_FILE = "duplicate"
 
 CLASSIFY_RULES: list[tuple[str, str]] = [
+    (r"手持|hand.?held", "id_card_handheld"),
+    (r"背面|back|反面", "id_card_back"),  # 须在「身份证」通用规则前
+    (r"正面|front", "id_card_front"),
     (r"身份证|id.?card|hkid", "id_card_front"),
     (r"护照|passport", "passport"),
     (r"地址|address|水电|账单", "address_proof"),
-    (r"背面|back|反面", "id_card_back"),
 ]
 
-# 视觉调用失败（非「模型判定非证件」）时仍按文件名落盘，避免接口故障丢材料
+_ID_FILE_KEYS = frozenset(
+    {"id_card_front", "id_card_back", "id_card_handheld", "passport"}
+)
+
 _VISION_HARD_ERRORS = frozenset({
     "vision_disabled",
     "no_api_key",
@@ -41,10 +52,7 @@ _VISION_HARD_ERRORS = frozenset({
 
 
 def _check_image_quality(data: bytes) -> tuple[bool, float]:
-    """图片清晰度预检（优化 8）：Laplacian 方差法。
-
-    返回 (is_acceptable, variance)；cv2 不可用时安全降级返回 (True, -1.0)。
-    """
+    """图片清晰度预检：Laplacian 方差法。"""
     try:
         import cv2
         import numpy as np
@@ -64,10 +72,18 @@ def _check_image_quality(data: bytes) -> tuple[bool, float]:
         return True, -1.0
 
 
+def _min_conf() -> float:
+    return float(getattr(settings, "materials_id_min_confidence", 0.55) or 0.55)
+
+
 @dataclass
 class MaterialHandler:
     store: ExternalGroupStore = field(default_factory=ExternalGroupStore)
     llm: LLMClient = field(default_factory=LLMClient)
+
+    def __post_init__(self) -> None:
+        self._last_upload_reject_reason = ""
+        self._last_id_verify_msg = ""
 
     def classify_by_filename(self, filename: str) -> str:
         name = filename.lower()
@@ -139,6 +155,327 @@ class MaterialHandler:
         logger.info("群 %s 文件已入库 field=%s path=%s", roomid, field_key, dest)
         return field_key
 
+    def _apply_ocr_fallback(self, vision: IdDocumentResult, data: bytes) -> IdDocumentResult:
+        if vision.id_number and validate_id_number(vision.id_type, vision.id_number):
+            return vision
+        itype, inum = enrich_number_from_ocr(
+            image_bytes=data,
+            id_type=vision.id_type,
+            id_number=vision.id_number,
+        )
+        if inum:
+            vision.id_number = inum
+            if itype and itype != ID_TYPE_UNKNOWN:
+                vision.id_type = itype
+            if vision.id_type != ID_TYPE_UNKNOWN and validate_id_number(
+                vision.id_type, vision.id_number
+            ):
+                if vision.confidence >= _min_conf() or vision.side == "back":
+                    vision.ok = True
+                    if vision.error in ("number_invalid", "unreliable", "low_confidence"):
+                        vision.error = ""
+        return vision
+
+    def _check_consistency(
+        self,
+        roomid: str,
+        vision: IdDocumentResult,
+        *,
+        field_key: str,
+    ) -> tuple[str, str]:
+        """与已填姓名/号码比对。返回 (status, verify_msg)。"""
+        self._last_id_verify_msg = ""
+        if not getattr(settings, "materials_id_name_match", True):
+            return "received", ""
+
+        materials = self.store.get_materials(roomid)
+        submitted_name = str(
+            (materials.get("director_name") or {}).get("field_value")
+            or (materials.get("directors") or {}).get("field_value")
+            or ""
+        ).strip()
+        submitted_num = str(
+            (materials.get("id_number") or {}).get("field_value") or ""
+        ).strip()
+
+        problems: list[str] = []
+        if vision.full_name and submitted_name and field_key != "id_card_back":
+            if not names_match(vision.full_name, submitted_name):
+                problems.append(
+                    f"证件姓名「{vision.full_name}」与所填「{submitted_name}」不一致"
+                )
+        if vision.id_number and submitted_num:
+            itype = vision.id_type if vision.id_type != ID_TYPE_UNKNOWN else str(
+                (materials.get("id_type") or {}).get("field_value") or ""
+            )
+            if not id_numbers_match(itype, vision.id_number, submitted_num):
+                problems.append(
+                    f"证件号码与所填号码不一致（识别 {vision.id_number}）"
+                )
+
+        if problems:
+            detail = "；".join(problems)
+            self.store.upsert_material(
+                roomid,
+                "id_verify_status",
+                field_value="mismatch",
+                file_path="",
+                source="id_verify",
+                status="needs_review",
+            )
+            self.store.upsert_material(
+                roomid,
+                "id_verify_detail",
+                field_value=detail,
+                file_path="",
+                source="id_verify",
+                status="needs_review",
+            )
+            self._last_id_verify_msg = detail
+            return "needs_review", detail
+
+        prev = str((materials.get("id_verify_status") or {}).get("field_value") or "")
+        if prev == "mismatch" and (vision.id_number or vision.full_name):
+            if (not submitted_num or vision.id_number) and (
+                not submitted_name or vision.full_name or field_key == "id_card_back"
+            ):
+                self.store.upsert_material(
+                    roomid,
+                    "id_verify_status",
+                    field_value="matched",
+                    file_path="",
+                    source="id_verify",
+                    status="received",
+                )
+                self.store.upsert_material(
+                    roomid,
+                    "id_verify_detail",
+                    field_value="",
+                    file_path="",
+                    source="id_verify",
+                    status="received",
+                )
+        return "received", ""
+
+    def _upsert_vision_fields(
+        self,
+        roomid: str,
+        vision: IdDocumentResult,
+        *,
+        status: str,
+        field_key: str,
+    ) -> None:
+        if vision.id_type != ID_TYPE_UNKNOWN:
+            self.store.upsert_material(
+                roomid,
+                "id_type",
+                field_value=vision.id_type,
+                file_path="",
+                source="id_vision",
+                status=status if status == "received" else "needs_review",
+            )
+        if vision.id_number and vision.id_type != ID_TYPE_UNKNOWN and validate_id_number(
+            vision.id_type, vision.id_number
+        ):
+            materials = self.store.get_materials(roomid)
+            existing_num = str(
+                (materials.get("id_number") or {}).get("field_value") or ""
+            ).strip()
+            if not existing_num or id_numbers_match(
+                vision.id_type, existing_num, vision.id_number
+            ):
+                self.store.upsert_material(
+                    roomid,
+                    "id_number",
+                    field_value=vision.id_number,
+                    file_path="",
+                    source="id_vision",
+                    status="received",
+                )
+        if vision.full_name and field_key != "id_card_back":
+            materials = self.store.get_materials(roomid)
+            existing_name = str(
+                (materials.get("director_name") or {}).get("field_value")
+                or (materials.get("directors") or {}).get("field_value")
+                or ""
+            ).strip()
+            if not existing_name:
+                self.store.upsert_material(
+                    roomid,
+                    "director_name",
+                    field_value=vision.full_name,
+                    file_path="",
+                    source="id_vision",
+                    status="received",
+                )
+
+    def _id_slot_state(self, roomid: str) -> tuple[bool, bool]:
+        """返回 (已有正面文件, 已有反面文件)。"""
+        materials = self.store.get_materials(roomid)
+        has_front = bool(
+            (materials.get("id_card_front") or {}).get("file_path")
+            or (materials.get("id_card_front") or {}).get("field_value")
+        )
+        has_back = bool(
+            (materials.get("id_card_back") or {}).get("file_path")
+            or (materials.get("id_card_back") or {}).get("field_value")
+        )
+        return has_front, has_back
+
+    def _resolve_id_field_key(
+        self,
+        roomid: str,
+        vision: IdDocumentResult,
+        filename_key: str,
+    ) -> str:
+        """归类文件槽位：已有正面且缺反面时，第二张一律进反面（Vision 常误判 side=front）。"""
+        field_key = vision.file_field_key
+        has_front, has_back = self._id_slot_state(roomid)
+
+        if field_key == "unknown":
+            field_key = (
+                filename_key if filename_key in _ID_FILE_KEYS else "id_card_front"
+            )
+
+        if vision.id_type == "PASSPORT" or field_key == "passport":
+            return "passport"
+
+        if vision.side == "back" or filename_key == "id_card_back":
+            return "id_card_back"
+
+        # 缺反面时第二张优先补反面，避免误判 front 盖写正面导致一直缺反面
+        if has_front and not has_back:
+            return "id_card_back"
+
+        if vision.is_handheld or field_key == "id_card_handheld":
+            return "id_card_handheld"
+        return field_key if field_key in _ID_FILE_KEYS else "id_card_front"
+
+    def _has_usable_id_number(
+        self,
+        roomid: str,
+        vision: IdDocumentResult | None = None,
+    ) -> bool:
+        """Vision/OCR 或库中已有合法证件号码。"""
+        materials = self.store.get_materials(roomid)
+        stored_num = str(
+            (materials.get("id_number") or {}).get("field_value") or ""
+        ).strip()
+        stored_type = str(
+            (materials.get("id_type") or {}).get("field_value") or ""
+        ).strip()
+        stored_st = str((materials.get("id_number") or {}).get("status") or "")
+        if (
+            stored_num
+            and stored_st in ("received", "confirmed")
+            and (
+                not stored_type
+                or stored_type == ID_TYPE_UNKNOWN
+                or validate_id_number(stored_type, stored_num)
+            )
+        ):
+            return True
+        if vision is None:
+            return False
+        itype = vision.id_type if vision.id_type != ID_TYPE_UNKNOWN else stored_type
+        return bool(
+            vision.id_number
+            and itype
+            and itype != ID_TYPE_UNKNOWN
+            and validate_id_number(itype, vision.id_number)
+        )
+
+    def _id_file_status(
+        self,
+        roomid: str,
+        vision: IdDocumentResult,
+        *,
+        field_key: str,
+        c_status: str,
+    ) -> str:
+        """文件槽状态：反面有文件即 received；正面有合法号码且无 mismatch → received。"""
+        if field_key == "id_card_back":
+            return "received"
+        if c_status == "needs_review":
+            return "needs_review"
+        if field_key == "id_card_front":
+            materials = self.store.get_materials(roomid)
+            if str(
+                (materials.get("id_verify_status") or {}).get("field_value") or ""
+            ) == "mismatch":
+                return "needs_review"
+            if self._has_usable_id_number(roomid, vision):
+                return "received"
+            min_c = _min_conf()
+            if vision.confidence < min_c or not vision.ok:
+                return "needs_review"
+            return "received"
+        min_c = _min_conf()
+        if vision.confidence < min_c or not vision.ok:
+            return "needs_review"
+        return "received"
+
+    def _promote_id_front_if_ready(self, roomid: str) -> None:
+        """正面已有文件且号码已收、无 mismatch 时，去掉 needs_review 以免一直提示缺正面。"""
+        materials = self.store.get_materials(roomid)
+        if str((materials.get("id_verify_status") or {}).get("field_value") or "") == "mismatch":
+            return
+        front = materials.get("id_card_front") or {}
+        if str(front.get("status") or "") != "needs_review":
+            return
+        if not (front.get("file_path") or front.get("field_value")):
+            return
+        if not self._has_usable_id_number(roomid):
+            return
+        self.store.upsert_material(
+            roomid,
+            "id_card_front",
+            field_value=str(front.get("field_value") or ""),
+            file_path=str(front.get("file_path") or ""),
+            source=str(front.get("source") or "chat_file"),
+            status="received",
+            file_hash=str(front.get("file_hash") or ""),
+        )
+        id_type_row = materials.get("id_type") or {}
+        if str(id_type_row.get("status") or "") == "needs_review" and id_type_row.get("field_value"):
+            self.store.upsert_material(
+                roomid,
+                "id_type",
+                field_value=str(id_type_row.get("field_value") or ""),
+                file_path="",
+                source=str(id_type_row.get("source") or "id_vision"),
+                status="received",
+            )
+
+    def _persist_as_id_back(
+        self,
+        roomid: str,
+        msgid: str,
+        filename: str,
+        data: bytes,
+        *,
+        folder_label: str,
+        file_hash: str,
+        vision: IdDocumentResult | None = None,
+        status: str = "received",
+    ) -> str:
+        """强制落入身份证反面槽（已有正面时的兜底）。"""
+        if vision is not None:
+            if not vision.side:
+                vision.side = "back"
+            # 反面文件在即可；不因无号码拖成缺项
+            self._upsert_vision_fields(
+                roomid, vision, status=status, field_key="id_card_back",
+            )
+        logger.info("群 %s 证件按反面槽落盘 filename=%s status=%s", roomid, filename, status)
+        key = self._persist_file(
+            roomid, msgid, filename, data, "id_card_back", status,
+            folder_label=folder_label, file_hash=file_hash,
+        )
+        if key == "id_card_back" and status == "received":
+            self._promote_id_front_if_ready(roomid)
+        return key
+
     def save_file_message(
         self,
         roomid: str,
@@ -150,7 +487,8 @@ class MaterialHandler:
     ) -> str:
         """先视觉识别身份证明；非证件不落盘。目录优先公司中文/英文名。"""
         self._last_upload_reject_reason = ""
-        # 先做大小/类型校验，避免大文件进视觉
+        self._last_id_verify_msg = ""
+        self._force_id_back = False
         from src.storage.file_store import validate_upload
 
         try:
@@ -160,19 +498,33 @@ class MaterialHandler:
             logger.warning("上传校验拒绝 room=%s file=%s: %s", roomid, filename, e)
             return REJECTED_UPLOAD
 
-        # 文件哈希去重（优化 7）
         file_hash = hashlib.sha256(data).hexdigest()
         if getattr(settings, "materials_dedup_enabled", True):
             existing = self.store.find_material_by_hash(roomid, file_hash)
             if existing:
-                logger.info(
-                    "群 %s 重复文件跳过 field=%s hash=%s",
-                    roomid, existing.get("field_key"), file_hash[:12],
+                has_front, has_back = self._id_slot_state(roomid)
+                existing_key = str(existing.get("field_key") or "")
+                # 反面图曾误存正面时，同 hash 再传需放行以补 id_card_back
+                allow_back_fill = (
+                    has_front
+                    and not has_back
+                    and existing_key != "id_card_back"
+                    and is_image_bytes(filename, data)
                 )
-                self._last_upload_reject_reason = "duplicate"
-                return DUPLICATE_FILE
+                if allow_back_fill:
+                    self._force_id_back = True
+                    logger.info(
+                        "群 %s 去重放行补反面 existing=%s hash=%s",
+                        roomid, existing_key, file_hash[:12],
+                    )
+                else:
+                    logger.info(
+                        "群 %s 重复文件跳过 field=%s hash=%s",
+                        roomid, existing_key, file_hash[:12],
+                    )
+                    self._last_upload_reject_reason = "duplicate"
+                    return DUPLICATE_FILE
 
-        # 图片清晰度预检（优化 8）
         if (
             getattr(settings, "materials_image_quality_enabled", True)
             and is_image_bytes(filename, data)
@@ -193,7 +545,6 @@ class MaterialHandler:
         )
         folder_label = self._folder_label(roomid)
 
-        # 地址证明：注册材料，始终保存
         if filename_key == "address_proof":
             return self._persist_file(
                 roomid, msgid, filename, data, "address_proof", "received",
@@ -208,11 +559,27 @@ class MaterialHandler:
 
         if vision_enabled:
             vision = recognize_id_document(data, filename=filename)
+            vision = self._apply_ocr_fallback(vision, data)
+
+            min_c = _min_conf()
+            has_front, has_back = self._id_slot_state(roomid)
+
             is_id = vision.ok or (
-                vision.id_type != "unknown" and vision.confidence >= 0.55
+                vision.id_type != ID_TYPE_UNKNOWN and vision.confidence >= min_c
+            ) or (
+                vision.side == "back" and vision.confidence >= 0.35
+            ) or (
+                # 已有正面、缺反面：第二张证图放宽收录（含误判 side=front）
+                has_front and not has_back
+                and (vision.error or "") not in _VISION_HARD_ERRORS
+                and (
+                    vision.confidence >= 0.2
+                    or vision.id_type != ID_TYPE_UNKNOWN
+                    or bool(vision.id_number)
+                )
             )
+
             hard_err = (vision.error or "") in _VISION_HARD_ERRORS
-            # 接口/系统硬错误：回退按文件名保存，避免丢件
             api_failed = bool(vision.error) and not hard_err and not is_id and (
                 vision.error not in (
                     "unreliable", "low_confidence", "number_invalid", "json_parse", "",
@@ -220,52 +587,56 @@ class MaterialHandler:
             )
 
             if is_id:
-                field_key = filename_key
-                if field_key not in ("id_card_back",) and vision.file_field_key != "unknown":
-                    field_key = vision.file_field_key
-                if field_key == "unknown" or field_key.startswith("file_"):
-                    field_key = vision.file_field_key if vision.file_field_key != "unknown" else "id_card_front"
-                status = "received" if vision.ok else "needs_review"
-                if vision.id_type != "unknown":
-                    self.store.upsert_material(
-                        roomid,
-                        "id_type",
-                        field_value=vision.id_type,
-                        file_path="",
-                        source="id_vision",
-                        status=status,
-                    )
-                if vision.ok and vision.id_number:
-                    self.store.upsert_material(
-                        roomid,
-                        "id_number",
-                        field_value=vision.id_number,
-                        file_path="",
-                        source="id_vision",
-                        status="received",
-                    )
-                elif vision.id_type != "unknown":
-                    self.store.upsert_material(
-                        roomid,
-                        "id_type",
-                        field_value=vision.id_type,
-                        file_path="",
-                        source="id_vision",
-                        status="needs_review",
-                    )
-                logger.info(
-                    "群 %s 证件视觉识别 type=%s ok=%s",
-                    roomid,
-                    vision.id_type,
-                    vision.ok,
+                if getattr(self, "_force_id_back", False):
+                    field_key = "id_card_back"
+                    if not vision.side:
+                        vision.side = "back"
+                else:
+                    field_key = self._resolve_id_field_key(roomid, vision, filename_key)
+                    if field_key == "id_card_back" and not vision.side:
+                        vision.side = "back"
+
+                c_status, _detail = self._check_consistency(
+                    roomid, vision, field_key=field_key,
                 )
-                return self._persist_file(
+                status = self._id_file_status(
+                    roomid, vision, field_key=field_key, c_status=c_status,
+                )
+
+                self._upsert_vision_fields(
+                    roomid, vision, status=status, field_key=field_key,
+                )
+                key = self._persist_file(
                     roomid, msgid, filename, data, field_key, status,
                     folder_label=folder_label, file_hash=file_hash,
                 )
+                if key in ("id_card_front", "id_card_back") and status == "received":
+                    self._promote_id_front_if_ready(roomid)
+                logger.info(
+                    "群 %s 证件识别 type=%s ok=%s side=%s name=%s field=%s status=%s",
+                    roomid,
+                    vision.id_type,
+                    vision.ok,
+                    vision.side,
+                    (vision.full_name or "")[:8],
+                    field_key,
+                    status,
+                )
+                return key
+
+            # 模型判非证件：若缺反面则仍按反面收档，避免用户已传却一直「还需要反面」
+            if (has_front and not has_back and not hard_err) or getattr(
+                self, "_force_id_back", False
+            ):
+                return self._persist_as_id_back(
+                    roomid, msgid, filename, data,
+                    folder_label=folder_label,
+                    file_hash=file_hash,
+                    vision=vision,
+                    status="received",
+                )
 
             if not api_failed and not hard_err:
-                # 模型判定非身份证明：不落盘、不入库
                 logger.info(
                     "群 %s 非身份证明图片，跳过存档 filename=%s err=%s",
                     roomid,
@@ -274,8 +645,14 @@ class MaterialHandler:
                 )
                 return REJECTED_NON_ID
 
-        # 非图片 / 视觉关闭 / 视觉硬错误或 API 失败：按文件名保存
+        # 无视觉：文件名启发；已有正面缺反面时未知图归反面
         field_key = filename_key
+        has_front, has_back = self._id_slot_state(roomid)
+        if getattr(self, "_force_id_back", False):
+            field_key = "id_card_back"
+        elif field_key == "unknown" or field_key == "id_card_front":
+            if has_front and not has_back and is_image_bytes(filename, data):
+                field_key = "id_card_back"
         status = "received" if field_key != "unknown" else "needs_review"
         if field_key == "unknown":
             field_key = f"file_{msgid[:8]}"
@@ -291,12 +668,17 @@ class MaterialHandler:
         *,
         roomid: str = "",
     ) -> str:
-        # 客户可见引导（内部入库仍用 PRC_ID/HKID/PASSPORT）
         supplement_hint = "证件类型=中国身份证|香港身份证|护照 号码=…"
         materials = self.store.get_materials(roomid) if roomid else {}
         id_type = str((materials.get("id_type") or {}).get("field_value") or "").strip().upper()
         id_number = str((materials.get("id_number") or {}).get("field_value") or "").strip()
         id_type_status = str((materials.get("id_type") or {}).get("status") or "")
+        verify_msg = getattr(self, "_last_id_verify_msg", "") or ""
+        if not verify_msg:
+            if str((materials.get("id_verify_status") or {}).get("field_value") or "") == "mismatch":
+                verify_msg = str(
+                    (materials.get("id_verify_detail") or {}).get("field_value") or ""
+                )
 
         if field_key == REJECTED_NON_ID:
             return (
@@ -315,15 +697,32 @@ class MaterialHandler:
                 "请重新拍摄清晰正反面后上传。"
             )
 
-        if id_type in ID_TYPE_LABELS and id_number:
+        side_tag = {
+            "id_card_front": "（正面）",
+            "id_card_back": "（反面）",
+            "id_card_handheld": "（手持照）",
+            "passport": "",
+        }.get(field_key, "")
+
+        if verify_msg:
+            return (
+                f"已收到证件图片「{filename}」{side_tag}，但校验未通过：{verify_msg}。"
+                "请核对后重传证件，或更正文字资料中的姓名/身份证号码。"
+            )
+
+        file_status = str((materials.get(field_key) or {}).get("status") or "")
+        if id_type in ID_TYPE_LABELS and id_number and file_status != "needs_review":
             return (
                 f"已识别为：{ID_TYPE_LABELS[id_type]}，号码：{id_number}"
-                f"（{filename}）"
+                f"{side_tag}（{filename}）"
             )
-        if id_type in ID_TYPE_LABELS and id_type_status == "needs_review":
+        if id_type in ID_TYPE_LABELS and (
+            id_type_status == "needs_review" or file_status == "needs_review"
+        ):
             return (
-                f"已识别证件类型为：{ID_TYPE_LABELS[id_type]}，但未能可靠读取号码"
-                f"（{filename}）。请文字补充：证件类型={ID_TYPE_LABELS[id_type]} 号码=…"
+                f"已归类为：{ID_TYPE_LABELS[id_type]}{side_tag}（{filename}），"
+                "但识别置信不足或信息不完整，已标记待复核。"
+                f"请确认清晰度后重传，或文字补充：{supplement_hint}"
             )
 
         if field_key == "unknown" or field_key.startswith("file_"):
@@ -335,10 +734,11 @@ class MaterialHandler:
         labels = {
             "id_card_front": "身份证明（正面）",
             "id_card_back": "身份证明（反面）",
+            "id_card_handheld": "手持身份证明照",
             "passport": "护照",
             "address_proof": "地址证明",
         }
-        if field_key in ("id_card_front", "id_card_back", "passport"):
+        if field_key in ("id_card_front", "id_card_back", "id_card_handheld", "passport"):
             return (
                 f"已收到并归类为：{labels.get(field_key, field_key)}（{filename}）。"
                 f"未能可靠识别证件类型/号码，请文字补充：{supplement_hint}"

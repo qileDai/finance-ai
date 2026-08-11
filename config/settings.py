@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     wework_agent_mode: str = Field(default="normal", validation_alias="WEWORK_AGENT_MODE")
     # 上传证件图片时是否多模态识别类型（HKID/PRC_ID/PASSPORT）与号码
     wework_id_vision_enabled: bool = True
+    # 视觉进一步判定身份证正反面 + 是否手持拍照（同一调用内，无额外开销）
+    # 关闭则 file_field_key 回退「仅按类型」旧行为（HKID/PRC_ID 恒为 id_card_front）
+    wework_id_vision_side_classify_enabled: bool = True
     # QA 生成前先发「思考中」提示（占客服额度 1 条；默认关闭）
     wework_thinking_ack_enabled: bool = False
     wework_thinking_ack_text: str = "正在为您查询，请稍候…"
@@ -136,6 +139,33 @@ class Settings(BaseSettings):
     materials_proactive_reminder_interval: float = 3600.0  # 最短提醒间隔（秒）
     materials_proactive_reminder_every_n_messages: int = 5  # 每 N 条消息触发检查
     materials_proactive_reminder_max_items: int = 3  # 提醒最多列出几个缺失项
+    # 材料收集默认值（客户未提供时回填；秘书不对客收集）
+    materials_default_contact_email: str = Field(
+        default="13828784214@163.com",
+        validation_alias="MATERIALS_DEFAULT_CONTACT_EMAIL",
+    )
+    materials_default_contact_phone: str = Field(
+        default="52667282",
+        validation_alias="MATERIALS_DEFAULT_CONTACT_PHONE",
+    )
+    materials_default_share_capital: int = Field(
+        default=10000,
+        validation_alias="MATERIALS_DEFAULT_SHARE_CAPITAL",
+    )
+    materials_default_company_secretary: str = Field(
+        default="赢态财务集团安排之持牌秘书",
+        validation_alias="MATERIALS_DEFAULT_COMPANY_SECRETARY",
+    )
+    # 证件识别：OCR 号码兜底 + 姓名/号码与文字材料一致性
+    materials_id_ocr_fallback: bool = Field(
+        default=True, validation_alias="MATERIALS_ID_OCR_FALLBACK"
+    )
+    materials_id_name_match: bool = Field(
+        default=True, validation_alias="MATERIALS_ID_NAME_MATCH"
+    )
+    materials_id_min_confidence: float = Field(
+        default=0.55, validation_alias="MATERIALS_ID_MIN_CONFIDENCE"
+    )
     # 对象存储（可选，未配置则使用 materials_dir 本地存储）
     oss_endpoint: str = ""
     oss_bucket: str = ""
@@ -195,6 +225,12 @@ class Settings(BaseSettings):
     icris_worker_concurrency: int = 1
     # 失败重试退避基数（秒）：delay = base * 2^(attempt-1)
     icris_job_retry_backoff_seconds: float = 30.0
+
+    # ICRIS 账号凭证生成（用户名=Yingtai+时间戳后N位，密码=用户名+后缀）
+    icris_credential_mode: str = "yingtai"  # "yingtai" 新规则 | "legacy" 旧规则
+    icris_username_prefix: str = "Yingtai"  # 用户名前缀
+    icris_username_timestamp_digits: int = 4  # 时间戳取后 N 位
+    icris_password_suffix: str = "@1"  # 密码后缀（拼在用户名后）
 
     # RAG 知识检索（SQLite FTS5 + Qdrant）
     rag_enabled: bool = True

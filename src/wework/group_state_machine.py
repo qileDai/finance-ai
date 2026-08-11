@@ -461,6 +461,7 @@ class GroupStateMachine:
 
         self._maybe_ensure_form_token(roomid)
         self.store.upsert_group(roomid, name=name, owner_userid=owner, status=GROUP_STATUS_INIT)
+        self.ensure_default_material_contacts(roomid)
 
         try:
             welcome_bundle = build_welcome_message(
@@ -484,6 +485,32 @@ class GroupStateMachine:
                 logger.info("群 %s 已自动发送注册资料清单", roomid)
             except Exception as e:
                 logger.warning("群 %s 自动发清单失败: %s", roomid, e)
+
+    def ensure_default_material_contacts(self, roomid: str) -> None:
+        """客户未提供时回填配置中的默认邮箱/香港电话。"""
+        if not roomid:
+            return
+        email = (getattr(settings, "materials_default_contact_email", "") or "").strip()
+        phone = (getattr(settings, "materials_default_contact_phone", "") or "").strip()
+        materials = self.store.get_materials(roomid)
+        if email and not str((materials.get("contact_email") or {}).get("field_value") or "").strip():
+            self.store.upsert_material(
+                roomid,
+                "contact_email",
+                field_value=email,
+                file_path="",
+                source="default",
+                status="received",
+            )
+        if phone and not str((materials.get("contact_phone") or {}).get("field_value") or "").strip():
+            self.store.upsert_material(
+                roomid,
+                "contact_phone",
+                field_value=phone,
+                file_path="",
+                source="default",
+                status="received",
+            )
 
     def _save_agent_run(self, roomid: str, combined: str, result) -> None:
         from config.settings import settings
@@ -643,6 +670,7 @@ class GroupStateMachine:
             status=GROUP_STATUS_INIT,
             open_kfid=kfid,
         )
+        self.ensure_default_material_contacts(roomid)
         try:
             welcome = build_welcome_message(
                 settings.wework_welcome_advisor_phone, channel="kf",
@@ -650,14 +678,15 @@ class GroupStateMachine:
             merge = bool(getattr(settings, "wework_kf_merge_welcome_checklist", True))
             if merge and settings.wework_welcome_auto_checklist:
                 paste_hint = (
-                    "发送 /填表 获取填写模板并粘贴提交；证件请直接上传图片。"
+                    "发送 /填表 获取填写模板并粘贴提交；证件请直接上传身份证正反面。"
                     if not settings.collect_form_enabled
                     else f"也可在线填表：{self._form_url(roomid)}"
                 )
                 welcome = (
                     f"{welcome}\n\n"
-                    "【注册资料】请准备：拟用公司中英文名、香港注册地址、联络邮箱电话、"
-                    "股东/董事/秘书资料、业务描述、身份证明等。"
+                    "【注册资料】请准备：公司中英文名、注册资本、经营范围、"
+                    "香港注册地址（中英文）、董事兼股东姓名与身份证、住址中英文；"
+                    "邮箱与香港电话可不填（系统默认）。公司秘书由我司安排。"
                     f"{paste_hint}"
                     "随时可发 /进度 查询缺项。"
                 )
@@ -1650,6 +1679,7 @@ class GroupStateMachine:
         force_redo: bool = False,
     ) -> None:
         wm = self._resolve_external_userid(roomid, from_id)
+        self.ensure_default_material_contacts(roomid)
         materials = self.store.get_materials(roomid)
         if not is_ready_for_confirm(materials):
             self._safe_send(

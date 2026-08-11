@@ -287,13 +287,19 @@ class LLMClient:
             "你是注册材料信息提取助手。从客户自然语言中提取公司注册相关字段。"
             "可提取字段（仅输出这些 key，无法确定则省略）：\n"
             "company_name_en(公司英文名), company_name_cn(公司中文名), "
-            "registered_office(注册地址), contact_email(联络邮箱), "
-            "contact_phone(联络电话), founder_members(股东资料), "
-            "directors(董事资料), company_secretary(秘书资料), "
-            "business_desc(业务性质), br_certificate_years(商业登记证年限 1或3), "
+            "registered_capital(注册资本), business_desc(经营范围/业务性质), "
+            "registered_office_cn(注册地址中文), registered_office_en(注册地址英文), "
+            "registered_office(注册地址原文，若中英未拆开可整段放入), "
+            "director_name(董事兼股东姓名), directors(董事资料), "
+            "founder_members(股东资料), "
+            "director_address_cn(住址中文), director_address_en(住址英文), "
+            "contact_email(联络邮箱), contact_phone(联络电话), "
+            "company_secretary(秘书资料), br_certificate_years(商业登记证年限 1或3), "
             "applicant_name(申请人姓名), applicant_email(申请人电邮), "
             "applicant_phone(申请人电话), id_type(证件类型 HKID/PRC_ID/PASSPORT), "
             "id_number(证件号码)\n"
+            "重要：若注册地址或住址是中英混贴（一行中文+一行英文），"
+            "必须拆成 *_cn 与 *_en 两个字段，不要只输出整段。\n"
             '输出 JSON: {"field_key": "value", ...}，只包含能确定的字段。'
         )
         user = f"客户消息:\n{text}"
@@ -305,17 +311,62 @@ class LLMClient:
         if not isinstance(data, dict):
             return {}
         valid_keys = {
-            "company_name_en", "company_name_cn", "registered_office",
-            "contact_email", "contact_phone", "founder_members", "directors",
-            "company_secretary", "business_desc", "br_certificate_years",
-            "applicant_name", "applicant_email", "applicant_phone",
-            "id_type", "id_number",
+            "company_name_en",
+            "company_name_cn",
+            "registered_capital",
+            "business_desc",
+            "registered_office",
+            "registered_office_cn",
+            "registered_office_en",
+            "director_name",
+            "directors",
+            "founder_members",
+            "director_address_cn",
+            "director_address_en",
+            "contact_email",
+            "contact_phone",
+            "company_secretary",
+            "br_certificate_years",
+            "applicant_name",
+            "applicant_email",
+            "applicant_phone",
+            "id_type",
+            "id_number",
         }
         result: dict[str, str] = {}
         for k, v in data.items():
             if k in valid_keys and isinstance(v, str) and v.strip():
                 result[k] = v.strip()
         return result
+
+    def split_bilingual_address(self, raw: str) -> dict[str, str]:
+        """将中英混贴地址拆成 cn / en。失败返回空 dict。"""
+        text = (raw or "").strip()
+        if not text:
+            return {}
+        system = (
+            "你是地址拆分助手。客户可能把中文地址与英文地址写在同一段（可能多行）。"
+            "请拆成纯中文地址与纯英文地址。"
+            '只输出 JSON：{"cn":"...","en":"..."}。'
+            "不要翻译补全；原文没有的一侧输出空字符串。"
+            "不要输出其它键或解释。"
+        )
+        user = f"地址原文:\n{text}"
+        try:
+            data = self.chat_json(system, user, temperature=0.0)
+        except Exception as e:
+            logger.warning("双语地址拆分失败: %s", e)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        cn = str(data.get("cn") or "").strip()
+        en = str(data.get("en") or "").strip()
+        out: dict[str, str] = {}
+        if cn:
+            out["cn"] = cn
+        if en:
+            out["en"] = en
+        return out
 
     def answer_material_question(self, question: str, context: str = "") -> str:
         system = (

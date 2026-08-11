@@ -31,8 +31,18 @@ def sanitize_folder_name(name: str) -> str:
 
 def collect_materials_from_dict(data: dict[str, Any]) -> dict[str, Any]:
     """验证并整理材料字段"""
-    required = ["company_name_en", "directors", "founder_members", "company_secretary"]
-    missing = [k for k in required if k not in data or not data[k]]
+    required = ["company_name_en", "company_name_cn", "directors", "founder_members"]
+    # directors/founder 可用 name 列表或旧结构
+    missing = []
+    for k in required:
+        if k in ("directors", "founder_members"):
+            if not data.get(k):
+                missing.append(k)
+        elif k not in data or not data[k]:
+            missing.append(k)
+    if not data.get("company_secretary"):
+        # 秘书可由配置默认，不阻塞打包校验
+        pass
     return {"data": data, "missing": missing, "complete": len(missing) == 0}
 
 

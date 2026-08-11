@@ -167,7 +167,7 @@ export function SessionDetailPage({ refreshKey }: { refreshKey: number }) {
                       <td>
                         <span className={statusBadge(m.status)}>{m.status || "-"}</span>
                       </td>
-                      <td>{String(m.value_text || "").slice(0, 80)}</td>
+                      <td>{String(m.value_text || m.field_value || "").slice(0, 80)}</td>
                       <td className="mono muted">
                         {String(m.file_path || "").slice(0, 40)}
                       </td>

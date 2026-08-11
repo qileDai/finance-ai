@@ -56,6 +56,7 @@ class ParseResult:
 def _normalize_key(key: str) -> str:
     key = (key or "").strip().lstrip("#").strip()
     key = re.sub(r"[\s　]+", "", key)
+    key = re.sub(r"^\d+[、.．\)）]\s*", "", key)
     return FIELD_ALIASES.get(key, key)
 
 
