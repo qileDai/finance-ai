@@ -79,6 +79,19 @@ export type LowRun = {
   created_at?: string;
 };
 
+export type RunnerFile = { name: string; data_url: string };
+
+export type RunnerStatus = {
+  status: "idle" | "running" | "succeeded" | "failed";
+  started_at?: string;
+  finished_at?: string;
+  messages?: string[];
+  error?: string;
+  company_name?: string;
+  case_id?: string;
+  dry_run?: boolean;
+};
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -154,4 +167,19 @@ export const api = {
     ),
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
+  registerRunner: {
+    submit: (
+      fields: Record<string, string>,
+      files: Record<string, RunnerFile>
+    ) =>
+      request<ApiOk<{ case_id: string; company_name: string }>>(
+        "/admin/api/register-runner/submit",
+        {
+          method: "POST",
+          body: JSON.stringify({ fields, files }),
+        }
+      ),
+    status: () =>
+      request<ApiOk<RunnerStatus>>("/admin/api/register-runner/status"),
+  },
 };

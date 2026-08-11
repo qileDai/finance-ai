@@ -231,6 +231,8 @@ class Settings(BaseSettings):
     icris_username_prefix: str = "Yingtai"  # 用户名前缀
     icris_username_timestamp_digits: int = 4  # 时间戳取后 N 位
     icris_password_suffix: str = "@1"  # 密码后缀（拼在用户名后）
+    # ICRIS 注册是否跳过「電子查冊」+「主要账户」选择（默认跳过；False 回退旧行为）
+    icris_skip_esearch_principal: bool = True
 
     # RAG 知识检索（SQLite FTS5 + Qdrant）
     rag_enabled: bool = True

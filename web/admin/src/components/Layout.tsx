@@ -5,6 +5,7 @@ import { useAuth } from "../auth";
 const TITLES: Record<string, string> = {
   "/": "概览",
   "/sessions": "会话材料",
+  "/register": "快速注册",
   "/jobs": "注册任务",
   "/quality": "回答质量",
 };
@@ -45,6 +46,7 @@ export function Layout({ onRefresh, toast }: Props) {
             概览
           </NavLink>
           <NavLink to="/sessions">会话材料</NavLink>
+          <NavLink to="/register">快速注册</NavLink>
           <NavLink to="/jobs">注册任务</NavLink>
           <NavLink to="/quality">回答质量</NavLink>
         </nav>

@@ -65,11 +65,11 @@ class AdminWebServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _read_body(self) -> bytes:
+            def _read_body(self, *, max_bytes: int = 1_000_000) -> bytes:
                 length = int(self.headers.get("Content-Length", 0) or 0)
                 if length <= 0:
                     return b""
-                return self.rfile.read(min(length, 1_000_000))
+                return self.rfile.read(min(length, max_bytes))
 
             def _api_rel(self, path: str) -> str:
                 parsed = urlparse(path)
@@ -182,11 +182,22 @@ class AdminWebServer:
                         return self._send_json({"ok": False, "error": "not found"}, 404)
                     if not self._require_session():
                         return
+                    # register-runner/submit 允许大 body（含证件 base64，上限 30MB）
+                    body: dict | None = None
+                    if rel == "register-runner/submit":
+                        raw = self._read_body(max_bytes=30_000_000)
+                        try:
+                            body = json.loads(raw.decode("utf-8")) if raw else None
+                        except Exception:
+                            return self._send_json(
+                                {"ok": False, "error": "invalid json body"}, 400
+                            )
                     result = handle_admin_api(
                         method="POST",
                         path=self.path,
                         store=store,
                         icris_worker=None,
+                        body=body,
                     )
                     if result is None:
                         return self._send_json({"ok": False, "error": "not found"}, 404)

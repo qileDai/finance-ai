@@ -6,6 +6,7 @@ import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { QualityPage } from "./pages/QualityPage";
+import { RegisterPage } from "./pages/RegisterPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
 
 export default function App() {
@@ -51,6 +52,10 @@ export default function App() {
                   onRefresh={onRefresh}
                 />
               }
+            />
+            <Route
+              path="register"
+              element={<RegisterPage onToast={onToast} />}
             />
             <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />
             <Route path="groups" element={<Navigate to="/sessions" replace />} />

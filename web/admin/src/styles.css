@@ -469,6 +469,155 @@ table.data tr.clickable:hover td {
   font-size: 0.78rem;
 }
 
+/* 快速注册页 */
+.register-page { padding: 0; }
+.reg-paste-card {
+  margin-bottom: 16px;
+}
+.reg-paste-card .muted {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.reg-paste-area {
+  width: 100%;
+  min-height: 220px;
+  box-sizing: border-box;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  resize: vertical;
+  background: #fafafa;
+}
+.reg-paste-area:focus {
+  outline: none;
+  border-color: var(--accent, #1677ff);
+  background: #fff;
+}
+.reg-paste-area:disabled {
+  background: #f0f0f0;
+  color: #999;
+}
+.reg-paste-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border, #ddd);
+  color: #666;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: #999;
+  color: #333;
+}
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.reg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.reg-card {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e8e8e8);
+  border-radius: 8px;
+  padding: 14px 18px;
+}
+.reg-card h2 {
+  margin: 6px 0 12px;
+  font-size: 1rem;
+}
+.reg-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+}
+.reg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+.reg-field > span em {
+  color: var(--danger, #d33);
+  font-style: normal;
+  margin-left: 2px;
+}
+.reg-field input[type="text"],
+.reg-field select {
+  padding: 7px 9px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  font-size: 0.88rem;
+}
+.reg-field input[type="file"] {
+  font-size: 0.78rem;
+}
+.reg-field input:disabled,
+.reg-field select:disabled {
+  background: #f5f5f5;
+}
+.reg-actions {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.reg-status-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.reg-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 0.78rem;
+  color: #888;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+.reg-log {
+  margin-top: 8px;
+  max-height: 380px;
+  overflow: auto;
+  background: #f7f7f8;
+  border: 1px solid var(--border, #eee);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+.reg-log-line {
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+@media (max-width: 960px) {
+  .reg-grid {
+    grid-template-columns: 1fr;
+  }
+  .reg-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 960px) {
   .app-shell {
     grid-template-columns: 1fr;

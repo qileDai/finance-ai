@@ -36,6 +36,7 @@ def handle_admin_api(
     path: str,
     store: ExternalGroupStore,
     icris_worker: Any = None,
+    body: dict | None = None,
 ) -> tuple[dict[str, Any], int] | None:
     """处理 /admin/api/*。非 API 路径返回 None。"""
     parsed = urlparse(path or "")
@@ -79,11 +80,30 @@ def handle_admin_api(
             except ValueError:
                 hours = 24.0
             return _handle_quality(store, hours=hours)
+        if method == "GET" and rel == "register-runner/status":
+            from src.web.admin_runner import status as runner_status
+
+            return _ok(**runner_status())
+        if method == "POST" and rel == "register-runner/submit":
+            return _handle_runner_submit(body)
     except Exception as e:
         logger.exception("admin api error: %s", e)
         return _err(str(e) or "internal error", 500)
 
     return _err("not found", 404)
+
+
+def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:
+    """快速注册：表单字段 + 证件文件(data_url) → 后台跑 step_icris_register。"""
+    from src.web.admin_runner import submit as runner_submit
+
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+    fields = body.get("fields") or {}
+    files = body.get("files") or {}
+    if not isinstance(fields, dict) or not isinstance(files, dict):
+        return _err("fields/files must be objects", 400)
+    return runner_submit(fields, files)
 
 
 def _parse_job_id(rel: str, *, suffix: str) -> int | None:

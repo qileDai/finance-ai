@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,29 @@ from src.materials.checklist import MATERIAL_FIELDS, FILE_FIELD_KEYS, progress_s
 def _get_val(materials: dict[str, dict[str, Any]], key: str, default: str = "") -> str:
     row = materials.get(key) or {}
     return str(row.get("field_value") or default).strip()
+
+
+def _split_cjk_latin_name(name: str) -> tuple[str, str]:
+    """姓名 → (中文部分, 英文部分)。
+
+    纯中文→(name,"")；纯英文→("",name)；混合→(CJK片段, 拉丁片段)。
+    与 icris_registration.split_cjk_latin_name 同款实现（本地副本，避免引入 playwright 依赖）。
+    """
+    name = (name or "").strip()
+    if not name:
+        return "", ""
+    cjk_chars: list[str] = []
+    latin_chars: list[str] = []
+    for c in name:
+        if c.isascii():
+            latin_chars.append(c)
+            continue
+        cat = unicodedata.category(c)
+        if cat in ("Lo", "Nl", "Mn") or c in "·•、・":
+            cjk_chars.append(c)
+        else:
+            cjk_chars.append(c)
+    return "".join(cjk_chars).strip(), "".join(latin_chars).strip()
 
 
 def _director_name(materials: dict[str, dict[str, Any]]) -> str:
@@ -108,7 +132,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         br_int = 1
 
     person = _director_name(materials)
-    applicant_name = _get_val(materials, "applicant_name") or person
+    person_cn, person_en = _split_cjk_latin_name(person)
+    applicant_name_raw = _get_val(materials, "applicant_name")
+    if applicant_name_raw:
+        am_cn, am_en = _split_cjk_latin_name(applicant_name_raw)
+    else:
+        am_cn, am_en = "", ""
     contact_email = _get_val(materials, "contact_email") or (
         getattr(settings, "materials_default_contact_email", "") or ""
     ).strip()
@@ -176,8 +205,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         "business_nature_desc": _get_val(materials, "business_desc"),
         "br_certificate_years": br_int,
         "applicant": {
-            "name_en": applicant_name,
-            "name_cn": person,
+            "name_en": person_en or am_en,
+            "name_cn": person_cn or am_cn,
             "email": _get_val(materials, "applicant_email") or contact_email,
             "phone": _get_val(materials, "applicant_phone") or contact_phone,
             "id_type": _get_val(materials, "id_type"),

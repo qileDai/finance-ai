@@ -8,6 +8,7 @@ import re
 import secrets
 import string
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse
@@ -118,6 +119,82 @@ def derive_mock_china_address(applicant: dict[str, Any]) -> dict[str, str]:
         "street": "中关村大街1号",
         "region": "广东省广州市天河区 510000",
     }
+
+
+def split_cjk_latin_name(name: str) -> tuple[str, str]:
+    """姓名 → (中文部分, 英文部分)。
+
+    纯中文→(name,"")；纯英文→("",name)；混合→(CJK片段, 拉丁片段)。
+    ASCII 字符（含空格/字母/数字/标点）归英文，其余（汉字、全角等）归中文。
+    """
+    name = (name or "").strip()
+    if not name:
+        return "", ""
+    cjk_chars: list[str] = []
+    latin_chars: list[str] = []
+    for c in name:
+        if c.isascii():
+            latin_chars.append(c)
+            continue
+        # 非汉字（如全角符号、分隔点）也归中文流，避免污染英文姓名
+        cat = unicodedata.category(c)
+        if cat in ("Lo", "Nl", "Mn") or c in "·•、・":
+            cjk_chars.append(c)
+        else:
+            cjk_chars.append(c)
+    return "".join(cjk_chars).strip(), "".join(latin_chars).strip()
+
+
+def detect_hk_address(addr_en: str, addr_cn: str) -> bool:
+    """检测是否香港地址：含 香港/Hong Kong/Kowloon/九龍/新界/New Territories → True。"""
+    addr = ((addr_en or "") + " " + (addr_cn or "")).lower()
+    hk_keywords = (
+        "hong kong",
+        "kowloon",
+        "new territories",
+        "香港",
+        "九龍",
+        "九龙",
+        "新界",
+    )
+    return any(k in addr for k in hk_keywords)
+
+
+def split_address_street_region(address: str) -> tuple[str, str]:
+    """地址 → (街道, 区/市/省)。
+
+    含拉丁字母：按逗号分段，末 2 段→区/市/省，其余→街道（<3 段时末 1 段→区/市/省）。
+    纯中文：正则提取 省/自治区+市 为区/市/省，其余为街道；无省则取市。
+    兜底：全部归街道。
+    """
+    address = (address or "").strip()
+    if not address:
+        return "", ""
+    has_latin = any(c.isascii() and c.isalpha() for c in address)
+    if has_latin:
+        parts = [p.strip() for p in re.split(r"[,，]", address) if p.strip()]
+        if len(parts) >= 3:
+            region = ", ".join(parts[-2:])
+            street = ", ".join(parts[:-2])
+        elif len(parts) == 2:
+            region = parts[-1]
+            street = parts[0]
+        elif parts:
+            region = parts[-1]
+            street = ""
+        else:
+            region = ""
+            street = ""
+        return street, region
+    # 纯中文：省/自治区 + 市 为区/市/省，其余为街道
+    m = re.search(r"^((?:.*?省)|(?:.*?自治区))?(.*?市)(.*)$", address)
+    if m:
+        province = m.group(1) or ""
+        city = m.group(2) or ""
+        street = m.group(3) or ""
+        region = (province + city).strip()
+        return street.strip(), region
+    return address, ""
 
 
 def ensure_icris_password(raw: str) -> str:
@@ -1851,8 +1928,13 @@ class IcrisRegistrationBot:
             logger.info("已勾选电子提交 (value=filing)")
             filled += 1
 
-        if await self._select_principal_account_after_search(page):
-            filled += 2
+        if not getattr(settings, "icris_skip_esearch_principal", True):
+            if await self._select_principal_account_after_search(page):
+                filled += 2
+        else:
+            logger.info(
+                "已跳过电子查冊+主要账户选择 (icris_skip_esearch_principal=True)"
+            )
 
         field_steps = [
             ("#userId", username),
@@ -2719,8 +2801,10 @@ class IcrisRegistrationBot:
 
             checkbox_steps = [
                 r"电子提交|電子提交",
-                r"电子查册|電子查冊",
             ]
+            # 跳过电子查冊时仅勾「电子提交」；不跳过时再补「电子查册」
+            if not getattr(settings, "icris_skip_esearch_principal", True):
+                checkbox_steps.append(r"电子查册|電子查冊")
             for cb_pat in checkbox_steps:
                 if await self._ensure_checkbox_by_text(page, cb_pat):
                     filled += 1
@@ -2731,9 +2815,14 @@ class IcrisRegistrationBot:
                     filled += 1
                     await page.wait_for_timeout(400)
 
-            if await self._select_primary_account_radio(page):
-                filled += 1
-                await page.wait_for_timeout(400)
+            if not getattr(settings, "icris_skip_esearch_principal", True):
+                if await self._select_primary_account_radio(page):
+                    filled += 1
+                    await page.wait_for_timeout(400)
+            else:
+                logger.info(
+                    "已跳过电子查冊+主要账户 (Ant 回退, icris_skip_esearch_principal=True)"
+                )
 
             field_map = [
                 (r"用户名称|用戶名稱|Username|userName|loginName", username),
@@ -3009,14 +3098,35 @@ class IcrisRegistrationBot:
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         applicant = data.get("applicant", {})
-        given, surname = split_applicant_english_name(applicant.get("name_en", ""))
+        name_en = applicant.get("name_en", "")
+        name_cn = applicant.get("name_cn", "")
+        given, surname = (
+            split_applicant_english_name(name_en) if name_en else ("", "")
+        )
         title = applicant.get("title", "Mr")
         id_type = applicant.get("id_type", "HKID")
-        email = applicant.get("email", "")
+        # S03 电邮固定用 MATERIALS_DEFAULT_CONTACT_EMAIL（注册邮箱），空则回退 applicant.email
+        email = (getattr(settings, "materials_default_contact_email", "") or "").strip() or applicant.get("email", "")
         phone = applicant.get("phone", "")
-        addr = derive_mock_china_address(applicant)
+        # 真实董事住址（非 mock）：优先 directors，回退 founder_members
+        director = (data.get("directors") or [{}])[0] or (
+            data.get("founder_members") or [{}]
+        )[0]
+        if not isinstance(director, dict):
+            director = {}
+        addr_en = (director.get("address_en", "") or "").strip()
+        addr_cn = (director.get("address_cn", "") or "").strip()
+        addr_text = addr_en or addr_cn
+        is_hk = detect_hk_address(addr_en, addr_cn)
+        street, region = split_address_street_region(addr_text)
 
-        logger.info("开始填写用户资料 (url=%s)", page.url[:120])
+        logger.info(
+            "开始填写用户资料 (url=%s) 地址HK=%s street=%s region=%s",
+            page.url[:120],
+            is_hk,
+            street[:40],
+            region[:40],
+        )
 
         filled = 0
 
@@ -3028,11 +3138,14 @@ class IcrisRegistrationBot:
                     logger.info("用户资料: %s", label)
                 await page.wait_for_timeout(250)
 
-        # 姓名（placeholder 为主；中文姓名留空不填）
+        # 姓名：英文姓氏/名字 + 中文姓名（按材料有无分别填，空值跳过）
         for pat, val, name in [
             (r"英文姓氏|英文姓", surname, "英文姓氏"),
             (r"英文名字|英文名", given, "英文名字"),
+            (r"中文姓名|中文", name_cn, "中文姓名"),
         ]:
+            if not val:
+                continue
             ok = await self._fill_by_placeholder(page, pat, val)
             if not ok:
                 ok = await self._fill_enabled_field_by_label(page, pat, val)
@@ -3055,14 +3168,17 @@ class IcrisRegistrationBot:
                 name,
             )
 
-        # 本地地址（香港仔为 HK 地区选项）
-        if not await self._select_radio_in_section(page, r"地址", r"本地地址|本地"):
-            await _inc(
-                await self._select_radio_in_section(page, r"地址", r"非香港地址|非香港"),
-                "非香港地址",
+        # 地址类型：香港→本地地址；否则→非香港地址
+        if is_hk:
+            addr_radio_ok = await self._select_radio_in_section(
+                page, r"地址", r"本地地址|本地"
             )
+            await _inc(addr_radio_ok, "本地地址")
         else:
-            await _inc(True, "本地地址")
+            addr_radio_ok = await self._select_radio_in_section(
+                page, r"地址", r"非香港地址|非香港"
+            )
+            await _inc(addr_radio_ok, "非香港地址")
         try:
             await page.wait_for_function(
                 """() => {
@@ -3076,28 +3192,39 @@ class IcrisRegistrationBot:
             pass
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
-        for pat, val, name in [
-            (r"室.*楼.*座|室.*樓.*座", addr["room"], "室/楼/座"),
-            (r"大厦|大廈", addr["building"], "大厦"),
-            (r"街道|屋苑|地段|村", addr["street"], "街道"),
-        ]:
-            ok = await self._fill_by_placeholder(page, pat, val)
+        # 街道／屋苑／地段／村（室／樓／座 与 大廈 不填）
+        if street:
+            ok = await self._fill_by_placeholder(page, r"街道|屋苑|地段|村", street)
             if not ok:
-                ok = await self._fill_enabled_field_by_label(page, pat, val)
-            await _inc(ok, name)
+                ok = await self._fill_enabled_field_by_label(
+                    page, r"街道|屋苑|地段|村", street
+                )
+            await _inc(ok, "街道")
 
-        # 区/市/省/州/邮递区号 → 香港仔
-        await _inc(
-            await self._select_ant_select_by_keywords(
-                page,
-                ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
-                "香港仔",
-            ),
-            "区/市/省=香港仔",
-        )
+        # 区/市/省/州/邮递区号
+        if is_hk:
+            # HK 分支保持选「香港仔」（注册地址为 HK 时沿用）
+            await _inc(
+                await self._select_ant_select_by_keywords(
+                    page,
+                    ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
+                    "香港仔",
+                ),
+                "区/市/省=香港仔",
+            )
+        elif region:
+            # 非香港：文本填入拆分后的区/市/省（如 "Shenzhen City, Guangdong Province"）
+            reg_ok = await self._fill_by_placeholder(
+                page, r"區.*市.*省|區市省|州|郵遞", region
+            )
+            if not reg_ok:
+                reg_ok = await self._fill_enabled_field_by_label(
+                    page, r"區.*市.*省|區市省|州|郵遞", region
+                )
+            await _inc(reg_ok, "区/市/省")
 
-        # 国家/地区（仅非香港地址时可能出现）
-        if await page.locator(".ant-select").count() > 1:
+        # 国家/地区（仅非香港地址时选「中国」）
+        if not is_hk and await page.locator(".ant-select").count() > 1:
             country_ok = await self._select_ant_select_by_keywords(
                 page, ["国家", "國家", "国家/地区", "國家/地區"], "中国"
             )
@@ -3137,6 +3264,7 @@ class IcrisRegistrationBot:
         id_map = [
             ("#engSurName, input[name*='engSur' i], input[id*='engSur' i]", surname, "text"),
             ("#engOtherName, input[name*='engOther' i], input[id*='engOther' i]", given, "text"),
+            ("#nameCh, input[name*='nameCh' i], input[id*='chineseName' i]", name_cn, "text"),
             ("#emailAddr, input[name*='email' i]:not([name*='confirm' i])", email, "text"),
             ("input[name*='confirm' i][name*='email' i], input[id*='confirmEmail' i]", email, "text"),
             ("#mobileNo, input[name*='mobile' i], input[id*='mobile' i], input[name*='phone' i]", phone, "text"),
