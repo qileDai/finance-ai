@@ -81,6 +81,20 @@ export type LowRun = {
 
 export type RunnerFile = { name: string; data_url: string };
 
+export type WeworkSendModes = {
+  configured: boolean;
+  kf_configured: boolean;
+  send_mode: "kf" | "mass" | "webhook" | "appchat" | string;
+  channel: string;
+  webhook_url_set: boolean;
+  default_owner_set: boolean;
+};
+
+export type WeworkSendResponse = ApiOk<{
+  plan: string;
+  result: Record<string, unknown>;
+}>;
+
 export type RunnerStatus = {
   status: "idle" | "running" | "succeeded" | "failed";
   started_at?: string;
@@ -181,5 +195,14 @@ export const api = {
       ),
     status: () =>
       request<ApiOk<RunnerStatus>>("/admin/api/register-runner/status"),
+  },
+  wework: {
+    sendModes: () =>
+      request<ApiOk<WeworkSendModes>>("/admin/api/wework/send-modes"),
+    send: (chat_id: string, content: string, to_external_userid?: string) =>
+      request<WeworkSendResponse>("/admin/api/wework/send", {
+        method: "POST",
+        body: JSON.stringify({ chat_id, content, to_external_userid }),
+      }),
   },
 };

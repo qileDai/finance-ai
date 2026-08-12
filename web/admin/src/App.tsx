@@ -8,6 +8,7 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { QualityPage } from "./pages/QualityPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
+import { WeworkSendPage } from "./pages/WeworkSendPage";
 
 export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -56,6 +57,10 @@ export default function App() {
             <Route
               path="register"
               element={<RegisterPage onToast={onToast} />}
+            />
+            <Route
+              path="wework-send"
+              element={<WeworkSendPage onToast={onToast} />}
             />
             <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />
             <Route path="groups" element={<Navigate to="/sessions" replace />} />

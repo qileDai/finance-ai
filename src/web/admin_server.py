@@ -182,12 +182,17 @@ class AdminWebServer:
                         return self._send_json({"ok": False, "error": "not found"}, 404)
                     if not self._require_session():
                         return
-                    # register-runner/submit 允许大 body（含证件 base64，上限 30MB）
+                    # 需 body 的 POST 端点：register-runner/submit 大 body(30MB)；wework/send 默认 1MB
                     body: dict | None = None
                     if rel == "register-runner/submit":
                         raw = self._read_body(max_bytes=30_000_000)
+                    elif rel in ("wework/send",):
+                        raw = self._read_body()
+                    else:
+                        raw = b""
+                    if raw:
                         try:
-                            body = json.loads(raw.decode("utf-8")) if raw else None
+                            body = json.loads(raw.decode("utf-8"))
                         except Exception:
                             return self._send_json(
                                 {"ok": False, "error": "invalid json body"}, 400

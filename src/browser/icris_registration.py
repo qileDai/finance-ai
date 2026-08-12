@@ -3573,19 +3573,75 @@ class IcrisRegistrationBot:
         except Exception:
             return await self._is_identity_proof_step(page)
 
+    def _s04_url_from_current(self, url: str) -> str:
+        """将 registration/s03.do 替换为 s04.do，保留 query。"""
+        u = url or ""
+        if re.search(r"registration/s04\.do", u, re.I):
+            return u
+        return re.sub(
+            r"(registration/)s03(\.do)",
+            r"\1s04\2",
+            u,
+            count=1,
+            flags=re.I,
+        )
+
+    async def _wait_url_step(
+        self,
+        page: "Page",
+        step: str = "s04",
+        *,
+        timeout_ms: int = 45000,
+    ) -> bool:
+        """等待 URL/正文到达指定注册步骤（默认 s04）。"""
+        raw = (step or "s04").lower()
+        mm = re.search(r"([2-9])", raw)
+        num = mm.group(1) if mm else "4"
+        try:
+            await page.wait_for_function(
+                """(n) => {
+                    const url = (location.href || '').toLowerCase();
+                    if (new RegExp('registration\\\\/s0' + n + '\\\\.do').test(url)) return true;
+                    if (n !== '4') return false;
+                    const root = document.body || document.documentElement;
+                    if (!root) return false;
+                    const t = root.innerText || '';
+                    return /身分證明|身份证明/.test(t)
+                        && /證明文件|证明文件/.test(t)
+                        && /網上提交|网上提交|親身到公司註冊處|亲身到公司注册处/.test(t);
+                }""",
+                num,
+                timeout=timeout_ms,
+            )
+            await self._wait_spin_clear(page, timeout_ms=15000)
+            return True
+        except Exception:
+            if num == "4":
+                return await self._is_identity_proof_step(page)
+            return bool(re.search(rf"registration/s0{num}", (page.url or "").lower()))
+
     async def _advance_from_user_info_to_identity(self, page: "Page") -> bool:
-        """s03 点继续并等待进入 s04；不重填、不切语言重载。"""
+        """s03 点继续并等待进入 s04；前端未跳转时 reload / 直达 s04.do。"""
         if await self._is_identity_proof_step(page):
             return True
-        if not self._is_user_info_url(page.url) and not await self._is_user_info_step(page):
+        if not self._is_user_info_url(page.url) and not await self._is_user_info_step(
+            page
+        ):
             return await self._is_identity_proof_step(page)
 
-        for attempt in range(1, 4):
-            before = page.url
-            ok = await self._click_continue(page)
+        try:
+            await page.evaluate(
+                "() => { try { document.activeElement && document.activeElement.blur(); } catch (e) {} }"
+            )
+        except Exception:
+            pass
+        await self._wait_spin_clear(page, timeout_ms=15000)
+
+        for attempt in range(1, 3):
+            ok = await self._click_continue(page, expect_step="s04")
             if not ok:
-                logger.warning("s03→s04 继续点击失败 (尝试 %d/3)", attempt)
-            if await self._wait_for_identity_proof_step(page, timeout_ms=25000):
+                logger.warning("s03→s04 继续点击/等待失败 (尝试 %d/2)", attempt)
+            if await self._wait_url_step(page, "s04", timeout_ms=20000):
                 logger.info("已从用户资料进入身份证明页")
                 return True
             if self._is_home_or_portal(page.url):
@@ -3594,9 +3650,38 @@ class IcrisRegistrationBot:
             errs = await self._get_validation_errors(page)
             if errs:
                 logger.warning("s03→s04 仍有校验: %s", errs)
+                return False
+            # 已点过继续且无校验：勿反复提交，改走 reload/goto
+            if self._is_user_info_url(page.url):
                 break
-            if page.url == before:
-                await page.wait_for_timeout(800)
+            await page.wait_for_timeout(600)
+
+        # 服务端可能已到 s04，前端未换页 → 刷新 / 直达
+        if self._is_user_info_url(page.url) and not await self._get_validation_errors(
+            page
+        ):
+            logger.info("s03 仍显示用户资料且无校验，尝试 reload 拉取 s04")
+            try:
+                await page.reload(wait_until="commit", timeout=60000)
+                await self._wait_spin_clear(page, timeout_ms=20000)
+            except Exception as exc:
+                logger.warning("s03→s04 reload 失败: %s", exc)
+            if await self._wait_url_step(page, "s04", timeout_ms=15000):
+                logger.info("reload 后已进入身份证明页")
+                return True
+
+            s04 = self._s04_url_from_current(page.url)
+            if s04 != page.url and re.search(r"registration/s04\.do", s04, re.I):
+                logger.info("直达 s04.do: %s", s04[:120])
+                try:
+                    await page.goto(s04, wait_until="commit", timeout=60000)
+                    await self._wait_spin_clear(page, timeout_ms=20000)
+                except Exception as exc:
+                    logger.warning("goto s04 失败: %s", exc)
+                if await self._wait_for_identity_proof_step(page, timeout_ms=20000):
+                    logger.info("goto s04 后已进入身份证明页")
+                    return True
+
         return await self._is_identity_proof_step(page)
 
     def _is_identity_proof_url(self, url: str) -> bool:
@@ -3660,15 +3745,18 @@ class IcrisRegistrationBot:
             id_number,
         )
 
-        # ICRIS s04 常见文案：香港身分證號碼 / 中華人民共和國身分證號碼 / 護照
+        # ICRIS s04 常见文案：优先「身分证／身分證」（分），「身份」仅次要兼容
         type_labels = {
             "HKID": (
-                r"香港身分證號碼|香港身份证号码|香港身分證|香港身份証|香港身份证"
+                r"香港身分證號碼|香港身分证号码|香港身份证号码|"
+                r"香港身分證|香港身分证|香港身份証|香港身份证"
             ),
             "PRC_ID": (
-                r"中華人民共和國身分證號碼|中华人民共和国身份证号码|"
-                r"中華人民共和國身分證|中华人民共和国身份证|"
-                r"中國身分證|中国身份证"
+                r"中华人民共和国身分证号码|中華人民共和國身分证號碼|"
+                r"中華人民共和國身分證號碼|中华人民共和国身分證号码|"
+                r"中华人民共和国身份证号码|"
+                r"中華人民共和國身分證|中华人民共和国身分证|"
+                r"中华人民共和国身份证|中國身分證|中国身分证|中国身份证"
             ),
             "PASSPORT": r"護照號碼|护照号码|^護照$|^护照$|護照|护照",
         }
@@ -3895,14 +3983,20 @@ class IcrisRegistrationBot:
         preferred: dict[str, tuple[str, ...]] = {
             "HKID": (
                 "香港身分證號碼",
+                "香港身分证号码",
                 "香港身份证号码",
                 "香港身分證",
+                "香港身分证",
                 "香港身份证",
             ),
             "PRC_ID": (
+                "中华人民共和国身分证号码",
+                "中華人民共和國身分证號碼",
                 "中華人民共和國身分證號碼",
+                "中华人民共和国身分證号码",
                 "中华人民共和国身份证号码",
                 "中華人民共和國身分證",
+                "中华人民共和国身分证",
                 "中华人民共和国身份证",
             ),
             "PASSPORT": (
@@ -3921,7 +4015,7 @@ class IcrisRegistrationBot:
                     const root = document.body || document.documentElement;
                     if (!root) return false;
                     const t = root.innerText || '';
-                    if (!/身分證明|身份证明|香港身分證|中華人民共和國|護照|护照/.test(t))
+                    if (!/身分證明|身份证明|香港身分證|香港身分证|中華人民共和國|中华人民共和国|護照|护照|身分证/.test(t))
                         return false;
                     return root.querySelectorAll(
                         "input[type='radio'], .ant-radio-wrapper"
@@ -3948,7 +4042,7 @@ class IcrisRegistrationBot:
                             const t = norm(w.innerText || '');
                             if (!t || t.length > 80) continue;
                             if (!t.includes(lab)) continue;
-                            if (idType === 'PASSPORT' && /身分證|身份证/.test(t)) continue;
+                            if (idType === 'PASSPORT' && /身分證|身分证|身份证/.test(t)) continue;
                             if (idType === 'HKID' && /中華|中华|人民/.test(t)) continue;
                             if (idType === 'PRC_ID' && /香港/.test(t)) continue;
                             w.scrollIntoView({ block: 'center' });
@@ -4000,7 +4094,9 @@ class IcrisRegistrationBot:
                         continue
                     if len(txt) > 80:
                         continue
-                    if id_type == "PASSPORT" and ("身分證" in txt or "身份证" in txt):
+                    if id_type == "PASSPORT" and (
+                        "身分證" in txt or "身分证" in txt or "身份证" in txt
+                    ):
                         continue
                     if id_type == "HKID" and (
                         "中華" in txt or "中华" in txt or "人民" in txt
@@ -4189,7 +4285,9 @@ class IcrisRegistrationBot:
         logger.info("已填写 %d 个注册表单字段", filled)
         return filled
 
-    async def _click_continue(self, page: "Page") -> bool:
+    async def _click_continue(
+        self, page: "Page", *, expect_step: str | None = None
+    ) -> bool:
         """点击继续/下一步（多步骤导航，dry_run 也执行）"""
         if not self._is_registration_page(page.url):
             return False
@@ -4209,7 +4307,10 @@ class IcrisRegistrationBot:
                 return False
             try:
                 if await btn.is_disabled():
-                    logger.warning("继续按钮不可用: %s", txt or await btn.get_attribute("class"))
+                    logger.warning(
+                        "继续按钮不可用: %s",
+                        txt or await btn.get_attribute("class"),
+                    )
                     return False
             except Exception:
                 pass
@@ -4221,7 +4322,9 @@ class IcrisRegistrationBot:
                 except Exception:
                     await btn.click(force=True, timeout=8000)
                 logger.info("已点击继续: %s", txt or "(submit)")
-                if not await self._wait_after_continue(page, current_url):
+                if not await self._wait_after_continue(
+                    page, current_url, expect_step=expect_step
+                ):
                     return False
                 if self._is_home_or_portal(page.url):
                     logger.error("点击继续后跳转到首页")
@@ -4293,32 +4396,75 @@ class IcrisRegistrationBot:
         if ok:
             current_url = page.url
             logger.info("JS 已点击继续")
-            if not await self._wait_after_continue(page, current_url):
+            if not await self._wait_after_continue(
+                page, current_url, expect_step=expect_step
+            ):
                 return False
             return not self._is_home_or_portal(page.url)
         return False
 
-    async def _wait_after_continue(self, page: "Page", previous_url: str) -> bool:
-        """点击继续后等待步骤切换且 loading 结束"""
+    async def _wait_after_continue(
+        self,
+        page: "Page",
+        previous_url: str,
+        *,
+        expect_step: str | None = None,
+    ) -> bool:
+        """点击继续后等待步骤切换且 loading 结束。
+
+        expect_step='s04' 时：仍停在用户资料页不算成功，须等到 s04。
+        """
+        expect = (expect_step or "").lower()
+        want_s04 = "s04" in expect or expect.endswith("4")
         try:
-            await page.wait_for_function(
-                """(prev) => {
-                    const href = window.location.href;
-                    if (href !== prev) return true;
-                    const t = document.body ? document.body.innerText : '';
-                    return /填写用户资料|填寫用戶資料|用户类别|用戶類別|账户资料|帳戶資料|步骤|步驟/i.test(t)
-                        || /registration\\/s0[2-9]/i.test(href);
-                }""",
-                previous_url,
-                timeout=30000,
-            )
+            if want_s04:
+                await page.wait_for_function(
+                    """(prev) => {
+                        const href = window.location.href || '';
+                        if (/registration\\/s04/i.test(href)) return true;
+                        if (href !== prev && !/registration\\/s03/i.test(href)) return true;
+                        const root = document.body || document.documentElement;
+                        if (!root) return false;
+                        const t = root.innerText || '';
+                        if (/填寫用戶資料|填写用户资料/.test(t)
+                            && /registration\\/s03/i.test(href)) return false;
+                        return /身分證明|身份证明/.test(t)
+                            && /證明文件|证明文件/.test(t)
+                            && /網上提交|网上提交|親身到公司註冊處|亲身到公司注册处/.test(t);
+                    }""",
+                    previous_url,
+                    timeout=45000,
+                )
+            else:
+                await page.wait_for_function(
+                    """(prev) => {
+                        const href = window.location.href;
+                        if (href !== prev) return true;
+                        const t = document.body ? document.body.innerText : '';
+                        return /填写用户资料|填寫用戶資料|用户类别|用戶類別|账户资料|帳戶資料|步骤|步驟/i.test(t)
+                            || /registration\\/s0[2-9]/i.test(href);
+                    }""",
+                    previous_url,
+                    timeout=30000,
+                )
         except Exception:
-            logger.debug("继续后步骤切换等待超时 url=%s", page.url)
+            logger.debug(
+                "继续后步骤切换等待超时 url=%s expect=%s",
+                page.url,
+                expect_step or "",
+            )
 
         if not await self._wait_spin_clear(page, timeout_ms=_SPIN_TIMEOUT_MS):
             logger.error("继续后 loading 未结束，可能表单校验失败")
             return False
         await page.wait_for_timeout(_PAGE_PAUSE_MS)
+        if want_s04:
+            if await self._is_identity_proof_step(page):
+                return True
+            if not self._is_user_info_url(page.url):
+                return True
+            logger.debug("expect s04 但仍在用户资料页，标记 continue 未完成导航")
+            return False
         return True
 
     async def _click_account_profile_continue(self, page: "Page") -> bool:

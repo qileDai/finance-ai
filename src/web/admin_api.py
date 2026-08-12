@@ -86,11 +86,77 @@ def handle_admin_api(
             return _ok(**runner_status())
         if method == "POST" and rel == "register-runner/submit":
             return _handle_runner_submit(body)
+        if method == "GET" and rel == "wework/send-modes":
+            return _handle_wework_send_modes()
+        if method == "POST" and rel == "wework/send":
+            return _handle_wework_send(body)
     except Exception as e:
         logger.exception("admin api error: %s", e)
         return _err(str(e) or "internal error", 500)
 
     return _err("not found", 404)
+
+
+def _handle_wework_send_modes() -> tuple[dict[str, Any], int]:
+    """返回当前外部群发送模式（决策结果）。"""
+    return _ok(
+        configured=settings.wework_configured,
+        kf_configured=settings.wework_kf_configured,
+        send_mode=settings.wework_external_send_mode_resolved,
+        channel=settings.wework_channel_resolved,
+        webhook_url_set=bool(
+            (settings.wework_external_group_webhook_url or "").strip()
+        ),
+        default_owner_set=bool(
+            (settings.wework_default_group_owner_userid or "").strip()
+        ),
+    )
+
+
+def _handle_wework_send(body: dict | None) -> tuple[dict[str, Any], int]:
+    """手动往外部群发消息（测试用）。
+
+    body: {chat_id, content, to_external_userid?}
+    """
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+    chat_id = str(body.get("chat_id") or "").strip()
+    content = str(body.get("content") or "").strip()
+    to_external_userid = str(body.get("to_external_userid") or "").strip() or None
+    if not chat_id:
+        return _err("chat_id required", 400)
+    if not content:
+        return _err("content required", 400)
+    if len(content.encode("utf-8")) > 2000:
+        return _err("content too long (>2000 bytes)", 400)
+
+    from src.wework.external_client import WeWorkExternalClient
+
+    client = WeWorkExternalClient()
+    if client._mock_mode:
+        return _err(
+            "当前为 mock 模式（未配置 WEWORK_CORP_ID/SECRET），无法真实发送；"
+            "请配置 .env 后重启 admin",
+            400,
+        )
+    try:
+        # 用 describe_send_plan 先告知将走哪条通道
+        plan = client.describe_send_plan(chat_id, to_external_userid=to_external_userid)
+        result = client.send_group_text(
+            chat_id,
+            content,
+            to_external_userid=to_external_userid,
+        )
+        errcode = int(result.get("errcode", 0) or 0)
+        if errcode != 0:
+            return _err(
+                f"发送失败 errcode={errcode}: {result.get('errmsg', '')}",
+                500,
+            )
+        return _ok(plan=plan, result=result)
+    except Exception as e:
+        logger.exception("wework send failed chat_id=%s", chat_id)
+        return _err(str(e) or "send failed", 500)
 
 
 def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:

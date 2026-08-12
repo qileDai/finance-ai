@@ -322,6 +322,23 @@ python main.py wework-kf-mock --simulate-callback --open-kfid wkAAA --token mock
 | kf 收不到消息 | `WEWORK_KF_MODE` 与回调 URL 是否配置；push 模式需公网回调；both 模式有轮询兜底 |
 | kf 模式发送失败 | 客户是否已联系过该客服；`WEWORK_KF_SECRET/OPEN_KFID` 是否正确；多账号时检查 roomid 对应 open_kfid |
 | 重复回复 | 正常；系统用 msgid 幂等，不应重复（若重复检查存档 seq） |
+| 群里没看到 AI 回复 | 若 `WEWORK_EXTERNAL_SEND_MODE=kf`，回复在客户的**微信客服会话**而非群聊界面；要让消息出现在群里需改 `mass`（需群主每次点确认） |
+| 客服会话也没收到 | 检查 `WEWORK_KF_SECRET` 和 `WEWORK_KF_OPEN_KFID`；客户是否已进入过该客服（首次需扫码或点群名片）；48h 内是否超 5 条配额（`WEWORK_KF_SEND_QUOTA_48H`） |
+| 报错「未配置 WEWORK_DEFAULT_GROUP_OWNER_USERID」 | 群详情 API 拿不到 owner；在 `.env` 里手动填群主 userid（企微后台 → 客户联系 → 群主详情） |
+| mock 模式发消息打印但无真实发送 | 正常；`WEWORK_EXTERNAL_MODE=mock` 时只打印日志不真实调企微 API，需切 `live` |
+
+### 管理后台手动发消息（测试用）
+
+启动 admin：
+
+```powershell
+python main.py admin
+```
+
+打开 `http://127.0.0.1:8082/admin` → 左侧导航「**外部群发消息**」：
+- 输入外部群 `chat_id`（`wr*` 前缀）和消息内容 → 点「发送到外部群」
+- 右侧实时显示当前 `WEWORK_EXTERNAL_SEND_MODE`、企微/客服配置状态
+- 发送后展示**发送计划**（将走哪条通道）和**企微返回**（errcode/errmsg）
 
 ---
 
