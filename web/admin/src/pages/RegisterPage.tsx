@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { statusBadge } from "../components/ui";
 
@@ -171,7 +172,7 @@ export function RegisterPage({ onToast }: Props) {
       .status()
       .then((d) => {
         setRunnerStatus(d);
-        if (d.status === "running") setPolling(true);
+        if (d.status === "running" || d.status === "pending") setPolling(true);
       })
       .catch(() => {});
   }, []);
@@ -185,7 +186,7 @@ export function RegisterPage({ onToast }: Props) {
         const d = await api.registerRunner.status();
         if (!alive) return;
         setRunnerStatus(d);
-        if (d.status !== "running") setPolling(false);
+        if (d.status !== "running" && d.status !== "pending") setPolling(false);
       } catch {
         /* ignore */
       }
@@ -203,7 +204,8 @@ export function RegisterPage({ onToast }: Props) {
   }, [runnerStatus?.messages]);
 
   const neededFiles = ID_TYPE_FILES[idType] || [];
-  const isRunning = runnerStatus?.status === "running";
+  const isRunning =
+    runnerStatus?.status === "running" || runnerStatus?.status === "pending";
 
   function setField(key: string, val: string) {
     setFields((p) => ({ ...p, [key]: val }));
@@ -252,12 +254,19 @@ export function RegisterPage({ onToast }: Props) {
     try {
       const payload = { ...fields, id_type: idType };
       const res = await api.registerRunner.submit(payload, files);
-      onToast(`已提交注册：${res.company_name}`);
+      onToast(
+        res.job_id
+          ? `已入队任务 #${res.job_id}：${res.company_name}`
+          : `已提交注册：${res.company_name}`
+      );
       setRunnerStatus({
-        status: "running",
+        status: "pending",
         company_name: res.company_name,
         case_id: res.case_id,
-        messages: [],
+        job_id: res.job_id ?? null,
+        messages: res.job_id
+          ? [`已入队任务 #${res.job_id}，等待 Worker 执行`]
+          : [],
         dry_run: true,
       });
       setPolling(true);
@@ -417,6 +426,14 @@ export function RegisterPage({ onToast }: Props) {
                   {runnerStatus.status}
                 </span>
                 <strong>{runnerStatus.company_name || "-"}</strong>
+                {runnerStatus.job_id ? (
+                  <Link
+                    className="mono"
+                    to={`/jobs/${runnerStatus.job_id}`}
+                  >
+                    任务 #{runnerStatus.job_id}
+                  </Link>
+                ) : null}
                 {runnerStatus.case_id ? (
                   <small className="muted mono">{runnerStatus.case_id}</small>
                 ) : null}

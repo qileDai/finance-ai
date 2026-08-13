@@ -609,6 +609,59 @@ table.data tr.clickable:hover td {
   word-break: break-all;
 }
 
+.job-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.job-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 16px;
+  margin: 12px 0 0;
+}
+
+.job-meta dt {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.job-meta dd {
+  margin: 2px 0 0;
+}
+
+.job-error {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: #fef3f2;
+  border: 1px solid #fecdca;
+  border-radius: var(--radius);
+}
+
+.job-error pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.job-log {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 960px) {
   .reg-grid {
     grid-template-columns: 1fr;

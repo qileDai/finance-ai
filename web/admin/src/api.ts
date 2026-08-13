@@ -57,9 +57,27 @@ export type JobRow = {
   allow_submit?: number | boolean;
   last_error?: string;
   screenshot_path?: string;
+  company_name?: string;
+  source?: string;
   updated_at?: string;
   finished_at?: string;
+  created_at?: string;
+  started_at?: string;
 };
+
+export type JobField = { key: string; value: string };
+
+export type JobDetailResponse = ApiOk<{
+  job: JobRow & {
+    payload_json?: string;
+    result_messages?: string;
+    package_dir?: string;
+    customer_id?: string;
+  };
+  payload: Record<string, unknown>;
+  fields: JobField[];
+  messages: string[];
+}>;
 
 export type QualityResponse = ApiOk<{
   hours: number;
@@ -96,13 +114,14 @@ export type WeworkSendResponse = ApiOk<{
 }>;
 
 export type RunnerStatus = {
-  status: "idle" | "running" | "succeeded" | "failed";
+  status: "idle" | "running" | "succeeded" | "failed" | "pending";
   started_at?: string;
   finished_at?: string;
   messages?: string[];
   error?: string;
   company_name?: string;
   case_id?: string;
+  job_id?: number | null;
   dry_run?: boolean;
 };
 
@@ -169,6 +188,8 @@ export const api = {
     q.set("limit", String(limit));
     return request<JobsResponse>(`/admin/api/jobs?${q}`);
   },
+  job: (id: number) =>
+    request<JobDetailResponse>(`/admin/api/jobs/${id}`),
   cancelJob: (id: number) =>
     request<ApiOk<{ job: JobRow; message: string }>>(
       `/admin/api/jobs/${id}/cancel`,
@@ -186,7 +207,7 @@ export const api = {
       fields: Record<string, string>,
       files: Record<string, RunnerFile>
     ) =>
-      request<ApiOk<{ case_id: string; company_name: string }>>(
+      request<ApiOk<{ case_id: string; company_name: string; job_id?: number }>>(
         "/admin/api/register-runner/submit",
         {
           method: "POST",

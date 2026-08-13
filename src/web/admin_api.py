@@ -64,6 +64,11 @@ def handle_admin_api(
             except ValueError:
                 limit = 50
             return _handle_jobs_list(store, status=status, limit=limit)
+        if method == "GET" and rel.startswith("jobs/"):
+            mid = rel[len("jobs/") :]
+            if "/" not in mid and mid.isdigit():
+                return _handle_job_detail(store, int(mid))
+            return _err("invalid job id", 400)
         if method == "POST" and rel.startswith("jobs/") and rel.endswith("/cancel"):
             job_id = _parse_job_id(rel, suffix="/cancel")
             if job_id is None:
@@ -272,7 +277,139 @@ def _handle_jobs_list(
     store: ExternalGroupStore, *, status: str, limit: int
 ) -> tuple[dict[str, Any], int]:
     items = store.list_registration_jobs(limit=limit, status=status)
-    return _ok(items=items, status=status or "all", limit=limit)
+    # 列表不返回完整 payload，减小响应
+    slim: list[dict[str, Any]] = []
+    for it in items:
+        row = dict(it)
+        row.pop("payload_json", None)
+        row.pop("result_messages", None)
+        slim.append(row)
+    return _ok(items=slim, status=status or "all", limit=limit)
+
+
+def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """将 company_data 展平为详情展示字段列表。"""
+    fields: list[dict[str, str]] = []
+
+    def add(key: str, value: Any) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        fields.append({"key": key, "value": text})
+
+    for k in (
+        "company_name_cn",
+        "company_name_en",
+        "registered_capital",
+        "business_desc",
+        "registered_office_cn",
+        "registered_office_en",
+    ):
+        add(k, payload.get(k))
+
+    applicant = payload.get("applicant") or {}
+    if isinstance(applicant, dict):
+        add("applicant.name", applicant.get("name") or applicant.get("name_cn"))
+        add("applicant.id_type", applicant.get("id_type"))
+        add("applicant.id_number", applicant.get("id_number"))
+        add("applicant.address_cn", applicant.get("address_cn"))
+        add("applicant.address_en", applicant.get("address_en"))
+
+    directors = payload.get("directors") or []
+    if isinstance(directors, list):
+        for i, d in enumerate(directors):
+            if not isinstance(d, dict):
+                continue
+            prefix = f"directors[{i}]"
+            add(f"{prefix}.name", d.get("name") or d.get("name_cn"))
+            add(f"{prefix}.id_type", d.get("id_type"))
+            add(f"{prefix}.id_number", d.get("id_number"))
+            add(f"{prefix}.address_cn", d.get("address_cn"))
+            add(f"{prefix}.address_en", d.get("address_en"))
+
+    proof = payload.get("identity_proof") or {}
+    if isinstance(proof, dict):
+        add("identity_proof.id_type", proof.get("id_type"))
+        add("identity_proof.id_number", proof.get("id_number"))
+        add("identity_proof.submission_method", proof.get("submission_method"))
+
+    account = payload.get("icris_account") or {}
+    if isinstance(account, dict):
+        for k, v in account.items():
+            if isinstance(v, (str, int, float, bool)):
+                add(f"icris_account.{k}", v)
+
+    # 附件路径（若有）
+    for k, v in payload.items():
+        if k.endswith("_path") or k in (
+            "id_card_front",
+            "id_card_back",
+            "id_card_handheld",
+            "passport",
+        ):
+            if isinstance(v, str) and v.strip():
+                add(k, v)
+            elif isinstance(v, dict) and v.get("file_path"):
+                add(k, v.get("file_path"))
+
+    attachments = payload.get("attachments") or payload.get("files") or {}
+    if isinstance(attachments, dict):
+        for k, v in attachments.items():
+            if isinstance(v, str):
+                add(f"file.{k}", v)
+            elif isinstance(v, dict):
+                add(f"file.{k}", v.get("file_path") or v.get("path") or v.get("name"))
+
+    return fields
+
+
+def _handle_job_detail(
+    store: ExternalGroupStore, job_id: int
+) -> tuple[dict[str, Any], int]:
+    import json
+
+    job = store.get_registration_job(job_id)
+    if not job:
+        return _err("job not found", 404)
+    out = dict(job)
+    payload: dict[str, Any] = {}
+    raw = out.get("payload_json") or ""
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+    messages: list[str] = []
+    raw_msgs = out.get("result_messages") or ""
+    if raw_msgs:
+        try:
+            parsed_msgs = json.loads(raw_msgs)
+            if isinstance(parsed_msgs, list):
+                messages = [str(x) for x in parsed_msgs]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            messages = []
+    fields = _flatten_payload_fields(payload) if payload else []
+    # 无 payload 时回退 materials
+    if not fields:
+        materials = store.get_materials(str(out.get("roomid") or ""))
+        for key in sorted(materials.keys()):
+            row = materials[key]
+            val = str(row.get("field_value") or "").strip()
+            fpath = str(row.get("file_path") or "").strip()
+            if fpath:
+                fields.append({"key": key, "value": fpath})
+            elif val:
+                fields.append({"key": key, "value": val})
+    return _ok(
+        job=out,
+        payload=payload,
+        fields=fields,
+        messages=messages,
+    )
 
 
 def _handle_job_cancel(

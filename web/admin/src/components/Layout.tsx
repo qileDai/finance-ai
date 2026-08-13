@@ -23,7 +23,11 @@ export function Layout({ onRefresh, toast }: Props) {
   const base = loc.pathname.replace(/\/$/, "") || "/";
   const title =
     TITLES[base] ||
-    (base.startsWith("/sessions/") ? "会话详情" : "管理后台");
+    (base.startsWith("/sessions/")
+      ? "会话详情"
+      : base.startsWith("/jobs/")
+        ? "任务详情"
+        : "管理后台");
 
   const [tick, setTick] = useState(0);
   useEffect(() => {

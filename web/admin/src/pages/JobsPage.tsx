@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { StateBox, statusBadge } from "../components/ui";
 
@@ -16,6 +17,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [sortKey, setSortKey] = useState<"id" | "status" | "updated_at">("id");
   const [sortAsc, setSortAsc] = useState(false);
+  const nav = useNavigate();
 
   useEffect(() => {
     let alive = true;
@@ -105,6 +107,8 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
                     ID
                   </button>
                 </th>
+                <th>来源</th>
+                <th>公司</th>
                 <th>roomid</th>
                 <th>
                   <button
@@ -118,7 +122,6 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
                 <th>尝试</th>
                 <th>dry/submit</th>
                 <th>错误</th>
-                <th>截图</th>
                 <th>
                   <button
                     type="button"
@@ -133,8 +136,18 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             </thead>
             <tbody>
               {sorted.map((j) => (
-                <tr key={j.id}>
-                  <td className="mono">{j.id}</td>
+                <tr
+                  key={j.id}
+                  className="clickable"
+                  onClick={() => nav(`/jobs/${j.id}`)}
+                >
+                  <td className="mono">
+                    <Link to={`/jobs/${j.id}`} onClick={(e) => e.stopPropagation()}>
+                      #{j.id}
+                    </Link>
+                  </td>
+                  <td className="mono muted">{j.source || "-"}</td>
+                  <td>{j.company_name || "-"}</td>
                   <td className="mono">{j.roomid}</td>
                   <td>
                     <span className={statusBadge(j.status)}>{j.status}</span>
@@ -145,12 +158,11 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
                   <td className="mono">
                     {j.dry_run ? "Y" : "N"}/{j.allow_submit ? "Y" : "N"}
                   </td>
-                  <td>{String(j.last_error || "").slice(0, 80)}</td>
-                  <td className="mono muted">
-                    {String(j.screenshot_path || "").slice(0, 40)}
+                  <td title={String(j.last_error || "")}>
+                    {String(j.last_error || "").slice(0, 60)}
                   </td>
                   <td className="mono muted">{j.updated_at || ""}</td>
-                  <td>
+                  <td onClick={(e) => e.stopPropagation()}>
                     {j.status === "pending" ? (
                       <button
                         type="button"

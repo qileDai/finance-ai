@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, RequireAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { JobsPage } from "./pages/JobsPage";
+import { JobDetailPage } from "./pages/JobDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { QualityPage } from "./pages/QualityPage";
@@ -48,6 +49,16 @@ export default function App() {
               path="jobs"
               element={
                 <JobsPage
+                  refreshKey={refreshKey}
+                  onToast={onToast}
+                  onRefresh={onRefresh}
+                />
+              }
+            />
+            <Route
+              path="jobs/:id"
+              element={
+                <JobDetailPage
                   refreshKey={refreshKey}
                   onToast={onToast}
                   onRefresh={onRefresh}

@@ -104,7 +104,10 @@ class IcrisJobWorker:
         try:
             ctx = self.workflow.run_icris_job(job, force_isolated_browser=True)
             package_dir = str(ctx.package_dir or package_dir)
-            self.store.mark_job_succeeded(job_id, package_dir=package_dir)
+            msgs = list(getattr(ctx, "messages", None) or [])
+            self.store.mark_job_succeeded(
+                job_id, package_dir=package_dir, result_messages=msgs
+            )
             self.store.set_group_status(roomid, "HANDOFF")
             self.workflow.notify_job_result(
                 job, ok=True, package_dir=package_dir
@@ -137,6 +140,11 @@ class IcrisJobWorker:
 
             if isinstance(e, IcrisFlowError):
                 screenshot_path = e.screenshot_path or ""
+            msgs: list[str] = []
+            # 失败时尽量保留已有步骤日志（若异常对象挂了 ctx）
+            ctx_fail = getattr(e, "ctx", None)
+            if ctx_fail is not None:
+                msgs = list(getattr(ctx_fail, "messages", None) or [])
             self.store.mark_job_failed(
                 job_id,
                 error=err,
@@ -144,6 +152,7 @@ class IcrisJobWorker:
                 available_at=available_at,
                 package_dir=package_dir,
                 screenshot_path=screenshot_path,
+                result_messages=msgs or None,
             )
             if screenshot_path:
                 logger.warning(

@@ -418,22 +418,41 @@ def cmd_admin(_args: argparse.Namespace) -> None:
     import logging
 
     from config.settings import settings
+    from src.storage.db import ExternalGroupStore
     from src.web.admin_server import AdminWebServer
+    from src.wework.external_workflow import ExternalGroupWorkflow
+    from src.wework.icris_job_worker import IcrisJobWorker
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     port = int(settings.admin_port or 8082)
+    store = ExternalGroupStore()
+    icris_worker = IcrisJobWorker(
+        store=store,
+        workflow=ExternalGroupWorkflow(store=store),
+    )
+    icris_worker.start(blocking=False)
     print("=" * 60)
     print("Finance AI Ops - 管理后台")
     print("=" * 60)
     print(f"[Admin] 端口: {port}")
     print(f"[Admin] URL: http://127.0.0.1:{port}/admin")
     print("[Admin] 打开 /admin 登录页（ADMIN_USERNAME / ADMIN_PASSWORD）；与 wework-external-bot 共用 SQLite")
+    print(
+        f"[Admin] ICRIS Worker: "
+        f"{'已启动' if settings.icris_worker_enabled else '未启用（ICRIS_WORKER_ENABLED=false）'}"
+    )
     print("[Admin] Agent 请另开终端: python main.py wework-external-bot")
     print("[Admin] 按 Ctrl+C 退出\n")
-    AdminWebServer(port=port).start(blocking=True)
+    try:
+        AdminWebServer(port=port, store=store, icris_worker=icris_worker).start(
+            blocking=True
+        )
+    finally:
+        icris_worker.stop()
+
 
 
 def cmd_wework_external_bot(_args: argparse.Namespace) -> None:

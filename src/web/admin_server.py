@@ -31,11 +31,13 @@ class AdminWebServer:
     store: ExternalGroupStore = field(default_factory=ExternalGroupStore)
     host: str = "0.0.0.0"
     port: int = 8082
+    icris_worker: Any = None
 
     def start(self, *, blocking: bool = True) -> None:
         store = self.store
         port = self.port
         host = self.host
+        icris_worker = self.icris_worker
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, fmt: str, *args: Any) -> None:
@@ -160,7 +162,7 @@ class AdminWebServer:
                         method="GET",
                         path=self.path,
                         store=store,
-                        icris_worker=None,
+                        icris_worker=icris_worker,
                     )
                     if result is None:
                         return self._send_json({"ok": False, "error": "not found"}, 404)
@@ -201,7 +203,7 @@ class AdminWebServer:
                         method="POST",
                         path=self.path,
                         store=store,
-                        icris_worker=None,
+                        icris_worker=icris_worker,
                         body=body,
                     )
                     if result is None:
