@@ -77,6 +77,15 @@ def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
         session["password"] = password_raw
         return username, password_raw
 
+    # yingtai：无预生成时现场生成 Yingtai + 月日 + 随机
+    if getattr(settings, "icris_credential_mode", "yingtai") == "yingtai" and not username:
+        from src.materials.aggregator import _generate_icris_credentials
+
+        username, password = _generate_icris_credentials()
+        session["username"] = username
+        session["password"] = password
+        return username, password
+
     # 旧逻辑：邮箱用户名 + 随机后缀 + 姓名派生密码
     if not username:
         email = applicant.get("email", "")
@@ -3701,6 +3710,323 @@ class IcrisRegistrationBot:
             )
         )
 
+    def _is_esubmit_terms_url(self, url: str) -> bool:
+        return bool(re.search(r"registration/s03a", (url or "").lower()))
+
+    async def _is_esubmit_terms_step(self, page: "Page") -> bool:
+        """s03a：电子提交服务的条款和条件（双确认勾选页）。"""
+        if self._is_esubmit_terms_url(page.url):
+            return True
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return false;
+                    const t = root.innerText || '';
+                    return /电子提交服务的条款|電子提交服務的條款/.test(t)
+                        && /个人资料收集声明|個人資料收集聲明/.test(t)
+                        && /资料正确完整|資料正確完整/.test(t);
+                }"""
+            )
+        )
+
+    async def _accept_esubmit_terms(
+        self, page: "Page", *, submit: bool
+    ) -> bool:
+        """勾选 s03a 两个确认框；submit=True 时点击提交。
+
+        Ant Design 原生 checkbox 常不可见，必须用 JS 按邻近文案勾选并校验 checked。
+        """
+        if not await self._is_esubmit_terms_step(page):
+            return False
+
+        # 按文案勾选（含隐藏 input），返回 {ok, terms, confirm, checked_count}
+        result = await page.evaluate(
+            """() => {
+                const TERMS_RE = /本人已阅读|本人已閱讀|同意受上述条款|同意受上述條款|个人资料收集声明|個人資料收集聲明/;
+                const CONFIRM_RE = /本人确认以上|本人確認以上|资料正确完整|資料正確完整/;
+
+                function labelText(cb) {
+                    if (cb.id) {
+                        const lab = document.querySelector(`label[for="${cb.id}"]`);
+                        if (lab) return (lab.innerText || lab.textContent || '').trim();
+                    }
+                    const wrap = cb.closest('.ant-checkbox-wrapper')
+                        || cb.closest('label')
+                        || cb.parentElement;
+                    if (!wrap) return '';
+                    return (wrap.innerText || wrap.textContent || '').trim();
+                }
+
+                function forceCheck(cb) {
+                    if (!cb) return false;
+                    try { cb.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+                    const wrap = cb.closest('.ant-checkbox-wrapper') || cb.closest('label');
+                    const box = wrap
+                        ? (wrap.querySelector('.ant-checkbox') || wrap)
+                        : cb;
+                    // 先点方块（触发 Vue/Ant 状态）
+                    try { box.click(); } catch (e) {}
+                    if (!cb.checked) {
+                        cb.checked = true;
+                        cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        cb.dispatchEvent(new Event('input', { bubbles: true }));
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    // Ant Design 勾选态 class
+                    const ant = cb.closest('.ant-checkbox');
+                    if (ant) ant.classList.add('ant-checkbox-checked');
+                    if (wrap) wrap.classList.add('ant-checkbox-wrapper-checked');
+                    return !!cb.checked;
+                }
+
+                const boxes = Array.from(
+                    document.querySelectorAll("input[type='checkbox']")
+                );
+                let terms = false;
+                let confirm = false;
+                for (const cb of boxes) {
+                    const t = labelText(cb);
+                    if (!t) continue;
+                    if (!terms && TERMS_RE.test(t)) {
+                        terms = forceCheck(cb);
+                    } else if (!confirm && CONFIRM_RE.test(t)) {
+                        confirm = forceCheck(cb);
+                    }
+                }
+
+                // 文案未命中满 2 个：按 DOM 顺序补勾仍未选的（含隐藏，不要求 visible）
+                if (!terms || !confirm) {
+                    for (const cb of boxes) {
+                        if (terms && confirm) break;
+                        if (cb.checked) continue;
+                        const t = labelText(cb);
+                        if (
+                            /电子查册|電子查冊/i.test(t)
+                            && !TERMS_RE.test(t)
+                            && !CONFIRM_RE.test(t)
+                        ) {
+                            continue;
+                        }
+                        if (!forceCheck(cb)) continue;
+                        if (TERMS_RE.test(t)) terms = true;
+                        else if (CONFIRM_RE.test(t)) confirm = true;
+                        else if (!terms) terms = true;
+                        else confirm = true;
+                    }
+                }
+
+                // 仍不足：强制勾前两个未勾的 checkbox
+                if (!terms || !confirm) {
+                    for (const cb of boxes) {
+                        if (terms && confirm) break;
+                        if (cb.checked) continue;
+                        if (!forceCheck(cb)) continue;
+                        if (!terms) terms = true;
+                        else confirm = true;
+                    }
+                }
+
+                const checked_count = boxes.filter((cb) => cb.checked).length;
+                return {
+                    ok: !!(terms && confirm),
+                    terms: !!terms,
+                    confirm: !!confirm,
+                    checked_count,
+                    total: boxes.length,
+                };
+            }"""
+        )
+
+        terms_ok = bool((result or {}).get("terms"))
+        confirm_ok = bool((result or {}).get("confirm"))
+        logger.info(
+            "s03a JS 勾选结果 terms=%s confirm=%s checked=%s/%s",
+            terms_ok,
+            confirm_ok,
+            (result or {}).get("checked_count"),
+            (result or {}).get("total"),
+        )
+
+        # Playwright 再点 wrapper 重试未成功的项
+        if not (terms_ok and confirm_ok):
+            retry_pats = []
+            if not terms_ok:
+                retry_pats.append(
+                    r"本人已阅读|本人已閱讀|个人资料收集声明|個人資料收集聲明|同意受上述条款|同意受上述條款"
+                )
+            if not confirm_ok:
+                retry_pats.append(
+                    r"本人确认以上|本人確認以上|资料正确完整|資料正確完整"
+                )
+            for pat in retry_pats:
+                try:
+                    wrap = page.locator(".ant-checkbox-wrapper, label").filter(
+                        has_text=re.compile(pat)
+                    ).first
+                    if await wrap.count() > 0:
+                        await wrap.scroll_into_view_if_needed()
+                        box = wrap.locator(".ant-checkbox, input[type='checkbox']").first
+                        if await box.count() > 0:
+                            await box.click(force=True, timeout=5000)
+                        else:
+                            await wrap.click(force=True, timeout=5000)
+                        logger.info("s03a Playwright 重试勾选: %s", pat[:20])
+                except Exception:
+                    logger.debug("s03a Playwright 重试失败 pat=%s", pat, exc_info=True)
+
+            # 再验一次
+            verify = await page.evaluate(
+                """() => {
+                    const TERMS_RE = /本人已阅读|本人已閱讀|同意受上述条款|同意受上述條款|个人资料收集声明|個人資料收集聲明/;
+                    const CONFIRM_RE = /本人确认以上|本人確認以上|资料正确完整|資料正確完整/;
+                    function labelText(cb) {
+                        if (cb.id) {
+                            const lab = document.querySelector(`label[for="${cb.id}"]`);
+                            if (lab) return (lab.innerText || '').trim();
+                        }
+                        const wrap = cb.closest('.ant-checkbox-wrapper')
+                            || cb.closest('label') || cb.parentElement;
+                        return wrap ? (wrap.innerText || '').trim() : '';
+                    }
+                    let terms = false, confirm = false;
+                    for (const cb of document.querySelectorAll("input[type='checkbox']")) {
+                        const t = labelText(cb);
+                        if (cb.checked && TERMS_RE.test(t)) terms = true;
+                        if (cb.checked && CONFIRM_RE.test(t)) confirm = true;
+                    }
+                    const n = Array.from(document.querySelectorAll("input[type='checkbox']"))
+                        .filter((c) => c.checked).length;
+                    return {
+                        terms,
+                        confirm,
+                        checked_count: n,
+                        ok: (terms && confirm) || n >= 2,
+                    };
+                }"""
+            )
+            v_n = int((verify or {}).get("checked_count") or 0)
+            terms_ok = bool((verify or {}).get("terms")) or v_n >= 2
+            confirm_ok = bool((verify or {}).get("confirm")) or v_n >= 2
+            logger.info(
+                "s03a 重试验证 terms=%s confirm=%s checked=%s ok=%s",
+                (verify or {}).get("terms"),
+                (verify or {}).get("confirm"),
+                (verify or {}).get("checked_count"),
+                (verify or {}).get("ok"),
+            )
+
+        both_ok = terms_ok and confirm_ok
+        if not both_ok:
+            # 最后兜底：不要求 visible，force check 前两个
+            try:
+                cbs = page.locator("input[type='checkbox']")
+                n = await cbs.count()
+                forced = 0
+                for i in range(n):
+                    if forced >= 2:
+                        break
+                    cb = cbs.nth(i)
+                    try:
+                        if await cb.is_checked():
+                            forced += 1
+                            continue
+                        await cb.check(force=True)
+                        await cb.dispatch_event("change")
+                        if await cb.is_checked():
+                            forced += 1
+                    except Exception:
+                        pass
+                both_ok = forced >= 2
+                logger.info("s03a force-check 兜底 forced=%d both_ok=%s", forced, both_ok)
+            except Exception:
+                logger.debug("s03a force-check 兜底失败", exc_info=True)
+
+        if not both_ok:
+            logger.error("s03a 两个确认框仍未全部勾选，放弃提交")
+            return False
+
+        logger.info(
+            "s03a 两框已勾选 submit=%s allow_submit=%s",
+            submit,
+            self.allow_submit,
+        )
+
+        if not submit:
+            logger.info("s03a dry_run/未允许提交：已勾选但不点提交")
+            return True
+
+        # 提交前再确认仍勾着
+        still = await page.evaluate(
+            """() => {
+                const n = Array.from(document.querySelectorAll("input[type='checkbox']"))
+                    .filter((c) => c.checked).length;
+                return n >= 2;
+            }"""
+        )
+        if not still:
+            logger.error("s03a 提交前校验失败：勾选状态丢失")
+            return False
+
+        submit_selectors = [
+            "button:has-text('提交')",
+            "button:has-text('提 交')",
+            "input[type='submit'][value*='提交']",
+            "input[type='button'][value*='提交']",
+            "button:has-text('Submit')",
+            "input[type='submit'][value*='Submit' i]",
+            "form button[type='submit']",
+            "form input[type='submit']",
+        ]
+        for sel in submit_selectors:
+            btn = page.locator(sel).first
+            try:
+                if await btn.count() == 0 or not await btn.is_visible():
+                    continue
+                tag = await btn.evaluate("el => el.tagName")
+                txt = (
+                    (await btn.inner_text()).strip()
+                    if tag == "BUTTON"
+                    else str(await btn.get_attribute("value") or "")
+                )
+                if re.search(r"继续|繼續|下一步|Next", txt, re.I) and not re.search(
+                    r"提交|Submit", txt, re.I
+                ):
+                    continue
+                logger.warning("s03a 即将点击提交: %s", sel)
+                await btn.click(timeout=15000)
+                await self._wait_spin_clear(page, timeout_ms=45000)
+                await self._log_page(page, "s03a 提交后")
+                return True
+            except Exception:
+                logger.debug("s03a 提交按钮点击失败 sel=%s", sel, exc_info=True)
+
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll(
+                        "button, input[type='submit'], input[type='button'], .ant-btn"
+                    ));
+                    for (const el of nodes) {
+                        const t = ((el.innerText || el.value || '') + '').trim();
+                        if (!/提交|Submit/i.test(t)) continue;
+                        if (/继续|繼續|下一步/i.test(t) && !/提交/i.test(t)) continue;
+                        el.click();
+                        return true;
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                await self._wait_spin_clear(page, timeout_ms=45000)
+                logger.warning("s03a 已通过 JS 点击提交")
+                return True
+        except Exception:
+            logger.debug("s03a JS 提交失败", exc_info=True)
+
+        logger.warning("s03a 已勾选但未找到提交按钮")
+        return False
+
     def _normalize_icris_id_type(self, raw: str, id_number: str = "") -> str:
         """归一证件类型：HKID / PRC_ID / PASSPORT。"""
         t = (raw or "").strip().upper().replace("-", "_").replace(" ", "")
@@ -4588,12 +4914,32 @@ class IcrisRegistrationBot:
                 else:
                     logger.info("暂未进入身份证明页, url=%s", page.url)
 
+                # Step 4b: s03a 电子提交条款（可能在 s03/s04 继续后出现）
+                await self._wait_spin_clear(page, timeout_ms=15000)
+                if await self._is_esubmit_terms_step(page):
+                    logger.info("=== s03a 电子提交服务条款 ===")
+                    await self._accept_esubmit_terms(
+                        page, submit=bool(self.allow_submit)
+                    )
+
                 # Step 5+: 其余多步表单（已填 s03/s04 不再重跑）
                 max_steps = 6
                 for step in range(max_steps):
                     if self._is_home_or_portal(page.url):
                         logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
                         break
+                    if await self._is_esubmit_terms_step(page):
+                        logger.info("=== s03a 电子提交服务条款（步骤循环）===")
+                        await self._accept_esubmit_terms(
+                            page, submit=bool(self.allow_submit)
+                        )
+                        await self._wait_spin_clear(page, timeout_ms=20000)
+                        if (
+                            await self._is_esubmit_terms_step(page)
+                            and not self.allow_submit
+                        ):
+                            break
+                        continue
                     if await self._is_identity_proof_step(page):
                         if self._identity_proof_filled:
                             if not await self._click_continue(page):
@@ -4622,23 +4968,30 @@ class IcrisRegistrationBot:
                     if not await self._ensure_on_registration(page, f"步骤{step + 5}后"):
                         break
 
-                submit_btns = page.locator(
-                    "form input[type='submit'], form button[type='submit']"
-                )
-                if await submit_btns.count() > 0:
-                    if self.allow_submit:
-                        logger.warning(
-                            "即将点击 ICRIS 最终提交（DRY_RUN=false, ICRIS_ALLOW_SUBMIT=true）"
-                        )
-                        await submit_btns.first.click(timeout=15000)
-                        await self._wait_spin_clear(page, timeout_ms=30000)
-                        logger.warning("已点击 ICRIS 最终提交按钮")
-                    else:
-                        logger.info(
-                            "检测到提交按钮，未点击（dry_run=%s icris_allow_submit=%s）",
-                            self.dry_run,
-                            settings.icris_allow_submit,
-                        )
+                # 末尾再处理一次 s03a（避免只点到通用 submit 却未勾选）
+                if await self._is_esubmit_terms_step(page):
+                    logger.info("=== s03a 电子提交服务条款（流程末尾）===")
+                    await self._accept_esubmit_terms(
+                        page, submit=bool(self.allow_submit)
+                    )
+                else:
+                    submit_btns = page.locator(
+                        "form input[type='submit'], form button[type='submit']"
+                    )
+                    if await submit_btns.count() > 0:
+                        if self.allow_submit:
+                            logger.warning(
+                                "即将点击 ICRIS 最终提交（DRY_RUN=false, ICRIS_ALLOW_SUBMIT=true）"
+                            )
+                            await submit_btns.first.click(timeout=15000)
+                            await self._wait_spin_clear(page, timeout_ms=30000)
+                            logger.warning("已点击 ICRIS 最终提交按钮")
+                        else:
+                            logger.info(
+                                "检测到提交按钮，未点击（dry_run=%s icris_allow_submit=%s）",
+                                self.dry_run,
+                                settings.icris_allow_submit,
+                            )
 
                 if self.allow_submit:
                     logger.info("注册表单填写完成（已按开关尝试提交）")

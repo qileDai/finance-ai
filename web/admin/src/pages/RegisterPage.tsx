@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
+import { formatDateTime } from "../format";
 import { statusBadge } from "../components/ui";
 
 type Props = {
@@ -452,8 +453,8 @@ export function RegisterPage({ onToast }: Props) {
                 ) : null}
               </div>
               <div className="reg-meta">
-                <span>开始: {runnerStatus.started_at || "-"}</span>
-                <span>完成: {runnerStatus.finished_at || "-"}</span>
+                <span>开始: {formatDateTime(runnerStatus.started_at)}</span>
+                <span>完成: {formatDateTime(runnerStatus.finished_at)}</span>
                 <span>dry_run: {runnerStatus.dry_run ? "Y" : "N"}</span>
               </div>
               {runnerStatus.error ? (

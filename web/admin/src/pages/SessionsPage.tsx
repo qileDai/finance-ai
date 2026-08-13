@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, type MaterialRow, type SessionSummary } from "../api";
+import { formatDateTime } from "../format";
 import { StateBox, statusBadge } from "../components/ui";
 
 export function SessionsPage({ refreshKey }: { refreshKey: number }) {
@@ -171,7 +172,7 @@ export function SessionDetailPage({ refreshKey }: { refreshKey: number }) {
                       <td className="mono muted">
                         {String(m.file_path || "").slice(0, 40)}
                       </td>
-                      <td className="mono muted">{m.updated_at || ""}</td>
+                      <td className="mono muted">{formatDateTime(m.updated_at)}</td>
                     </tr>
                   ))}
                 </tbody>

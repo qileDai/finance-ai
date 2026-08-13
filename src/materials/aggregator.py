@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-import time
+import secrets
+import string
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,12 +83,17 @@ def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def _generate_icris_credentials() -> tuple[str, str]:
-    """生成 ICRIS 账号凭证：用户名=前缀+时间戳后N位，密码=用户名+后缀。"""
+    """生成 ICRIS 账号凭证：用户名=前缀+月日(MMDD)+N位随机字符，密码=用户名+后缀。"""
     prefix = getattr(settings, "icris_username_prefix", "Yingtai")
-    digits = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
+    rand_len = int(getattr(settings, "icris_username_random_length", 0) or 0)
+    if rand_len <= 0:
+        # 兼容旧配置名 icris_username_timestamp_digits
+        rand_len = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
     pw_suffix = getattr(settings, "icris_password_suffix", "@1")
-    ts_suffix = str(int(time.time()))[-digits:]
-    username = f"{prefix}{ts_suffix}"
+    md = datetime.now().strftime("%m%d")
+    alphabet = string.ascii_lowercase + string.digits
+    rand = "".join(secrets.choice(alphabet) for _ in range(rand_len))
+    username = f"{prefix}{md}{rand}"
     password = f"{username}{pw_suffix}"
     return username, password
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
+import { formatDateTime } from "../format";
 import { StateBox, statusBadge } from "../components/ui";
 
 type Props = {
@@ -161,7 +162,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
                   <td title={String(j.last_error || "")}>
                     {String(j.last_error || "").slice(0, 60)}
                   </td>
-                  <td className="mono muted">{j.updated_at || ""}</td>
+                  <td className="mono muted">{formatDateTime(j.updated_at)}</td>
                   <td onClick={(e) => e.stopPropagation()}>
                     {j.status === "pending" ? (
                       <button

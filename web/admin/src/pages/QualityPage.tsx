@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type LowRun } from "../api";
+import { formatDateTime } from "../format";
 import { pct, StateBox, statusBadge } from "../components/ui";
 
 export function QualityPage({ refreshKey }: { refreshKey: number }) {
@@ -102,7 +103,7 @@ export function QualityPage({ refreshKey }: { refreshKey: number }) {
               <tbody>
                 {runs.map((r, i) => (
                   <tr key={r.id || `${r.created_at}-${i}`}>
-                    <td className="mono muted">{r.created_at || ""}</td>
+                    <td className="mono muted">{formatDateTime(r.created_at)}</td>
                     <td className="mono">{r.roomid || ""}</td>
                     <td>
                       <span className={statusBadge(r.action)}>{r.action || "-"}</span>

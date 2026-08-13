@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type JobDetailResponse, type JobField } from "../api";
+import { formatDateTime } from "../format";
 import { StateBox, statusBadge } from "../components/ui";
 
 type Props = {
@@ -125,19 +126,19 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                 </div>
                 <div>
                   <dt>创建</dt>
-                  <dd className="mono muted">{job.created_at || "-"}</dd>
+                  <dd className="mono muted">{formatDateTime(job.created_at)}</dd>
                 </div>
                 <div>
                   <dt>开始</dt>
-                  <dd className="mono muted">{job.started_at || "-"}</dd>
+                  <dd className="mono muted">{formatDateTime(job.started_at)}</dd>
                 </div>
                 <div>
                   <dt>结束</dt>
-                  <dd className="mono muted">{job.finished_at || "-"}</dd>
+                  <dd className="mono muted">{formatDateTime(job.finished_at)}</dd>
                 </div>
                 <div>
                   <dt>更新</dt>
-                  <dd className="mono muted">{job.updated_at || "-"}</dd>
+                  <dd className="mono muted">{formatDateTime(job.updated_at)}</dd>
                 </div>
                 <div>
                   <dt>材料包</dt>
