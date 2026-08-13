@@ -9,17 +9,19 @@ import secrets
 import string
 import time
 import unicodedata
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 from config.settings import settings
 from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
+from src.browser.icris_errors import IcrisStepLoadError
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page
+    from playwright.async_api import BrowserContext, Page
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ _PAGE_PAUSE_MS = 80
 _POLL_MS = 100
 _FORM_PAUSE_MS = 120
 _SPIN_TIMEOUT_MS = 45000
+_STEP_READY_MS = 30000
 
 REGISTRATION_BASE = (
     "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s01.do"
@@ -247,6 +250,12 @@ class IcrisRegistrationBot:
         self._user_info_filled: bool = False
         self._identity_proof_filled: bool = False
 
+    def _reset_flow_flags(self) -> None:
+        """关页重开前重置步骤内存标志，避免假成功。"""
+        self._user_info_filled = False
+        self._identity_proof_filled = False
+        self._locale = None
+
     async def _log_page(self, page: "Page", label: str) -> None:
         logger.info("[%s] URL: %s", label, page.url)
 
@@ -309,6 +318,82 @@ class IcrisRegistrationBot:
             if not await self._is_spinning(page):
                 return True
         return not await self._is_spinning(page)
+
+    async def _wait_step_ready(
+        self,
+        page: "Page",
+        ready_fn: Callable[["Page"], Awaitable[bool]],
+        *,
+        timeout_ms: int = _STEP_READY_MS,
+        label: str = "",
+    ) -> bool:
+        """等待 spinner 消失且 ready_fn 为真（单轮，默认 20s）。"""
+        if page.is_closed():
+            return False
+        deadline = time.time() + max(0.5, timeout_ms / 1000)
+        tag = label or "步骤"
+        while time.time() < deadline:
+            if page.is_closed():
+                return False
+            remain_ms = max(200, int((deadline - time.time()) * 1000))
+            await self._wait_spin_clear(page, timeout_ms=min(3000, remain_ms))
+            try:
+                if await ready_fn(page):
+                    return True
+            except Exception:
+                logger.debug("%s ready_fn 检查异常", tag, exc_info=True)
+            await page.wait_for_timeout(min(500, max(100, remain_ms)))
+        try:
+            return bool(await ready_fn(page))
+        except Exception:
+            return False
+
+    async def _recover_step_or_restart(
+        self,
+        page: "Page",
+        ready_fn: Callable[["Page"], Awaitable[bool]],
+        *,
+        label: str = "",
+    ) -> "Page":
+        """等 20s → reload 再等 20s；仍失败则抛 IcrisStepLoadError 由 run 关页重开。"""
+        tag = label or "步骤"
+        if await self._wait_step_ready(
+            page, ready_fn, timeout_ms=_STEP_READY_MS, label=tag
+        ):
+            return page
+
+        logger.warning("%s 未在 %dms 内就绪，刷新页面…", tag, _STEP_READY_MS)
+        try:
+            await page.reload(wait_until="commit", timeout=45000)
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        except Exception as exc:
+            logger.warning("%s reload 失败: %s", tag, exc)
+
+        if await self._wait_step_ready(
+            page, ready_fn, timeout_ms=_STEP_READY_MS, label=tag
+        ):
+            logger.info("%s reload 后已就绪 url=%s", tag, page.url[:120])
+            return page
+
+        logger.error(
+            "%s reload 后仍未就绪，将关页从入口重跑 url=%s",
+            tag,
+            page.url[:120],
+        )
+        raise IcrisStepLoadError(f"{tag} 关键元素加载失败: {page.url[:160]}")
+
+    async def _reopen_fresh_page(
+        self, page: "Page", context: "BrowserContext"
+    ) -> "Page":
+        """关闭当前标签页并开新页（不关 Chrome/CDP）。"""
+        try:
+            if page is not None and not page.is_closed():
+                await page.close()
+        except Exception:
+            logger.debug("关闭旧页失败", exc_info=True)
+        new_page = await context.new_page()
+        logger.info("已关闭旧页并打开新标签，准备重新进入注册")
+        return new_page
 
     async def _wait_registration_vue(self, page: "Page", timeout: int = 45000) -> bool:
         """等待注册条款页 Vue 挂载（checkbox / 验证码 / 步骤文案）"""
@@ -1294,6 +1379,25 @@ class IcrisRegistrationBot:
                 pass
         return False
 
+    async def _account_form_is_ready(self, page: "Page") -> bool:
+        """非阻塞：账户资料原生控件是否已挂载。"""
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const hasNative = !!document.querySelector(
+                            '#userType, #userId, #password'
+                        );
+                        const hasMarker = /用户类别|用戶類別|拟订用的服务|擬訂用的服務/.test(
+                            document.body ? document.body.innerText : ''
+                        );
+                        return hasMarker && hasNative;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
     async def _wait_for_account_form_ready(self, page: "Page", timeout_ms: int = 45000) -> bool:
         try:
             await page.wait_for_function(
@@ -1309,7 +1413,7 @@ class IcrisRegistrationBot:
             await page.wait_for_timeout(600)
             return True
         except Exception:
-            return False
+            return await self._account_form_is_ready(page)
 
     async def _get_account_profile_status(self, page: "Page") -> dict[str, bool]:
         return await page.evaluate(
@@ -2850,8 +2954,15 @@ class IcrisRegistrationBot:
         await self._log_user_category_dom(page)
         return False
 
-    async def _ensure_checkbox_by_text(self, page: "Page", text_pattern: str) -> bool:
-        """全页按文字勾选复选框（电子提交/电子查册）"""
+    async def _ensure_checkbox_by_text(
+        self,
+        page: "Page",
+        text_pattern: str,
+        *,
+        max_text_len: int = 40,
+        prefer_inner: bool = False,
+    ) -> bool:
+        """全页按文字勾选复选框（电子提交/电子查册；s03a 长文案可放宽 max_text_len）。"""
         pattern = re.compile(text_pattern, re.I)
         if await self._verify_checkbox_checked(page, text_pattern):
             return True
@@ -2861,11 +2972,18 @@ class IcrisRegistrationBot:
             if not await item.is_visible():
                 continue
             txt = (await item.inner_text()).strip()
-            if len(txt) > 40:
+            if max_text_len > 0 and len(txt) > max_text_len:
                 continue
             try:
                 await item.scroll_into_view_if_needed()
-                await item.click(force=True, timeout=3000)
+                if prefer_inner:
+                    inner = item.locator(".ant-checkbox-inner, .ant-checkbox").first
+                    if await inner.count() > 0:
+                        await inner.click(force=True, timeout=3000)
+                    else:
+                        await item.click(force=True, timeout=3000)
+                else:
+                    await item.click(force=True, timeout=3000)
                 await page.wait_for_timeout(400)
                 if await self._verify_checkbox_checked(page, text_pattern):
                     logger.info("已勾选复选框: %s", text_pattern)
@@ -3036,15 +3154,16 @@ class IcrisRegistrationBot:
         """
         if not await self._is_account_profile_step(page):
             await self._ensure_simplified_chinese(page)
-            if not await self._wait_for_account_profile_step(page, timeout_ms=30000):
-                logger.warning("当前不在账户资料步骤, url=%s", page.url)
-                return 0
+            await self._recover_step_or_restart(
+                page, self._is_account_profile_step, label="s02账户资料"
+            )
 
         await self._ensure_simplified_chinese(page)
         await self._scroll_registration_form_into_view(page)
-        await self._wait_registration_vue(page, timeout=30000)
-        if not await self._wait_for_account_form_ready(page):
-            logger.warning("账户资料表单控件未就绪, url=%s", page.url)
+        await self._wait_registration_vue(page, timeout=_STEP_READY_MS)
+        await self._recover_step_or_restart(
+            page, self._account_form_is_ready, label="s02账户表单"
+        )
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         filled = 0
@@ -3192,6 +3311,27 @@ class IcrisRegistrationBot:
             )
         )
 
+    async def _user_info_form_is_ready(self, page: "Page") -> bool:
+        """非阻塞：用户资料表单是否可填。"""
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const t = document.body ? document.body.innerText : '';
+                        if (!/填写用户资料|填寫用戶資料/.test(t)) return false;
+                        const inputs = document.querySelectorAll(
+                            "input:not([disabled]):not([type='hidden'])"
+                        );
+                        const selects = document.querySelectorAll(
+                            '.ant-select, [role=combobox], select:not([disabled])'
+                        );
+                        return inputs.length >= 2 || selects.length >= 1;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
     async def _wait_for_user_info_form(self, page: "Page", timeout_ms: int = 90000) -> bool:
         try:
             await page.wait_for_function(
@@ -3211,7 +3351,7 @@ class IcrisRegistrationBot:
             await page.wait_for_timeout(_FORM_PAUSE_MS)
             return True
         except Exception:
-            return await self._is_user_info_step(page)
+            return await self._user_info_form_is_ready(page)
 
     async def _fill_enabled_field_by_label(
         self,
@@ -3346,13 +3486,14 @@ class IcrisRegistrationBot:
             return 0
 
         if not await self._is_user_info_step(page):
-            if not await self._wait_for_user_info_form(page, timeout_ms=30000):
-                logger.warning("当前不在用户资料步骤, url=%s", page.url)
-                return 0
+            await self._recover_step_or_restart(
+                page, self._is_user_info_step, label="s03用户资料"
+            )
 
         await self._ensure_traditional_chinese(page)
-        if not await self._wait_for_user_info_form(page):
-            logger.warning("用户资料表单未就绪, url=%s", page.url)
+        await self._recover_step_or_restart(
+            page, self._user_info_form_is_ready, label="s03用户表单"
+        )
         try:
             await page.wait_for_function(
                 """() => /郵遞區號|邮递区号|通訊語言|通讯语言|區.*市.*省/.test(
@@ -3693,6 +3834,86 @@ class IcrisRegistrationBot:
 
         return await self._is_identity_proof_step(page)
 
+    def _s03a_url_from_current(self, url: str) -> str:
+        """将 registration/s04.do（或 s03.do）替换为 s03a.do，保留 query。"""
+        u = url or ""
+        if re.search(r"registration/s03a\.do", u, re.I):
+            return u
+        return re.sub(
+            r"(registration/)s0[34](\.do)",
+            r"\1s03a\2",
+            u,
+            count=1,
+            flags=re.I,
+        )
+
+    async def _advance_from_identity_to_esubmit(self, page: "Page") -> bool:
+        """s04 点继续并等待进入 s03a；前端未跳转时 reload / 直达 s03a.do。"""
+        if await self._is_esubmit_terms_step(page):
+            return True
+        if not self._is_identity_proof_url(page.url) and not await self._is_identity_proof_step(
+            page
+        ):
+            return await self._is_esubmit_terms_step(page)
+
+        try:
+            await page.evaluate(
+                "() => { try { document.activeElement && document.activeElement.blur(); } catch (e) {} }"
+            )
+        except Exception:
+            pass
+        await self._wait_spin_clear(page, timeout_ms=15000)
+
+        for attempt in range(1, 3):
+            ok = await self._click_continue(page)
+            if not ok:
+                logger.warning("s04→s03a 继续点击/等待失败 (尝试 %d/2)", attempt)
+            if await self._wait_step_ready(
+                page,
+                self._is_esubmit_terms_step,
+                timeout_ms=_STEP_READY_MS,
+                label="s03a",
+            ):
+                logger.info("已从身份证明进入 s03a 条款页")
+                return True
+            if self._is_home_or_portal(page.url):
+                logger.error("s04 继续后跳转首页")
+                return False
+            errs = await self._get_validation_errors(page)
+            if errs:
+                logger.warning("s04→s03a 仍有校验: %s", errs)
+                return False
+            if self._is_identity_proof_url(page.url):
+                break
+            await page.wait_for_timeout(600)
+
+        if self._is_identity_proof_url(page.url) and not await self._get_validation_errors(
+            page
+        ):
+            logger.info("s04 仍显示身份证明且无校验，尝试 reload 拉取 s03a")
+            try:
+                await page.reload(wait_until="commit", timeout=60000)
+                await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+            except Exception as exc:
+                logger.warning("s04→s03a reload 失败: %s", exc)
+            if await self._is_esubmit_terms_step(page):
+                logger.info("reload 后已进入 s03a")
+                return True
+
+            s03a = self._s03a_url_from_current(page.url)
+            if s03a != page.url and re.search(r"registration/s03a\.do", s03a, re.I):
+                logger.info("直达 s03a.do: %s", s03a[:120])
+                try:
+                    await page.goto(s03a, wait_until="commit", timeout=60000)
+                    await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+                except Exception as exc:
+                    logger.warning("goto s03a 失败: %s", exc)
+                if await self._is_esubmit_terms_step(page):
+                    logger.info("goto s03a 后已进入条款确认页")
+                    return True
+
+        return await self._is_esubmit_terms_step(page)
+
     def _is_identity_proof_url(self, url: str) -> bool:
         return bool(re.search(r"registration/s04", url.lower()))
 
@@ -3730,220 +3951,230 @@ class IcrisRegistrationBot:
             )
         )
 
-    async def _accept_esubmit_terms(
-        self, page: "Page", *, submit: bool
-    ) -> bool:
-        """勾选 s03a 两个确认框；submit=True 时点击提交。
-
-        Ant Design 原生 checkbox 常不可见，必须用 JS 按邻近文案勾选并校验 checked。
-        """
+    async def _esubmit_terms_is_ready(self, page: "Page") -> bool:
+        """s03a：两句确认文案出现且至少有一个 checkbox。"""
         if not await self._is_esubmit_terms_step(page):
             return False
+        try:
+            has_text = await page.evaluate(
+                """() => {
+                    const t = (document.body && document.body.innerText) || '';
+                    return /本人已阅读[、,，]?理解并同意|本人已閱讀[、,，]?理解並同意/.test(t)
+                        && /本人确认以上提供的资料正确完整|本人確認以上提供的資料正確完整/.test(t);
+                }"""
+            )
+            if not has_text:
+                return False
+            n = await page.locator(
+                "input[type='checkbox'], .ant-checkbox, .ant-checkbox-inner"
+            ).count()
+            return n >= 1
+        except Exception:
+            return False
 
-        # 按文案勾选（含隐藏 input），返回 {ok, terms, confirm, checked_count}
-        result = await page.evaluate(
+    async def _verify_esubmit_terms_checked(self, page: "Page") -> dict[str, bool]:
+        """校验截图中两句确认文案对应的 checkbox 是否已勾选。"""
+        return await page.evaluate(
             """() => {
-                const TERMS_RE = /本人已阅读|本人已閱讀|同意受上述条款|同意受上述條款|个人资料收集声明|個人資料收集聲明/;
-                const CONFIRM_RE = /本人确认以上|本人確認以上|资料正确完整|資料正確完整/;
+                const TERMS_RE = /本人已阅读[、,，]?理解并同意|本人已閱讀[、,，]?理解並同意|本人已阅读.*约束|本人已閱讀.*約束/;
+                const CONFIRM_RE = /本人确认以上提供的资料正确完整|本人確認以上提供的資料正確完整/;
 
-                function labelText(cb) {
-                    if (cb.id) {
-                        const lab = document.querySelector(`label[for="${cb.id}"]`);
-                        if (lab) return (lab.innerText || lab.textContent || '').trim();
-                    }
-                    const wrap = cb.closest('.ant-checkbox-wrapper')
-                        || cb.closest('label')
-                        || cb.parentElement;
-                    if (!wrap) return '';
-                    return (wrap.innerText || wrap.textContent || '').trim();
+                function rowText(el) {
+                    return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, '');
                 }
-
-                function forceCheck(cb) {
-                    if (!cb) return false;
-                    try { cb.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
-                    const wrap = cb.closest('.ant-checkbox-wrapper') || cb.closest('label');
-                    const box = wrap
-                        ? (wrap.querySelector('.ant-checkbox') || wrap)
-                        : cb;
-                    // 先点方块（触发 Vue/Ant 状态）
-                    try { box.click(); } catch (e) {}
-                    if (!cb.checked) {
-                        cb.checked = true;
-                        cb.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                        cb.dispatchEvent(new Event('input', { bubbles: true }));
-                        cb.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    // Ant Design 勾选态 class
-                    const ant = cb.closest('.ant-checkbox');
-                    if (ant) ant.classList.add('ant-checkbox-checked');
-                    if (wrap) wrap.classList.add('ant-checkbox-wrapper-checked');
-                    return !!cb.checked;
+                function isChecked(row) {
+                    if (!row) return false;
+                    const inp = row.querySelector("input[type='checkbox']");
+                    if (inp && inp.checked) return true;
+                    if (row.classList && (
+                        row.classList.contains('ant-checkbox-wrapper-checked')
+                        || row.querySelector('.ant-checkbox-checked')
+                    )) return true;
+                    return false;
                 }
-
-                const boxes = Array.from(
-                    document.querySelectorAll("input[type='checkbox']")
-                );
-                let terms = false;
-                let confirm = false;
-                for (const cb of boxes) {
-                    const t = labelText(cb);
-                    if (!t) continue;
-                    if (!terms && TERMS_RE.test(t)) {
-                        terms = forceCheck(cb);
-                    } else if (!confirm && CONFIRM_RE.test(t)) {
-                        confirm = forceCheck(cb);
-                    }
-                }
-
-                // 文案未命中满 2 个：按 DOM 顺序补勾仍未选的（含隐藏，不要求 visible）
-                if (!terms || !confirm) {
-                    for (const cb of boxes) {
-                        if (terms && confirm) break;
-                        if (cb.checked) continue;
-                        const t = labelText(cb);
-                        if (
-                            /电子查册|電子查冊/i.test(t)
-                            && !TERMS_RE.test(t)
-                            && !CONFIRM_RE.test(t)
-                        ) {
-                            continue;
+                function findRow(re) {
+                    const cands = Array.from(document.querySelectorAll(
+                        'label, .ant-checkbox-wrapper, div, span, p, li, tr, td'
+                    ));
+                    let best = null;
+                    let bestLen = Infinity;
+                    for (const el of cands) {
+                        const t = rowText(el);
+                        if (!t || !re.test(t)) continue;
+                        if (t.length < bestLen) {
+                            best = el;
+                            bestLen = t.length;
                         }
-                        if (!forceCheck(cb)) continue;
-                        if (TERMS_RE.test(t)) terms = true;
-                        else if (CONFIRM_RE.test(t)) confirm = true;
-                        else if (!terms) terms = true;
-                        else confirm = true;
                     }
+                    if (!best) return null;
+                    return best.closest(
+                        '.ant-checkbox-wrapper, label, tr, .ant-row, .ant-form-item, li'
+                    ) || best;
                 }
-
-                // 仍不足：强制勾前两个未勾的 checkbox
-                if (!terms || !confirm) {
-                    for (const cb of boxes) {
-                        if (terms && confirm) break;
-                        if (cb.checked) continue;
-                        if (!forceCheck(cb)) continue;
-                        if (!terms) terms = true;
-                        else confirm = true;
-                    }
-                }
-
-                const checked_count = boxes.filter((cb) => cb.checked).length;
+                const termsRow = findRow(TERMS_RE);
+                const confirmRow = findRow(CONFIRM_RE);
                 return {
-                    ok: !!(terms && confirm),
-                    terms: !!terms,
-                    confirm: !!confirm,
-                    checked_count,
-                    total: boxes.length,
+                    terms: isChecked(termsRow),
+                    confirm: isChecked(confirmRow),
+                    ok: !!(isChecked(termsRow) && isChecked(confirmRow)),
                 };
             }"""
         )
 
-        terms_ok = bool((result or {}).get("terms"))
-        confirm_ok = bool((result or {}).get("confirm"))
-        logger.info(
-            "s03a JS 勾选结果 terms=%s confirm=%s checked=%s/%s",
-            terms_ok,
-            confirm_ok,
-            (result or {}).get("checked_count"),
-            (result or {}).get("total"),
+    async def _click_esubmit_checkbox_by_text(
+        self, page: "Page", *, needle: str, label: str
+    ) -> bool:
+        """按片段文案定位行，只点左侧 ant-checkbox 方块。"""
+        try:
+            text_loc = page.get_by_text(needle, exact=False).first
+            if await text_loc.count() == 0:
+                return False
+            row = text_loc.locator(
+                "xpath=ancestor::*[.//input[@type='checkbox'] "
+                "or .//span[contains(@class,'ant-checkbox')]][1]"
+            ).first
+            if await row.count() == 0:
+                row = text_loc.locator(
+                    "xpath=ancestor::label[1] | ancestor::*[contains(@class,'ant-checkbox-wrapper')][1]"
+                ).first
+            if await row.count() == 0:
+                return False
+            await row.scroll_into_view_if_needed()
+            box = row.locator(
+                ".ant-checkbox-inner, .ant-checkbox, input[type='checkbox']"
+            ).first
+            if await box.count() > 0:
+                await box.click(force=True, timeout=5000)
+            else:
+                await row.click(force=True, timeout=5000)
+            logger.info("s03a Playwright 已点方块: %s", label)
+            return True
+        except Exception:
+            logger.debug("s03a Playwright 点方块失败: %s", label, exc_info=True)
+            return False
+
+    async def _accept_esubmit_terms(
+        self, page: "Page", *, submit: bool
+    ) -> bool:
+        """勾选 s03a 截图中的两个确认框；submit=True 时点击提交。
+
+        只匹配「本人已阅读…约束」与「本人确认以上…正确完整」；
+        先 wait 再 recover；点 .ant-checkbox-inner（长文案不限 40 字）。
+        """
+        if not await self._is_esubmit_terms_step(page):
+            return False
+
+        # 先等 20s，未就绪再 recover（避免一上来整页 reload）
+        if not await self._wait_step_ready(
+            page,
+            self._esubmit_terms_is_ready,
+            timeout_ms=_STEP_READY_MS,
+            label="s03a条款确认",
+        ):
+            await self._recover_step_or_restart(
+                page, self._esubmit_terms_is_ready, label="s03a条款确认"
+            )
+
+        terms_pat = (
+            r"本人已阅读、理解并同意|本人已閱讀、理解並同意|"
+            r"本人已阅读.*约束|本人已閱讀.*約束"
+        )
+        confirm_pat = (
+            r"本人确认以上提供的资料正确完整|"
+            r"本人確認以上提供的資料正確完整"
         )
 
-        # Playwright 再点 wrapper 重试未成功的项
-        if not (terms_ok and confirm_ok):
-            retry_pats = []
-            if not terms_ok:
-                retry_pats.append(
-                    r"本人已阅读|本人已閱讀|个人资料收集声明|個人資料收集聲明|同意受上述条款|同意受上述條款"
+        async def _check_one(
+            *,
+            already: bool,
+            pat: str,
+            needles: tuple[tuple[str, str], ...],
+            key: str,
+        ) -> bool:
+            if already:
+                return True
+            await self._ensure_checkbox_by_text(
+                page, pat, max_text_len=200, prefer_inner=True
+            )
+            mid = await self._verify_esubmit_terms_checked(page)
+            if (mid or {}).get(key):
+                return True
+            for needle, lab in needles:
+                await self._click_esubmit_checkbox_by_text(
+                    page, needle=needle, label=lab
                 )
-            if not confirm_ok:
-                retry_pats.append(
-                    r"本人确认以上|本人確認以上|资料正确完整|資料正確完整"
-                )
-            for pat in retry_pats:
+                mid = await self._verify_esubmit_terms_checked(page)
+                if (mid or {}).get(key):
+                    return True
+            # 坐标点方块中心（避免二次 toggle：仅未勾时）
+            for needle, _lab in needles:
                 try:
-                    wrap = page.locator(".ant-checkbox-wrapper, label").filter(
-                        has_text=re.compile(pat)
+                    wrap = page.locator(".ant-checkbox-wrapper").filter(
+                        has_text=needle
                     ).first
-                    if await wrap.count() > 0:
-                        await wrap.scroll_into_view_if_needed()
-                        box = wrap.locator(".ant-checkbox, input[type='checkbox']").first
-                        if await box.count() > 0:
-                            await box.click(force=True, timeout=5000)
-                        else:
-                            await wrap.click(force=True, timeout=5000)
-                        logger.info("s03a Playwright 重试勾选: %s", pat[:20])
+                    if await wrap.count() == 0:
+                        continue
+                    if "ant-checkbox-wrapper-checked" in (
+                        await wrap.get_attribute("class") or ""
+                    ):
+                        return True
+                    box = wrap.locator(".ant-checkbox-inner, .ant-checkbox").first
+                    target = box if await box.count() > 0 else wrap
+                    await target.scroll_into_view_if_needed()
+                    box_rect = await target.bounding_box()
+                    if box_rect:
+                        await page.mouse.click(
+                            box_rect["x"] + box_rect["width"] / 2,
+                            box_rect["y"] + box_rect["height"] / 2,
+                        )
+                        await page.wait_for_timeout(300)
+                        logger.info("s03a mouse.click 方块: %s", needle[:12])
+                    mid = await self._verify_esubmit_terms_checked(page)
+                    if (mid or {}).get(key):
+                        return True
                 except Exception:
-                    logger.debug("s03a Playwright 重试失败 pat=%s", pat, exc_info=True)
+                    logger.debug(
+                        "s03a mouse.click 失败 needle=%s", needle, exc_info=True
+                    )
+            mid = await self._verify_esubmit_terms_checked(page)
+            return bool((mid or {}).get(key))
 
-            # 再验一次
-            verify = await page.evaluate(
-                """() => {
-                    const TERMS_RE = /本人已阅读|本人已閱讀|同意受上述条款|同意受上述條款|个人资料收集声明|個人資料收集聲明/;
-                    const CONFIRM_RE = /本人确认以上|本人確認以上|资料正确完整|資料正確完整/;
-                    function labelText(cb) {
-                        if (cb.id) {
-                            const lab = document.querySelector(`label[for="${cb.id}"]`);
-                            if (lab) return (lab.innerText || '').trim();
-                        }
-                        const wrap = cb.closest('.ant-checkbox-wrapper')
-                            || cb.closest('label') || cb.parentElement;
-                        return wrap ? (wrap.innerText || '').trim() : '';
-                    }
-                    let terms = false, confirm = false;
-                    for (const cb of document.querySelectorAll("input[type='checkbox']")) {
-                        const t = labelText(cb);
-                        if (cb.checked && TERMS_RE.test(t)) terms = true;
-                        if (cb.checked && CONFIRM_RE.test(t)) confirm = true;
-                    }
-                    const n = Array.from(document.querySelectorAll("input[type='checkbox']"))
-                        .filter((c) => c.checked).length;
-                    return {
-                        terms,
-                        confirm,
-                        checked_count: n,
-                        ok: (terms && confirm) || n >= 2,
-                    };
-                }"""
-            )
-            v_n = int((verify or {}).get("checked_count") or 0)
-            terms_ok = bool((verify or {}).get("terms")) or v_n >= 2
-            confirm_ok = bool((verify or {}).get("confirm")) or v_n >= 2
-            logger.info(
-                "s03a 重试验证 terms=%s confirm=%s checked=%s ok=%s",
-                (verify or {}).get("terms"),
-                (verify or {}).get("confirm"),
-                (verify or {}).get("checked_count"),
-                (verify or {}).get("ok"),
-            )
+        terms_ok = await _check_one(
+            already=False,
+            pat=terms_pat,
+            needles=(
+                ("本人已阅读、理解并同意", "条款约束"),
+                ("本人已閱讀、理解並同意", "条款约束(繁)"),
+            ),
+            key="terms",
+        )
+        confirm_ok = await _check_one(
+            already=False,
+            pat=confirm_pat,
+            needles=(
+                ("本人确认以上提供的资料正确完整", "资料确认"),
+                ("本人確認以上提供的資料正確完整", "资料确认(繁)"),
+            ),
+            key="confirm",
+        )
 
-        both_ok = terms_ok and confirm_ok
-        if not both_ok:
-            # 最后兜底：不要求 visible，force check 前两个
-            try:
-                cbs = page.locator("input[type='checkbox']")
-                n = await cbs.count()
-                forced = 0
-                for i in range(n):
-                    if forced >= 2:
-                        break
-                    cb = cbs.nth(i)
-                    try:
-                        if await cb.is_checked():
-                            forced += 1
-                            continue
-                        await cb.check(force=True)
-                        await cb.dispatch_event("change")
-                        if await cb.is_checked():
-                            forced += 1
-                    except Exception:
-                        pass
-                both_ok = forced >= 2
-                logger.info("s03a force-check 兜底 forced=%d both_ok=%s", forced, both_ok)
-            except Exception:
-                logger.debug("s03a force-check 兜底失败", exc_info=True)
+        verify = await self._verify_esubmit_terms_checked(page)
+        terms_ok = bool((verify or {}).get("terms")) or terms_ok
+        confirm_ok = bool((verify or {}).get("confirm")) or confirm_ok
+        both_ok = bool((verify or {}).get("ok")) or (terms_ok and confirm_ok)
+        logger.info(
+            "s03a 校验 terms=%s confirm=%s ok=%s",
+            terms_ok,
+            confirm_ok,
+            both_ok,
+        )
 
         if not both_ok:
-            logger.error("s03a 两个确认框仍未全部勾选，放弃提交")
+            logger.error(
+                "s03a 两个确认框仍未全部勾选（条款=%s 确认=%s），放弃提交",
+                terms_ok,
+                confirm_ok,
+            )
             return False
 
         logger.info(
@@ -3956,15 +4187,9 @@ class IcrisRegistrationBot:
             logger.info("s03a dry_run/未允许提交：已勾选但不点提交")
             return True
 
-        # 提交前再确认仍勾着
-        still = await page.evaluate(
-            """() => {
-                const n = Array.from(document.querySelectorAll("input[type='checkbox']"))
-                    .filter((c) => c.checked).length;
-                return n >= 2;
-            }"""
-        )
-        if not still:
+        # 提交前再验两句对应框仍勾着（不用「任意 2 个 checkbox」）
+        still = await self._verify_esubmit_terms_checked(page)
+        if not (still or {}).get("ok"):
             logger.error("s03a 提交前校验失败：勾选状态丢失")
             return False
 
@@ -4160,7 +4385,9 @@ class IcrisRegistrationBot:
                 break
 
         if not files:
-            logger.warning("未找到身份证照片（请检查桌面「戴启乐资料」文件夹）")
+            logger.warning(
+                "未找到身份证照片（请检查 identity_proof.document_files / document_dir）"
+            )
         else:
             logger.info("身份证明上传文件: %s", [Path(f).name for f in files])
         return files
@@ -4468,12 +4695,12 @@ class IcrisRegistrationBot:
             return 0
 
         if not await self._is_identity_proof_step(page):
-            if not await self._wait_for_identity_proof_step(page, timeout_ms=20000):
-                logger.warning("当前不在身份证明步骤, url=%s", page.url)
-                return 0
+            await self._recover_step_or_restart(
+                page, self._is_identity_proof_step, label="s04身份证明"
+            )
 
         # s04 勿再切语言/URL 重载
-        await self._wait_spin_clear(page, timeout_ms=15000)
+        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         proof = self._derive_identity_proof(data)
         logger.info(
             "开始填写身份证明 (type=%s, submission=%s, url=%s)",
@@ -4556,10 +4783,16 @@ class IcrisRegistrationBot:
         logger.info("身份证明已填写 %d 项", filled)
         if filled > 0:
             self._identity_proof_filled = True
-            if await self._click_continue(page):
+            if await self._advance_from_identity_to_esubmit(page):
                 await self._log_page(page, "身份证明继续后")
             else:
-                logger.warning("身份证明填写后未能点击「继续」")
+                logger.warning(
+                    "身份证明填写后未能进入 s03a（仍停在 %s）",
+                    page.url[:120],
+                )
+                errs = await self._get_validation_errors(page)
+                if errs:
+                    logger.warning("s04 校验错误: %s", errs)
         return filled
 
     async def _fill_registration_form(self, page: "Page", data: dict[str, Any]) -> int:
@@ -4729,6 +4962,39 @@ class IcrisRegistrationBot:
             return not self._is_home_or_portal(page.url)
         return False
 
+    async def _continue_nav_ok(
+        self,
+        page: "Page",
+        previous_url: str,
+        *,
+        want_s04: bool,
+    ) -> bool:
+        """判断点击继续后是否已完成期望导航（含 spin 已清）。"""
+        if page.is_closed() or self._is_home_or_portal(page.url):
+            return False
+        if await self._is_spinning(page):
+            return False
+        if want_s04:
+            if await self._is_identity_proof_step(page):
+                return True
+            # 离开 s03 且进入其它注册步也算
+            if not self._is_user_info_url(page.url) and re.search(
+                r"registration/s0", (page.url or "").lower()
+            ):
+                return True
+            return False
+        # URL 变化：视为前进成功
+        if page.url != previous_url:
+            return True
+        # SPA 未改 URL：仅当出现「下一步」特征时算成功（避免仍停在原步误判）
+        if await self._is_user_info_step(page):
+            return True
+        if await self._is_identity_proof_step(page):
+            return True
+        if await self._is_esubmit_terms_step(page):
+            return True
+        return False
+
     async def _wait_after_continue(
         self,
         page: "Page",
@@ -4736,62 +5002,55 @@ class IcrisRegistrationBot:
         *,
         expect_step: str | None = None,
     ) -> bool:
-        """点击继续后等待步骤切换且 loading 结束。
+        """点击继续后：等 20s → 失败则 reload 再等 20s。
 
         expect_step='s04' 时：仍停在用户资料页不算成功，须等到 s04。
         """
         expect = (expect_step or "").lower()
         want_s04 = "s04" in expect or expect.endswith("4")
-        try:
-            if want_s04:
-                await page.wait_for_function(
-                    """(prev) => {
-                        const href = window.location.href || '';
-                        if (/registration\\/s04/i.test(href)) return true;
-                        if (href !== prev && !/registration\\/s03/i.test(href)) return true;
-                        const root = document.body || document.documentElement;
-                        if (!root) return false;
-                        const t = root.innerText || '';
-                        if (/填寫用戶資料|填写用户资料/.test(t)
-                            && /registration\\/s03/i.test(href)) return false;
-                        return /身分證明|身份证明/.test(t)
-                            && /證明文件|证明文件/.test(t)
-                            && /網上提交|网上提交|親身到公司註冊處|亲身到公司注册处/.test(t);
-                    }""",
-                    previous_url,
-                    timeout=45000,
-                )
-            else:
-                await page.wait_for_function(
-                    """(prev) => {
-                        const href = window.location.href;
-                        if (href !== prev) return true;
-                        const t = document.body ? document.body.innerText : '';
-                        return /填写用户资料|填寫用戶資料|用户类别|用戶類別|账户资料|帳戶資料|步骤|步驟/i.test(t)
-                            || /registration\\/s0[2-9]/i.test(href);
-                    }""",
-                    previous_url,
-                    timeout=30000,
-                )
-        except Exception:
-            logger.debug(
-                "继续后步骤切换等待超时 url=%s expect=%s",
-                page.url,
-                expect_step or "",
+
+        async def _ready(p: "Page") -> bool:
+            return await self._continue_nav_ok(
+                p, previous_url, want_s04=want_s04
             )
 
-        if not await self._wait_spin_clear(page, timeout_ms=_SPIN_TIMEOUT_MS):
+        if await self._wait_step_ready(
+            page,
+            _ready,
+            timeout_ms=_STEP_READY_MS,
+            label="continue后导航",
+        ):
+            await page.wait_for_timeout(_PAGE_PAUSE_MS)
+            return True
+
+        logger.warning(
+            "继续后未在 %dms 内切换步骤，刷新重试 url=%s expect=%s",
+            _STEP_READY_MS,
+            page.url[:120],
+            expect_step or "",
+        )
+        try:
+            await page.reload(wait_until="commit", timeout=45000)
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        except Exception as exc:
+            logger.warning("继续后 reload 失败: %s", exc)
+
+        if await self._wait_step_ready(
+            page,
+            _ready,
+            timeout_ms=_STEP_READY_MS,
+            label="continue后导航(reload)",
+        ):
+            await page.wait_for_timeout(_PAGE_PAUSE_MS)
+            return True
+
+        if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
             logger.error("继续后 loading 未结束，可能表单校验失败")
-            return False
-        await page.wait_for_timeout(_PAGE_PAUSE_MS)
         if want_s04:
-            if await self._is_identity_proof_step(page):
-                return True
-            if not self._is_user_info_url(page.url):
-                return True
-            logger.debug("expect s04 但仍在用户资料页，标记 continue 未完成导航")
-            return False
-        return True
+            logger.debug(
+                "expect s04 仍未到位 url=%s", page.url[:120]
+            )
+        return False
 
     async def _click_account_profile_continue(self, page: "Page") -> bool:
         """账户资料填写完成后点击继续"""
@@ -4803,6 +5062,186 @@ class IcrisRegistrationBot:
     async def _click_next_if_exists(self, page: "Page") -> bool:
         """兼容旧调用，统一走 _click_continue"""
         return await self._click_continue(page)
+
+    async def _run_registration_attempt(
+        self, page: "Page", data: dict[str, Any]
+    ) -> "Page":
+        """单次注册尝试（从导航到填完）。元素不出现时抛 IcrisStepLoadError。"""
+        page = await self._navigate_to_registration(page)
+        if not page:
+            raise IcrisStepLoadError(
+                "无法进入 ICRIS 注册页（网络或门户会话）"
+            )
+
+        if not await self._ensure_on_registration(page, "注册条款页"):
+            raise IcrisStepLoadError(f"未能停留在注册条款页: {page.url[:160]}")
+
+        await self._ensure_simplified_chinese(page)
+        # Step 1: 验证码 + 条款（仅在 s01 页），验证码错误时自动刷新重试
+        await self._dismiss_portal_overlays(page)
+        terms_ok = False
+        for captcha_round in range(1, 4):
+            filled = await self._fill_captcha(page)
+            if not filled:
+                logger.warning("验证码填写失败 (轮次 %d/3)", captcha_round)
+                continue
+
+            terms_ok = await self._accept_terms(page)
+            if terms_ok:
+                break
+
+            logger.warning(
+                "条款页未通过，可能验证码错误，刷新后重试 (轮次 %d/3)",
+                captcha_round,
+            )
+            if captcha_round < 3:
+                from src.browser.icris_captcha import _reload_captcha
+
+                await _reload_captcha(page)
+                if self._is_home_or_portal(page.url):
+                    new_page = await self._navigate_to_registration(page)
+                    if not new_page:
+                        break
+                    page = new_page
+                    await self._ensure_on_registration(page, "重新进入条款页")
+
+        if not terms_ok:
+            raise IcrisStepLoadError("条款页处理失败（验证码或条款）")
+
+        if not await self._ensure_on_registration(page, "进入注册表单"):
+            raise IcrisStepLoadError(f"进入注册表单失败: {page.url[:160]}")
+
+        await self._ensure_simplified_chinese(page)
+        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        page = await self._recover_step_or_restart(
+            page, self._is_account_profile_step, label="s02账户资料"
+        )
+
+        # Step 2: 账户资料（s02）— 填写后自动点继续
+        if await self._is_account_profile_step(page):
+            logger.info("=== 填写账户资料步骤 ===")
+            await self._fill_user_profile_step(page, data)
+        else:
+            raise IcrisStepLoadError(
+                f"条款通过后未进入账户资料页: {page.url[:160]}"
+            )
+
+        # Step 3: 用户资料（s03）
+        page = await self._recover_step_or_restart(
+            page, self._user_info_form_is_ready, label="s03用户资料"
+        )
+        if await self._is_user_info_step(page):
+            logger.info("=== 填写用户资料步骤 ===")
+            await self._fill_user_info_step(page, data)
+        else:
+            raise IcrisStepLoadError(
+                f"账户资料继续后未进入用户资料页: {page.url[:160]}"
+            )
+
+        # Step 4: 身份证明（s04）
+        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        if not await self._is_identity_proof_step(page):
+            await self._advance_from_user_info_to_identity(page)
+        page = await self._recover_step_or_restart(
+            page, self._is_identity_proof_step, label="s04身份证明"
+        )
+        if await self._is_identity_proof_step(page):
+            logger.info("=== 填写身份证明步骤 ===")
+            await self._fill_identity_proof_step(page, data)
+        else:
+            logger.info("暂未进入身份证明页, url=%s", page.url)
+
+        # Step 4b: s03a 电子提交条款（s04 未跳转时再推进一次）
+        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        if not await self._is_esubmit_terms_step(page):
+            if self._is_identity_proof_url(page.url) or await self._is_identity_proof_step(
+                page
+            ):
+                await self._advance_from_identity_to_esubmit(page)
+        if await self._is_esubmit_terms_step(page):
+            logger.info("=== s03a 电子提交服务条款 ===")
+            await self._accept_esubmit_terms(
+                page, submit=bool(self.allow_submit)
+            )
+
+        # Step 5+: 其余多步表单
+        max_steps = 6
+        for step in range(max_steps):
+            if self._is_home_or_portal(page.url):
+                logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
+                break
+            if await self._is_esubmit_terms_step(page):
+                logger.info("=== s03a 电子提交服务条款（步骤循环）===")
+                await self._accept_esubmit_terms(
+                    page, submit=bool(self.allow_submit)
+                )
+                await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+                if (
+                    await self._is_esubmit_terms_step(page)
+                    and not self.allow_submit
+                ):
+                    break
+                continue
+            if await self._is_identity_proof_step(page):
+                if self._identity_proof_filled:
+                    logger.info("仍在 s04 但已填过，尝试进入 s03a")
+                    if not await self._advance_from_identity_to_esubmit(page):
+                        break
+                    continue
+                else:
+                    await self._fill_identity_proof_step(page, data)
+            elif await self._is_user_info_step(page):
+                if self._user_info_filled:
+                    logger.info(
+                        "仍在 s03 但已填过，仅尝试进入 s04（不切语言重载）"
+                    )
+                    if not await self._advance_from_user_info_to_identity(page):
+                        break
+                    continue
+                await self._fill_user_info_step(page, data)
+            elif await self._is_account_profile_step(page):
+                await self._fill_user_profile_step(page, data)
+            else:
+                logger.info("处理注册表单步骤 %d", step + 5)
+                filled = await self._fill_registration_form(page, data)
+                if filled == 0 and step > 0:
+                    break
+                if not await self._click_continue(page):
+                    break
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+            if not await self._ensure_on_registration(page, f"步骤{step + 5}后"):
+                break
+
+        # 末尾再处理一次 s03a
+        if await self._is_esubmit_terms_step(page):
+            logger.info("=== s03a 电子提交服务条款（流程末尾）===")
+            await self._accept_esubmit_terms(
+                page, submit=bool(self.allow_submit)
+            )
+        else:
+            submit_btns = page.locator(
+                "form input[type='submit'], form button[type='submit']"
+            )
+            if await submit_btns.count() > 0:
+                if self.allow_submit:
+                    logger.warning(
+                        "即将点击 ICRIS 最终提交（DRY_RUN=false, ICRIS_ALLOW_SUBMIT=true）"
+                    )
+                    await submit_btns.first.click(timeout=15000)
+                    await self._wait_spin_clear(page, timeout_ms=30000)
+                    logger.warning("已点击 ICRIS 最终提交按钮")
+                else:
+                    logger.info(
+                        "检测到提交按钮，未点击（dry_run=%s icris_allow_submit=%s）",
+                        self.dry_run,
+                        settings.icris_allow_submit,
+                    )
+
+        if self.allow_submit:
+            logger.info("注册表单填写完成（已按开关尝试提交）")
+        else:
+            logger.info("注册表单填写完成（未提交）")
+        return page
 
     async def run(
         self,
@@ -4837,166 +5276,20 @@ class IcrisRegistrationBot:
             run_error: Exception | None = None
 
             try:
-                page = await self._navigate_to_registration(page)
-                if not page:
-                    logger.error(
-                        "无法进入 ICRIS 注册页。"
-                        "请确认网络可访问 e-services.cr.gov.hk，且未被防火墙/代理拦截。"
-                    )
-                    return
-
-                if not await self._ensure_on_registration(page, "注册条款页"):
-                    logger.error("未能停留在注册条款页，当前: %s", page.url)
-                    return
-
-                await self._ensure_simplified_chinese(page)
-                # Step 1: 验证码 + 条款（仅在 s01 页），验证码错误时自动刷新重试
-                await self._dismiss_portal_overlays(page)
-                terms_ok = False
-                for captcha_round in range(1, 4):
-                    filled = await self._fill_captcha(page)
-                    if not filled:
-                        logger.warning("验证码填写失败 (轮次 %d/3)", captcha_round)
-                        continue
-
-                    terms_ok = await self._accept_terms(page)
-                    if terms_ok:
+                for outer in range(1, 3):
+                    self._reset_flow_flags()
+                    try:
+                        page = await self._run_registration_attempt(page, data)
                         break
-
-                    logger.warning(
-                        "条款页未通过，可能验证码错误，刷新后重试 (轮次 %d/3)",
-                        captcha_round,
-                    )
-                    if captcha_round < 3:
-                        from src.browser.icris_captcha import _reload_captcha
-
-                        await _reload_captcha(page)
-                        if self._is_home_or_portal(page.url):
-                            new_page = await self._navigate_to_registration(page)
-                            if not new_page:
-                                break
-                            page = new_page
-                            await self._ensure_on_registration(page, "重新进入条款页")
-
-                if not terms_ok:
-                    logger.error("条款页处理失败，请检查验证码或手动操作")
-                    return
-
-                if not await self._ensure_on_registration(page, "进入注册表单"):
-                    return
-
-                await self._ensure_simplified_chinese(page)
-                await self._wait_spin_clear(page, timeout_ms=20000)
-                await self._wait_for_account_profile_step(page, timeout_ms=45000)
-
-                # Step 2: 账户资料（s02）— 填写后自动点继续
-                if await self._is_account_profile_step(page):
-                    logger.info("=== 填写账户资料步骤 ===")
-                    await self._fill_user_profile_step(page, data)
-                else:
-                    logger.warning("条款通过后未进入账户资料页, url=%s", page.url)
-
-                # Step 3: 用户资料（s03）— 填写后自动点继续进入 s04
-                await self._wait_for_user_info_form(page, timeout_ms=45000)
-                if await self._is_user_info_step(page):
-                    logger.info("=== 填写用户资料步骤 ===")
-                    await self._fill_user_info_step(page, data)
-                else:
-                    logger.warning("账户资料继续后未进入用户资料页, url=%s", page.url)
-
-                # Step 4: 身份证明（s04）— 等待导航，勿回填 s03 / 切繁重载
-                await self._wait_spin_clear(page, timeout_ms=20000)
-                if not await self._is_identity_proof_step(page):
-                    await self._advance_from_user_info_to_identity(page)
-                if await self._is_identity_proof_step(page):
-                    logger.info("=== 填写身份证明步骤 ===")
-                    await self._fill_identity_proof_step(page, data)
-                else:
-                    logger.info("暂未进入身份证明页, url=%s", page.url)
-
-                # Step 4b: s03a 电子提交条款（可能在 s03/s04 继续后出现）
-                await self._wait_spin_clear(page, timeout_ms=15000)
-                if await self._is_esubmit_terms_step(page):
-                    logger.info("=== s03a 电子提交服务条款 ===")
-                    await self._accept_esubmit_terms(
-                        page, submit=bool(self.allow_submit)
-                    )
-
-                # Step 5+: 其余多步表单（已填 s03/s04 不再重跑）
-                max_steps = 6
-                for step in range(max_steps):
-                    if self._is_home_or_portal(page.url):
-                        logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
-                        break
-                    if await self._is_esubmit_terms_step(page):
-                        logger.info("=== s03a 电子提交服务条款（步骤循环）===")
-                        await self._accept_esubmit_terms(
-                            page, submit=bool(self.allow_submit)
+                    except IcrisStepLoadError as e:
+                        logger.error(
+                            "步骤加载失败，将关页重开 outer=%d/2: %s",
+                            outer,
+                            e,
                         )
-                        await self._wait_spin_clear(page, timeout_ms=20000)
-                        if (
-                            await self._is_esubmit_terms_step(page)
-                            and not self.allow_submit
-                        ):
-                            break
-                        continue
-                    if await self._is_identity_proof_step(page):
-                        if self._identity_proof_filled:
-                            if not await self._click_continue(page):
-                                break
-                        else:
-                            await self._fill_identity_proof_step(page, data)
-                    elif await self._is_user_info_step(page):
-                        if self._user_info_filled:
-                            logger.info(
-                                "仍在 s03 但已填过，仅尝试进入 s04（不切语言重载）"
-                            )
-                            if not await self._advance_from_user_info_to_identity(page):
-                                break
-                            continue
-                        await self._fill_user_info_step(page, data)
-                    elif await self._is_account_profile_step(page):
-                        await self._fill_user_profile_step(page, data)
-                    else:
-                        logger.info("处理注册表单步骤 %d", step + 5)
-                        filled = await self._fill_registration_form(page, data)
-                        if filled == 0 and step > 0:
-                            break
-                        if not await self._click_continue(page):
-                            break
-                    await self._wait_spin_clear(page, timeout_ms=20000)
-                    if not await self._ensure_on_registration(page, f"步骤{step + 5}后"):
-                        break
-
-                # 末尾再处理一次 s03a（避免只点到通用 submit 却未勾选）
-                if await self._is_esubmit_terms_step(page):
-                    logger.info("=== s03a 电子提交服务条款（流程末尾）===")
-                    await self._accept_esubmit_terms(
-                        page, submit=bool(self.allow_submit)
-                    )
-                else:
-                    submit_btns = page.locator(
-                        "form input[type='submit'], form button[type='submit']"
-                    )
-                    if await submit_btns.count() > 0:
-                        if self.allow_submit:
-                            logger.warning(
-                                "即将点击 ICRIS 最终提交（DRY_RUN=false, ICRIS_ALLOW_SUBMIT=true）"
-                            )
-                            await submit_btns.first.click(timeout=15000)
-                            await self._wait_spin_clear(page, timeout_ms=30000)
-                            logger.warning("已点击 ICRIS 最终提交按钮")
-                        else:
-                            logger.info(
-                                "检测到提交按钮，未点击（dry_run=%s icris_allow_submit=%s）",
-                                self.dry_run,
-                                settings.icris_allow_submit,
-                            )
-
-                if self.allow_submit:
-                    logger.info("注册表单填写完成（已按开关尝试提交）")
-                else:
-                    logger.info("注册表单填写完成（未提交）")
+                        if outer >= 2:
+                            raise
+                        page = await self._reopen_fresh_page(page, context)
 
             except Exception as e:
                 run_error = e

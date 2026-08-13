@@ -1,17 +1,19 @@
 {
-  "company_name_en": "ABC Technology Limited",
-  "company_name_cn": "艾比西科技有限公司",
+  "company_name_en": "Humsienk Global Limited",
+  "company_name_cn": "撼世全球有限公司",
   "company_type": "private_limited_by_shares",
   "registered_office": {
-    "flat_floor": "Unit 1201, 12/F",
-    "building": "Central Plaza",
-    "street": "18 Harbour Road",
-    "district": "Wan Chai",
+    "flat_floor": "909O, 9/F",
+    "building": "High Fashion Centre",
+    "street": "909O 9/F., High Fashion Centre,1-11 Kwai Hei Street, Kwai Chung,New Territories, Hong Kong",
+    "street_cn": "香港新界葵涌葵喜街1-11号达利国际中心9楼909O",
+    "street_en": "909O 9/F., High Fashion Centre,1-11 Kwai Hei Street, Kwai Chung,New Territories, Hong Kong",
+    "district": "Kwai Chung",
     "region": "Hong Kong"
   },
   "contact": {
-    "email": "contact@abctech.hk",
-    "phone": "21234567"
+    "email": "contact@humsienk.com",
+    "phone": "91234567"
   },
   "share_capital": {
     "currency": "HKD",
@@ -21,66 +23,63 @@
   },
   "founder_members": [
     {
-      "name_en": "CHAN Tai Man",
-      "name_cn": "陳大文",
-      "id_type": "HKID",
-      "id_number": "A123456(7)",
-      "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong",
+      "name_en": "YAO Xiaojia",
+      "name_cn": "姚曉佳",
+      "id_type": "PRC_ID",
+      "id_number": "44051420000318492X",
+      "address_cn": "广东省深圳市南山区西丽南路8号110室",
+      "address_en": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
+      "address": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
       "shares": 10000
     }
   ],
   "directors": [
     {
-      "name_en": "CHAN Tai Man",
-      "name_cn": "陳大文",
-      "id_type": "HKID",
-      "id_number": "A123456(7)",
-      "address": "Flat A, 8/F, Happy Building, 1 Main Street, Kowloon, Hong Kong",
-      "email": "chan@abctech.hk",
+      "name_en": "YAO Xiaojia",
+      "name_cn": "姚曉佳",
+      "id_type": "PRC_ID",
+      "id_number": "44051420000318492X",
+      "address_cn": "广东省深圳市南山区西丽南路8号110室",
+      "address_en": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
+      "address": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
+      "email": "yaoxiaojia@example.com",
       "phone": "91234567"
     }
   ],
   "company_secretary": {
-    "name_en": "WONG Siu Ming",
-    "name_cn": "黃小明",
-    "id_type": "HKID",
-    "id_number": "B765432(1)",
-    "address": "Suite 501, 5/F, Business Tower, 88 Queen's Road, Central, Hong Kong",
-    "email": "secretary@abctech.hk",
-    "phone": "92345678",
+    "name_en": "",
+    "name_cn": "",
     "type": "natural_person"
   },
-  "business_nature_code": "620100",
-  "business_nature_desc": "Computer programming activities",
-  "br_certificate_years": 3,
+  "business_nature_code": "",
+  "business_nature_desc": "新能源產品、電子元器件銷售，電子商務，國際貿易",
+  "br_certificate_years": 1,
   "applicant": {
     "title": "Mr",
-    "name_en": "DAI Qi Le",
-    "name_cn": "戴启乐",
+    "name_en": "YAO Xiaojia",
+    "name_cn": "姚曉佳",
     "id_type": "PRC_ID",
-    "id_number": "362531199002111537",
-    "email": "daiqile@example.com",
+    "id_number": "44051420000318492X",
+    "email": "yaoxiaojia@example.com",
     "phone": "91234567",
-    "address": "江西省抚州市东乡区甘坑林场甘农分场红旗岗组033号"
+    "address_cn": "广东省深圳市南山区西丽南路8号110室",
+    "address_en": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
+    "address": "广东省深圳市南山区西丽南路8号110室"
   },
   "identity_proof": {
     "id_type": "PRC_ID",
     "id_type_label": "中華人民共和國身分證號碼",
-    "id_number": "362531199002111537",
+    "id_number": "44051420000318492X",
     "submission_method": "online",
     "submission_label": "網上提交",
     "online_document_method": "certified_copy",
     "online_document_label": "身分證明文件的經核證真實副本",
-    "document_dir": "C:\\Users\\HUAWEI\\Desktop\\戴启乐资料",
+    "document_dir": "D:\\projects\\finance-ai\\data\\materials\\admin-quick-20260813-115631",
     "document_files": [
-      "C:\\Users\\HUAWEI\\Desktop\\戴启乐资料\\身份证.jpg"
+      "D:\\projects\\finance-ai\\data\\materials\\admin-quick-20260813-115631\\身份证正面.jpg"
     ]
   },
-  "password_hint": "Mother maiden name: Lee",
-  "security_question": "What is your mother's maiden name?",
-  "security_answer": "Lee",
-  "icris_account": {
-    "username": "chantaimanhk26",
-    "password": "Chan2026Pass"
-  }
+  "password_hint": "",
+  "security_question": "",
+  "security_answer": ""
 }
