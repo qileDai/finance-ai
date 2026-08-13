@@ -1716,12 +1716,34 @@ class GroupStateMachine:
 
         dry_run = bool(settings.dry_run)
         allow_submit = (not dry_run) and bool(settings.icris_allow_submit)
+        materials = self.store.get_materials(roomid)
+        try:
+            from src.materials.aggregator import aggregate_company_data
+
+            company_data = aggregate_company_data(materials)
+        except Exception as e:
+            logger.exception("确认注册时聚合资料失败 room=%s", roomid)
+            self._safe_send(
+                roomid,
+                f"资料聚合失败，无法入队：{e}",
+                to_external_userid=wm,
+                customer_fallback=False,
+            )
+            return
+        company_name = str(
+            company_data.get("company_name_en")
+            or company_data.get("company_name_cn")
+            or ""
+        ).strip()
         job, created = self.store.enqueue_registration_job(
             roomid,
             customer_id=from_id or wm or "",
             dry_run=dry_run,
             allow_submit=allow_submit,
             max_attempts=settings.icris_job_max_attempts,
+            payload=company_data,
+            source="wework",
+            company_name=company_name,
         )
         job_id = job.get("id")
         self.store.set_group_status(roomid, GROUP_STATUS_QUEUED)

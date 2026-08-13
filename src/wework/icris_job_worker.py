@@ -91,10 +91,13 @@ class IcrisJobWorker:
         t0 = time.monotonic()
         dry_run = bool(int(job.get("dry_run", 1) or 0))
         allow_submit = bool(int(job.get("allow_submit", 0) or 0)) and (not dry_run)
+        source = str(job.get("source") or "").strip() or "-"
         logger.info(
-            "ICRIS job start id=%s roomid=%s attempt=%s/%s dry_run=%s allow_submit=%s",
+            "ICRIS job start id=%s roomid=%s source=%s attempt=%s/%s "
+            "dry_run=%s allow_submit=%s isolated=false(cdp)",
             job_id,
             roomid,
+            source,
             attempts,
             max_attempts,
             dry_run,
@@ -102,7 +105,8 @@ class IcrisJobWorker:
         )
         package_dir = str(job.get("package_dir") or "")
         try:
-            ctx = self.workflow.run_icris_job(job, force_isolated_browser=True)
+            # 与 python main.py --step register 一致：走 Chrome CDP + stealth，避免 s02 指纹卡加载
+            ctx = self.workflow.run_icris_job(job, force_isolated_browser=False)
             package_dir = str(ctx.package_dir or package_dir)
             msgs = list(getattr(ctx, "messages", None) or [])
             self.store.mark_job_succeeded(

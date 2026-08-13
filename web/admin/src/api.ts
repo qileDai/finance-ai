@@ -65,7 +65,7 @@ export type JobRow = {
   started_at?: string;
 };
 
-export type JobField = { key: string; value: string };
+export type JobField = { key: string; label?: string; value: string };
 
 export type JobDetailResponse = ApiOk<{
   job: JobRow & {
@@ -203,17 +203,26 @@ export const api = {
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
   registerRunner: {
+    defaults: () =>
+      request<ApiOk<{ contact_email?: string; contact_phone?: string }>>(
+        "/admin/api/register-runner/defaults"
+      ),
     submit: (
       fields: Record<string, string>,
-      files: Record<string, RunnerFile>
+      files: Record<string, RunnerFile>,
+      dry_run = true
     ) =>
-      request<ApiOk<{ case_id: string; company_name: string; job_id?: number }>>(
-        "/admin/api/register-runner/submit",
-        {
-          method: "POST",
-          body: JSON.stringify({ fields, files }),
-        }
-      ),
+      request<
+        ApiOk<{
+          case_id: string;
+          company_name: string;
+          job_id?: number;
+          dry_run?: boolean;
+        }>
+      >("/admin/api/register-runner/submit", {
+        method: "POST",
+        body: JSON.stringify({ fields, files, dry_run }),
+      }),
     status: () =>
       request<ApiOk<RunnerStatus>>("/admin/api/register-runner/status"),
   },

@@ -170,7 +170,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                     <tbody>
                       {fields.map((f) => (
                         <tr key={f.key}>
-                          <td className="mono">{f.key}</td>
+                          <td>{f.label || f.key}</td>
                           <td style={{ wordBreak: "break-all" }}>{f.value}</td>
                         </tr>
                       ))}

@@ -23,6 +23,12 @@ const TEXT_FIELDS: TextField[] = [
   { key: "registered_office_en", label: "注册地址（英文）" },
   { key: "director_name", label: "董事兼股东姓名", required: true },
   { key: "id_number", label: "身份证号码", required: true },
+  {
+    key: "contact_email",
+    label: "联络邮箱",
+    required: true,
+    placeholder: "默认 MATERIALS_DEFAULT_CONTACT_EMAIL",
+  },
   { key: "director_address_cn", label: "住址（中文）" },
   { key: "director_address_en", label: "住址（英文）" },
 ];
@@ -33,19 +39,9 @@ const ID_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "PASSPORT", label: "护照" },
 ];
 
-const ID_TYPE_FILES: Record<string, { key: string; label: string }[]> = {
-  PRC_ID: [
-    { key: "id_card_front", label: "身份证正面" },
-    { key: "id_card_back", label: "身份证反面" },
-    { key: "id_card_handheld", label: "手持身份证" },
-  ],
-  HKID: [
-    { key: "id_card_front", label: "身份证正面" },
-    { key: "id_card_back", label: "身份证反面" },
-    { key: "id_card_handheld", label: "手持身份证" },
-  ],
-  PASSPORT: [{ key: "passport", label: "护照页" }],
-};
+function primaryIdFileKey(idType: string): string {
+  return idType === "PASSPORT" ? "passport" : "id_card_front";
+}
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -103,11 +99,12 @@ function parseRegistrationText(raw: string): Record<string, string> {
     { field: "business_desc", pattern: /^(经营范围|业务范围)/ },
     { field: "director_name", pattern: /^(董事|股东)/ },
     { field: "id_number", pattern: /^(身份证号?码?|证件号)/ },
+    { field: "contact_email", pattern: /^(联络邮箱|邮箱|电邮|电子邮件)/ },
   ];
 
   // 已知关键字集合：用于判断「注册地址」后下一行是否为新字段
   const knownKeyRe =
-    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|身份证号?码?|证件号|注册地址|公司名称)/;
+    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|身份证号?码?|证件号|注册地址|公司名称|联络邮箱|邮箱|电邮)/;
 
   function stripLeadingNumber(s: string): string {
     return s.replace(/^\s*\d+\s*[、.）)]\s*/, "").trim();
@@ -157,17 +154,27 @@ export function RegisterPage({ onToast }: Props) {
     registered_capital: "1万港币",
   });
   const [idType, setIdType] = useState("PRC_ID");
-  const [fileInputs, setFileInputs] = useState<Record<string, File | undefined>>(
-    {}
-  );
+  const [idFile, setIdFile] = useState<File | undefined>();
+  const [dryRun, setDryRun] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [runnerStatus, setRunnerStatus] = useState<RunnerStatus | null>(null);
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
-  // 初始拉一次状态（页面刷新后恢复正在运行的任务）
+  // 预填默认邮箱 + 恢复运行中任务状态
   useEffect(() => {
+    api.registerRunner
+      .defaults()
+      .then((d) => {
+        const email = (d.contact_email || "").trim();
+        if (email) {
+          setFields((p) =>
+            p.contact_email ? p : { ...p, contact_email: email }
+          );
+        }
+      })
+      .catch(() => {});
     api.registerRunner
       .status()
       .then((d) => {
@@ -203,7 +210,6 @@ export function RegisterPage({ onToast }: Props) {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [runnerStatus?.messages]);
 
-  const neededFiles = ID_TYPE_FILES[idType] || [];
   const isRunning =
     runnerStatus?.status === "running" || runnerStatus?.status === "pending";
 
@@ -227,13 +233,13 @@ export function RegisterPage({ onToast }: Props) {
       if (f.required && !(fields[f.key] || "").trim())
         return `${f.label}必填`;
     }
+    const email = (fields.contact_email || "").trim();
+    if (email && !email.includes("@")) return "联络邮箱格式无效";
     const hasAddr = ["director_address_cn", "director_address_en", "registered_office_cn", "registered_office_en"].some(
       (k) => (fields[k] || "").trim()
     );
     if (!hasAddr) return "至少填写一个地址（住址或注册地址）";
-    for (const f of neededFiles) {
-      if (!fileInputs[f.key]) return `请上传 ${f.label}`;
-    }
+    if (!idFile) return "请上传证件文件（PDF 或图片）";
     return null;
   }
 
@@ -244,16 +250,15 @@ export function RegisterPage({ onToast }: Props) {
       return;
     }
     const files: Record<string, RunnerFile> = {};
-    for (const f of neededFiles) {
-      const fileObj = fileInputs[f.key];
-      if (!fileObj) continue;
-      const dataUrl = await readFileAsDataUrl(fileObj);
-      files[f.key] = { name: fileObj.name, data_url: dataUrl };
+    if (idFile) {
+      const dataUrl = await readFileAsDataUrl(idFile);
+      const key = primaryIdFileKey(idType);
+      files[key] = { name: idFile.name, data_url: dataUrl };
     }
     setSubmitting(true);
     try {
       const payload = { ...fields, id_type: idType };
-      const res = await api.registerRunner.submit(payload, files);
+      const res = await api.registerRunner.submit(payload, files, dryRun);
       onToast(
         res.job_id
           ? `已入队任务 #${res.job_id}：${res.company_name}`
@@ -267,7 +272,7 @@ export function RegisterPage({ onToast }: Props) {
         messages: res.job_id
           ? [`已入队任务 #${res.job_id}，等待 Worker 执行`]
           : [],
-        dry_run: true,
+        dry_run: res.dry_run ?? dryRun,
       });
       setPolling(true);
     } catch (e) {
@@ -359,7 +364,7 @@ export function RegisterPage({ onToast }: Props) {
                 value={idType}
                 onChange={(e) => {
                   setIdType(e.target.value);
-                  setFileInputs({});
+                  setIdFile(undefined);
                 }}
                 disabled={isRunning || submitting}
               >
@@ -374,33 +379,44 @@ export function RegisterPage({ onToast }: Props) {
 
           <h2>证件文件</h2>
           <div className="reg-form">
-            {neededFiles.map((f) => (
-              <label key={f.key} className="reg-field">
-                <span>
-                  {f.label}
-                  <em>*</em>
-                </span>
-                <input
-                  type="file"
-                  accept="image/*,application/pdf"
-                  disabled={isRunning || submitting}
-                  onChange={(e) =>
-                    setFileInputs((p) => ({
-                      ...p,
-                      [f.key]: e.target.files?.[0],
-                    }))
-                  }
-                />
-                {fileInputs[f.key] ? (
-                  <small className="muted">
-                    {fileInputs[f.key]?.name}
-                  </small>
-                ) : null}
-              </label>
-            ))}
+            <label className="reg-field">
+              <span>
+                证件文件（PDF/图片）
+                <em>*</em>
+              </span>
+              <input
+                type="file"
+                accept="image/*,application/pdf"
+                disabled={isRunning || submitting}
+                onChange={(e) => setIdFile(e.target.files?.[0])}
+              />
+              {idFile ? (
+                <small className="muted">{idFile.name}</small>
+              ) : (
+                <small className="muted">
+                  快速注册只需 1 个文件；企微客服仍按完整正反面/手持收集
+                </small>
+              )}
+            </label>
           </div>
 
           <div className="reg-actions">
+            <label className="reg-field" style={{ marginBottom: 8 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={dryRun}
+                  disabled={isRunning || submitting}
+                  onChange={(e) => setDryRun(e.target.checked)}
+                />
+                dry_run（仅填表，不最终提交）
+              </span>
+              <small className="muted">
+                {dryRun
+                  ? "默认开启：只自动填表，不点 ICRIS 最终提交"
+                  : "已关闭：将允许自动提交（请确认材料无误）"}
+              </small>
+            </label>
             <button
               type="button"
               className="btn btn-primary"
@@ -409,9 +425,6 @@ export function RegisterPage({ onToast }: Props) {
             >
               {submitting ? "提交中…" : isRunning ? "注册进行中" : "跑注册"}
             </button>
-            <small className="muted">
-              dry_run 填表不提交 · 用真实数据触发 ICRIS 账号注册
-            </small>
           </div>
         </section>
 

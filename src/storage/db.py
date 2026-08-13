@@ -178,6 +178,10 @@ class ExternalGroupStore:
                     dry_run INTEGER NOT NULL DEFAULT 1,
                     allow_submit INTEGER NOT NULL DEFAULT 0,
                     screenshot_path TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    company_name TEXT NOT NULL DEFAULT '',
+                    result_messages TEXT NOT NULL DEFAULT '',
                     available_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     started_at TEXT,
@@ -246,6 +250,22 @@ class ExternalGroupStore:
         if "screenshot_path" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "payload_json" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN payload_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "source" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+            )
+        if "company_name" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN company_name TEXT NOT NULL DEFAULT ''"
+            )
+        if "result_messages" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN result_messages TEXT NOT NULL DEFAULT ''"
             )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
@@ -1157,8 +1177,14 @@ class ExternalGroupStore:
         dry_run: bool = True,
         allow_submit: bool = False,
         max_attempts: int | None = None,
+        payload: dict[str, Any] | None = None,
+        source: str = "",
+        company_name: str = "",
+        package_dir: str = "",
     ) -> tuple[dict[str, Any], bool]:
         """幂等入队。返回 (job, created)。同 roomid 已有 pending/running 则返回已有任务。"""
+        import json
+
         from config.settings import settings
 
         existing = self.get_active_registration_job(roomid)
@@ -1171,6 +1197,20 @@ class ExternalGroupStore:
             if max_attempts is not None
             else getattr(settings, "icris_job_max_attempts", 3) or 3
         )
+        payload_json = ""
+        if payload is not None:
+            try:
+                payload_json = json.dumps(payload, ensure_ascii=False)
+            except (TypeError, ValueError):
+                payload_json = json.dumps({"_error": "payload_not_serializable"})
+        company = (company_name or "").strip()
+        if not company and isinstance(payload, dict):
+            company = str(
+                payload.get("company_name_en") or payload.get("company_name_cn") or ""
+            ).strip()
+        src = (source or "").strip().lower()
+        pkg = (package_dir or "").strip()
+
         with self._conn() as conn:
             row = conn.execute(
                 """
@@ -1187,15 +1227,20 @@ class ExternalGroupStore:
                 INSERT INTO registration_jobs (
                     roomid, customer_id, status, attempts, max_attempts,
                     last_error, package_dir, dry_run, allow_submit,
+                    payload_json, source, company_name, result_messages,
                     available_at, created_at, started_at, finished_at, updated_at
-                ) VALUES (?, ?, 'pending', 0, ?, '', '', ?, ?, ?, ?, NULL, NULL, ?)
+                ) VALUES (?, ?, 'pending', 0, ?, '', ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, NULL, ?)
                 """,
                 (
                     roomid,
                     customer_id or "",
                     max_att,
+                    pkg,
                     1 if dry_run else 0,
                     1 if allow_submit else 0,
+                    payload_json,
+                    src,
+                    company,
                     now,
                     now,
                     now,
@@ -1249,20 +1294,30 @@ class ExternalGroupStore:
         job_id: int,
         *,
         package_dir: str = "",
+        result_messages: list[str] | None = None,
     ) -> None:
+        import json
+
         now = _utc_now()
+        msgs = ""
+        if result_messages is not None:
+            try:
+                msgs = json.dumps(list(result_messages), ensure_ascii=False)
+            except (TypeError, ValueError):
+                msgs = "[]"
         with self._conn() as conn:
             conn.execute(
                 """
                 UPDATE registration_jobs
                 SET status = 'succeeded',
                     package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
+                    result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
                     finished_at = ?,
                     updated_at = ?,
                     last_error = ''
                 WHERE id = ?
                 """,
-                (package_dir, package_dir, now, now, job_id),
+                (package_dir, package_dir, msgs, msgs, now, now, job_id),
             )
 
     def mark_job_failed(
@@ -1274,9 +1329,18 @@ class ExternalGroupStore:
         available_at: str = "",
         package_dir: str = "",
         screenshot_path: str = "",
+        result_messages: list[str] | None = None,
     ) -> None:
+        import json
+
         now = _utc_now()
         status = "pending" if requeue else "failed"
+        msgs = ""
+        if result_messages is not None:
+            try:
+                msgs = json.dumps(list(result_messages), ensure_ascii=False)
+            except (TypeError, ValueError):
+                msgs = "[]"
         with self._conn() as conn:
             conn.execute(
                 """
@@ -1285,6 +1349,7 @@ class ExternalGroupStore:
                     last_error = ?,
                     package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
                     screenshot_path = CASE WHEN ? != '' THEN ? ELSE screenshot_path END,
+                    result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
                     available_at = CASE WHEN ? != '' THEN ? ELSE available_at END,
                     finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
                     updated_at = ?
@@ -1297,6 +1362,8 @@ class ExternalGroupStore:
                     package_dir,
                     screenshot_path,
                     screenshot_path,
+                    msgs,
+                    msgs,
                     available_at,
                     available_at,
                     status,

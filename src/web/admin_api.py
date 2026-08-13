@@ -85,6 +85,10 @@ def handle_admin_api(
             except ValueError:
                 hours = 24.0
             return _handle_quality(store, hours=hours)
+        if method == "GET" and rel == "register-runner/defaults":
+            from src.web.admin_runner import defaults as runner_defaults
+
+            return _ok(**runner_defaults())
         if method == "GET" and rel == "register-runner/status":
             from src.web.admin_runner import status as runner_status
 
@@ -165,7 +169,7 @@ def _handle_wework_send(body: dict | None) -> tuple[dict[str, Any], int]:
 
 
 def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:
-    """快速注册：表单字段 + 证件文件(data_url) → 后台跑 step_icris_register。"""
+    """快速注册：表单字段 + 证件文件(data_url) → 入队 registration_jobs。"""
     from src.web.admin_runner import submit as runner_submit
 
     if not isinstance(body, dict):
@@ -174,7 +178,13 @@ def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:
     files = body.get("files") or {}
     if not isinstance(fields, dict) or not isinstance(files, dict):
         return _err("fields/files must be objects", 400)
-    return runner_submit(fields, files)
+    # 缺省 dry_run=True；显式 false/0/"false" 才关闭
+    raw_dry = body.get("dry_run", True)
+    if isinstance(raw_dry, str):
+        dry_run = raw_dry.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        dry_run = bool(raw_dry)
+    return runner_submit(fields, files, dry_run=dry_run)
 
 
 def _parse_job_id(rel: str, *, suffix: str) -> int | None:
@@ -287,80 +297,137 @@ def _handle_jobs_list(
     return _ok(items=slim, status=status or "all", limit=limit)
 
 
+_FIELD_LABELS: dict[str, str] = {
+    "company_name_cn": "公司中文名",
+    "company_name_en": "公司英文名",
+    "registered_capital": "注册资本",
+    "business_desc": "经营范围",
+    "registered_office_cn": "注册地址（中文）",
+    "registered_office_en": "注册地址（英文）",
+    "contact.email": "联络邮箱",
+    "contact.phone": "联络电话",
+    "director.name": "董事兼股东姓名",
+    "director.id_type": "证件类型",
+    "director.id_number": "证件号码",
+    "director.address_cn": "住址（中文）",
+    "director.address_en": "住址（英文）",
+    "applicant.name": "申请人姓名",
+    "applicant.id_type": "申请人证件类型",
+    "applicant.id_number": "申请人证件号码",
+    "icris_account.username": "ICRIS 用户名",
+    "icris_account.password": "ICRIS 密码",
+    "identity_proof.id_type": "身份证明类型",
+    "identity_proof.id_number": "身份证明号码",
+    "identity_proof.document_files": "证件文件",
+    "id_card_front": "身份证正面",
+    "id_card_back": "身份证反面",
+    "id_card_handheld": "手持身份证",
+    "passport": "护照",
+}
+
+
 def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
-    """将 company_data 展平为详情展示字段列表。"""
+    """将 company_data 展平为详情字段（含中文 label）。"""
     fields: list[dict[str, str]] = []
 
-    def add(key: str, value: Any) -> None:
+    def add(key: str, value: Any, label: str | None = None) -> None:
         if value is None:
             return
-        text = str(value).strip()
+        if isinstance(value, (list, tuple)):
+            text = "；".join(str(x).strip() for x in value if str(x).strip())
+        else:
+            text = str(value).strip()
         if not text:
             return
-        fields.append({"key": key, "value": text})
+        fields.append(
+            {
+                "key": key,
+                "label": label or _FIELD_LABELS.get(key, key),
+                "value": text,
+            }
+        )
 
-    for k in (
-        "company_name_cn",
-        "company_name_en",
-        "registered_capital",
+    add("company_name_cn", payload.get("company_name_cn"))
+    add("company_name_en", payload.get("company_name_en"))
+
+    sc = payload.get("share_capital") or {}
+    if isinstance(sc, dict) and sc.get("total_shares") is not None:
+        cur = str(sc.get("currency") or "HKD")
+        add("registered_capital", f"{sc.get('total_shares')} {cur}")
+    else:
+        add("registered_capital", payload.get("registered_capital"))
+
+    add(
         "business_desc",
-        "registered_office_cn",
-        "registered_office_en",
-    ):
-        add(k, payload.get(k))
+        payload.get("business_nature_desc") or payload.get("business_desc"),
+    )
 
-    applicant = payload.get("applicant") or {}
-    if isinstance(applicant, dict):
-        add("applicant.name", applicant.get("name") or applicant.get("name_cn"))
-        add("applicant.id_type", applicant.get("id_type"))
-        add("applicant.id_number", applicant.get("id_number"))
-        add("applicant.address_cn", applicant.get("address_cn"))
-        add("applicant.address_en", applicant.get("address_en"))
+    office = payload.get("registered_office") or {}
+    if isinstance(office, dict):
+        add(
+            "registered_office_cn",
+            office.get("street_cn") or payload.get("registered_office_cn"),
+        )
+        add(
+            "registered_office_en",
+            office.get("street_en")
+            or office.get("street")
+            or payload.get("registered_office_en"),
+        )
+    else:
+        add("registered_office_cn", payload.get("registered_office_cn"))
+        add("registered_office_en", payload.get("registered_office_en"))
+
+    contact = payload.get("contact") or {}
+    if isinstance(contact, dict):
+        add("contact.email", contact.get("email"))
+        add("contact.phone", contact.get("phone"))
 
     directors = payload.get("directors") or []
-    if isinstance(directors, list):
-        for i, d in enumerate(directors):
-            if not isinstance(d, dict):
-                continue
-            prefix = f"directors[{i}]"
-            add(f"{prefix}.name", d.get("name") or d.get("name_cn"))
-            add(f"{prefix}.id_type", d.get("id_type"))
-            add(f"{prefix}.id_number", d.get("id_number"))
-            add(f"{prefix}.address_cn", d.get("address_cn"))
-            add(f"{prefix}.address_en", d.get("address_en"))
+    director = directors[0] if isinstance(directors, list) and directors else {}
+    if not isinstance(director, dict):
+        director = {}
+    applicant = payload.get("applicant") or {}
+    if not isinstance(applicant, dict):
+        applicant = {}
+
+    add(
+        "director.name",
+        director.get("name_en")
+        or director.get("name")
+        or director.get("name_cn")
+        or applicant.get("name_cn")
+        or applicant.get("name_en"),
+    )
+    add(
+        "director.id_type",
+        applicant.get("id_type") or director.get("id_type"),
+    )
+    add(
+        "director.id_number",
+        applicant.get("id_number") or director.get("id_number"),
+    )
+    add(
+        "director.address_cn",
+        director.get("address_cn") or applicant.get("address_cn"),
+    )
+    add(
+        "director.address_en",
+        director.get("address_en") or applicant.get("address_en"),
+    )
+
+    account = payload.get("icris_account") or {}
+    if isinstance(account, dict):
+        add("icris_account.username", account.get("username"))
+        add("icris_account.password", account.get("password"))
 
     proof = payload.get("identity_proof") or {}
     if isinstance(proof, dict):
         add("identity_proof.id_type", proof.get("id_type"))
         add("identity_proof.id_number", proof.get("id_number"))
-        add("identity_proof.submission_method", proof.get("submission_method"))
-
-    account = payload.get("icris_account") or {}
-    if isinstance(account, dict):
-        for k, v in account.items():
-            if isinstance(v, (str, int, float, bool)):
-                add(f"icris_account.{k}", v)
-
-    # 附件路径（若有）
-    for k, v in payload.items():
-        if k.endswith("_path") or k in (
-            "id_card_front",
-            "id_card_back",
-            "id_card_handheld",
-            "passport",
-        ):
-            if isinstance(v, str) and v.strip():
-                add(k, v)
-            elif isinstance(v, dict) and v.get("file_path"):
-                add(k, v.get("file_path"))
-
-    attachments = payload.get("attachments") or payload.get("files") or {}
-    if isinstance(attachments, dict):
-        for k, v in attachments.items():
-            if isinstance(v, str):
-                add(f"file.{k}", v)
-            elif isinstance(v, dict):
-                add(f"file.{k}", v.get("file_path") or v.get("path") or v.get("name"))
+        docs = proof.get("document_files") or []
+        if docs:
+            add("identity_proof.document_files", docs)
 
     return fields
 
@@ -393,17 +460,18 @@ def _handle_job_detail(
         except (TypeError, ValueError, json.JSONDecodeError):
             messages = []
     fields = _flatten_payload_fields(payload) if payload else []
-    # 无 payload 时回退 materials
+    # 无 payload 时回退 materials（中文 label）
     if not fields:
         materials = store.get_materials(str(out.get("roomid") or ""))
         for key in sorted(materials.keys()):
             row = materials[key]
             val = str(row.get("field_value") or "").strip()
             fpath = str(row.get("file_path") or "").strip()
+            label = _FIELD_LABELS.get(key, key)
             if fpath:
-                fields.append({"key": key, "value": fpath})
+                fields.append({"key": key, "label": label, "value": fpath})
             elif val:
-                fields.append({"key": key, "value": val})
+                fields.append({"key": key, "label": label, "value": val})
     return _ok(
         job=out,
         payload=payload,
