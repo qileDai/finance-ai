@@ -1,5 +1,5 @@
 # Finance AI — bot (8081) + admin (8082), shared ./data
-# Usage:
+# 宝塔：软件商店安装 Docker → 编排加载本文件，或项目目录执行：
 #   docker compose up -d --build
 #   docker compose --profile rag up -d --build
 
@@ -11,14 +11,20 @@ services:
     env_file:
       - .env
     environment:
+      TZ: Asia/Shanghai
       WEWORK_EXTERNAL_CALLBACK_PORT: "8081"
       MATERIALS_DIR: data/materials
       BROWSER_HEADLESS: "true"
+      CHROME_USE_EXISTING: "false"
     ports:
       - "8081:8081"
     volumes:
       - ./data:/app/data
       - ./.env:/app/.env:ro
+      # 可选：企微会话存档 Linux SDK
+      # - ./vendor/wework-sdk:/app/vendor/wework-sdk:ro
+    # Chromium 需要较大 /dev/shm；宝塔编排 UI 若不识别，请用终端 docker compose up
+    shm_size: "2gb"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/health"]
@@ -35,6 +41,7 @@ services:
     env_file:
       - .env
     environment:
+      TZ: Asia/Shanghai
       ADMIN_PORT: "8082"
       MATERIALS_DIR: data/materials
     ports:
@@ -43,7 +50,8 @@ services:
       - ./data:/app/data
       - ./.env:/app/.env:ro
     depends_on:
-      - bot
+      bot:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/health"]

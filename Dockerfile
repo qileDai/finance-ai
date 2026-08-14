@@ -14,7 +14,9 @@ FROM python:3.12-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    CHROME_USE_EXISTING=true \
+    CHROME_CDP_URL=http://127.0.0.1:9222
 
 WORKDIR /app
 
@@ -22,12 +24,21 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        gnupg \
+        wget \
         libglib2.0-0 \
         libgomp1 \
         libgl1 \
         libsm6 \
         libxext6 \
         libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Google Chrome Stable（ICRIS 门户 TLS 指纹绕过，比 Playwright Chromium 更强）
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

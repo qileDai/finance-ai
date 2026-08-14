@@ -33,8 +33,13 @@ export function LoginPage() {
   return (
     <div className="login-page">
       <div className="login-panel">
-        <div className="login-brand">Finance AI Ops</div>
-        <p className="login-sub">运营管理后台</p>
+        <div className="login-brand-row">
+          <img className="login-logo" src="/admin/logo.png" alt="赢态" width={48} height={48} />
+          <div>
+            <div className="login-brand">赢态 Finance AI</div>
+            <p className="login-sub">运营管理后台</p>
+          </div>
+        </div>
         <form className="login-form" onSubmit={onSubmit}>
           <label>
             用户名

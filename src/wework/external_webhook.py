@@ -52,13 +52,27 @@ class ExternalWebhookServer:
 
             def _path_ok(self) -> bool:
                 path = urlparse(self.path).path.rstrip("/") or "/"
+                if path in ("/health", "/healthz"):
+                    return True
                 if path == "/" or path == callback_path or path.startswith(callback_path + "/"):
                     return True
                 if path == WEBHOOK_PATH or path.startswith(WEBHOOK_PATH + "/"):
                     return True
                 return False
 
+            def _handle_health(self) -> None:
+                body = b'{"ok":true,"service":"finance-ai-bot"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
+                path = urlparse(self.path).path.rstrip("/") or "/"
+                if path in ("/health", "/healthz"):
+                    self._handle_health()
+                    return
                 if not self._path_ok():
                     self.send_response(404)
                     self.end_headers()

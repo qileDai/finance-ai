@@ -43,8 +43,11 @@ export function Layout({ onRefresh, toast }: Props) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-name">Finance AI Ops</div>
-          <div className="brand-sub">运营管理后台</div>
+          <img className="brand-logo" src="/admin/logo.png" alt="赢态" width={40} height={40} />
+          <div>
+            <div className="brand-name">赢态 Finance AI</div>
+            <div className="brand-sub">运营管理后台</div>
+          </div>
         </div>
         <nav className="nav">
           <NavLink to="/" end>

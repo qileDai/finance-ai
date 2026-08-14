@@ -46,16 +46,17 @@ server {
     }
 
     # 管理后台（独立进程 ADMIN_PORT=8082；建议仅内网或 IP 白名单）
-    # location /admin {
-    #     allow 10.0.0.0/8;
-    #     deny all;
-    #     proxy_pass http://finance_ai_admin;
-    #     proxy_http_version 1.1;
-    #     proxy_set_header Host $host;
-    #     proxy_set_header Authorization $http_authorization;
-    #     proxy_set_header X-Real-IP $remote_addr;
-    #     proxy_set_header X-Forwarded-Proto $scheme;
-    # }
+    # 宝塔：网站 → 反向代理，目标 http://127.0.0.1:8082 ，路径 /admin
+    location /admin {
+        # allow 10.0.0.0/8;
+        # deny all;
+        proxy_pass http://finance_ai_admin;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 }
 
 server {

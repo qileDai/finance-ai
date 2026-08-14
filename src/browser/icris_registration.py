@@ -3951,6 +3951,23 @@ class IcrisRegistrationBot:
             )
         )
 
+    async def _esubmit_page_is_traditional(self, page: "Page") -> bool:
+        """s03a 是否为繁体界面（用于优先匹配文案）。"""
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const t = (document.body && document.body.innerText) || '';
+                        const href = location.href || '';
+                        if (/locale=zh_TW|zh_HK|zh-TW/i.test(href)) return true;
+                        // 繁体特有字：讀/認/資/據/約/條
+                        return /本人已閱讀|本人確認以上|資料正確完整|個人資料收集聲明/.test(t);
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
     async def _esubmit_terms_is_ready(self, page: "Page") -> bool:
         """s03a：两句确认文案出现且至少有一个 checkbox。"""
         if not await self._is_esubmit_terms_step(page):
@@ -3959,8 +3976,9 @@ class IcrisRegistrationBot:
             has_text = await page.evaluate(
                 """() => {
                     const t = (document.body && document.body.innerText) || '';
-                    return /本人已阅读[、,，]?理解并同意|本人已閱讀[、,，]?理解並同意/.test(t)
-                        && /本人确认以上提供的资料正确完整|本人確認以上提供的資料正確完整/.test(t);
+                    const terms = /本人已阅读[、,，]?理解并同意|本人已閱讀[、,，]?理解並同意/.test(t);
+                    const confirm = /本人确认以上提供的资料正确完整|本人確認以上提供的資料正確完整/.test(t);
+                    return terms && confirm;
                 }"""
             )
             if not has_text:
@@ -3973,11 +3991,12 @@ class IcrisRegistrationBot:
             return False
 
     async def _verify_esubmit_terms_checked(self, page: "Page") -> dict[str, bool]:
-        """校验截图中两句确认文案对应的 checkbox 是否已勾选。"""
+        """校验两句确认文案对应的 checkbox 是否已勾选（简繁均可）。"""
         return await page.evaluate(
             """() => {
-                const TERMS_RE = /本人已阅读[、,，]?理解并同意|本人已閱讀[、,，]?理解並同意|本人已阅读.*约束|本人已閱讀.*約束/;
-                const CONFIRM_RE = /本人确认以上提供的资料正确完整|本人確認以上提供的資料正確完整/;
+                // 简繁并列；阅读/閱讀、确认/確認、资料/資料、约束/約束
+                const TERMS_RE = /本人已(阅读|閱讀)[、,，]?理解(并|並)同意|本人已(阅读|閱讀).*(约束|約束)/;
+                const CONFIRM_RE = /本人(确认|確認)以上提供的(资料|資料)(正确|正確)完整/;
 
                 function rowText(el) {
                     return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, '');
@@ -3994,77 +4013,127 @@ class IcrisRegistrationBot:
                 }
                 function findRow(re) {
                     const cands = Array.from(document.querySelectorAll(
-                        'label, .ant-checkbox-wrapper, div, span, p, li, tr, td'
+                        '.ant-checkbox-wrapper, label.ant-checkbox-wrapper, label'
                     ));
                     let best = null;
                     let bestLen = Infinity;
                     for (const el of cands) {
                         const t = rowText(el);
-                        if (!t || !re.test(t)) continue;
+                        if (!t || t.length > 500 || !re.test(t)) continue;
                         if (t.length < bestLen) {
                             best = el;
                             bestLen = t.length;
                         }
                     }
-                    if (!best) return null;
-                    return best.closest(
-                        '.ant-checkbox-wrapper, label, tr, .ant-row, .ant-form-item, li'
-                    ) || best;
+                    if (best) return best;
+                    // 回退：任意含文案的节点再向上找 wrapper
+                    for (const el of document.querySelectorAll('div, span, p, li, td')) {
+                        const t = rowText(el);
+                        if (!t || t.length > 500 || !re.test(t)) continue;
+                        const wrap = el.closest(
+                            '.ant-checkbox-wrapper, label, .ant-form-item, tr, .ant-row'
+                        );
+                        if (wrap) return wrap;
+                    }
+                    return null;
                 }
                 const termsRow = findRow(TERMS_RE);
                 const confirmRow = findRow(CONFIRM_RE);
+                const terms = isChecked(termsRow);
+                const confirm = isChecked(confirmRow);
                 return {
-                    terms: isChecked(termsRow),
-                    confirm: isChecked(confirmRow),
-                    ok: !!(isChecked(termsRow) && isChecked(confirmRow)),
+                    terms,
+                    confirm,
+                    ok: !!(terms && confirm),
+                    found_terms: !!termsRow,
+                    found_confirm: !!confirmRow,
                 };
             }"""
         )
 
-    async def _click_esubmit_checkbox_by_text(
+    async def _force_check_esubmit_row(
         self, page: "Page", *, needle: str, label: str
     ) -> bool:
-        """按片段文案定位行，只点左侧 ant-checkbox 方块。"""
+        """按文案找到行：若未勾则 check/点方块一次；已勾则跳过（防二次点击取消）。"""
         try:
-            text_loc = page.get_by_text(needle, exact=False).first
-            if await text_loc.count() == 0:
-                return False
-            row = text_loc.locator(
-                "xpath=ancestor::*[.//input[@type='checkbox'] "
-                "or .//span[contains(@class,'ant-checkbox')]][1]"
+            # 优先 ant-checkbox-wrapper（含隐藏 input）
+            wrap = page.locator(".ant-checkbox-wrapper, label").filter(
+                has_text=needle
             ).first
-            if await row.count() == 0:
-                row = text_loc.locator(
-                    "xpath=ancestor::label[1] | ancestor::*[contains(@class,'ant-checkbox-wrapper')][1]"
+            if await wrap.count() == 0:
+                text_loc = page.get_by_text(needle, exact=False).first
+                if await text_loc.count() == 0:
+                    return False
+                wrap = text_loc.locator(
+                    "xpath=ancestor::*[contains(@class,'ant-checkbox-wrapper') "
+                    "or .//input[@type='checkbox'] "
+                    "or .//span[contains(@class,'ant-checkbox')]][1]"
                 ).first
-            if await row.count() == 0:
+            if await wrap.count() == 0:
                 return False
-            await row.scroll_into_view_if_needed()
-            box = row.locator(
-                ".ant-checkbox-inner, .ant-checkbox, input[type='checkbox']"
-            ).first
+
+            await wrap.scroll_into_view_if_needed()
+            cls = (await wrap.get_attribute("class") or "")
+            inp = wrap.locator("input[type='checkbox']").first
+            already = "ant-checkbox-wrapper-checked" in cls or "ant-checkbox-checked" in cls
+            if not already and await inp.count() > 0:
+                try:
+                    already = await inp.is_checked()
+                except Exception:
+                    already = False
+            if already:
+                logger.info("s03a 已勾选，跳过点击: %s", label)
+                return True
+
+            # Playwright check 幂等，不会把已勾的取消
+            if await inp.count() > 0:
+                try:
+                    await inp.check(force=True, timeout=5000)
+                    await inp.dispatch_event("input")
+                    await inp.dispatch_event("change")
+                    await page.wait_for_timeout(250)
+                    if await inp.is_checked():
+                        logger.info("s03a check() 成功: %s", label)
+                        return True
+                except Exception:
+                    logger.debug("s03a check() 失败，改点方块: %s", label, exc_info=True)
+
+            box = wrap.locator(".ant-checkbox-inner, .ant-checkbox").first
             if await box.count() > 0:
                 await box.click(force=True, timeout=5000)
             else:
-                await row.click(force=True, timeout=5000)
-            logger.info("s03a Playwright 已点方块: %s", label)
-            return True
+                await wrap.click(force=True, timeout=5000)
+            await page.wait_for_timeout(300)
+
+            if await inp.count() > 0:
+                try:
+                    if not await inp.is_checked():
+                        await inp.check(force=True)
+                        await inp.dispatch_event("change")
+                    ok = await inp.is_checked()
+                except Exception:
+                    ok = "ant-checkbox-wrapper-checked" in (
+                        await wrap.get_attribute("class") or ""
+                    )
+            else:
+                ok = "ant-checkbox-wrapper-checked" in (
+                    await wrap.get_attribute("class") or ""
+                ) or "ant-checkbox-checked" in (
+                    await wrap.get_attribute("class") or ""
+                )
+            logger.info("s03a 点方块后 checked=%s: %s", ok, label)
+            return bool(ok)
         except Exception:
-            logger.debug("s03a Playwright 点方块失败: %s", label, exc_info=True)
+            logger.debug("s03a 勾选失败: %s", label, exc_info=True)
             return False
 
     async def _accept_esubmit_terms(
         self, page: "Page", *, submit: bool
     ) -> bool:
-        """勾选 s03a 截图中的两个确认框；submit=True 时点击提交。
-
-        只匹配「本人已阅读…约束」与「本人确认以上…正确完整」；
-        先 wait 再 recover；点 .ant-checkbox-inner（长文案不限 40 字）。
-        """
+        """勾选 s03a 两个确认框（简繁文案都覆盖）；submit=True 时再点提交。"""
         if not await self._is_esubmit_terms_step(page):
             return False
 
-        # 先等 20s，未就绪再 recover（避免一上来整页 reload）
         if not await self._wait_step_ready(
             page,
             self._esubmit_terms_is_ready,
@@ -4075,98 +4144,103 @@ class IcrisRegistrationBot:
                 page, self._esubmit_terms_is_ready, label="s03a条款确认"
             )
 
-        terms_pat = (
-            r"本人已阅读、理解并同意|本人已閱讀、理解並同意|"
-            r"本人已阅读.*约束|本人已閱讀.*約束"
-        )
-        confirm_pat = (
-            r"本人确认以上提供的资料正确完整|"
-            r"本人確認以上提供的資料正確完整"
-        )
+        trad = await self._esubmit_page_is_traditional(page)
+        logger.info("s03a 界面语言判定 traditional=%s", trad)
 
-        async def _check_one(
-            *,
-            already: bool,
-            pat: str,
-            needles: tuple[tuple[str, str], ...],
-            key: str,
-        ) -> bool:
-            if already:
-                return True
-            await self._ensure_checkbox_by_text(
-                page, pat, max_text_len=200, prefer_inner=True
-            )
+        # 按界面语言优先：繁体页先试繁体针，再试简体；反之亦然
+        terms_needles_zh: list[tuple[str, str]] = [
+            ("本人已阅读、理解并同意", "条款-简"),
+            ("本人已阅读", "条款-简短"),
+        ]
+        terms_needles_tw: list[tuple[str, str]] = [
+            ("本人已閱讀、理解並同意", "条款-繁"),
+            ("本人已閱讀", "条款-繁短"),
+        ]
+        confirm_needles_zh: list[tuple[str, str]] = [
+            ("本人确认以上提供的资料正确完整", "确认-简"),
+            ("本人确认以上", "确认-简短"),
+        ]
+        confirm_needles_tw: list[tuple[str, str]] = [
+            ("本人確認以上提供的資料正確完整", "确认-繁"),
+            ("本人確認以上", "确认-繁短"),
+        ]
+        if trad:
+            terms_needles = terms_needles_tw + terms_needles_zh
+            confirm_needles = confirm_needles_tw + confirm_needles_zh
+        else:
+            terms_needles = terms_needles_zh + terms_needles_tw
+            confirm_needles = confirm_needles_zh + confirm_needles_tw
+
+        async def _ensure_key(key: str, needles: list[tuple[str, str]]) -> bool:
             mid = await self._verify_esubmit_terms_checked(page)
             if (mid or {}).get(key):
                 return True
             for needle, lab in needles:
-                await self._click_esubmit_checkbox_by_text(
-                    page, needle=needle, label=lab
-                )
+                await self._force_check_esubmit_row(page, needle=needle, label=lab)
                 mid = await self._verify_esubmit_terms_checked(page)
                 if (mid or {}).get(key):
                     return True
-            # 坐标点方块中心（避免二次 toggle：仅未勾时）
-            for needle, _lab in needles:
-                try:
-                    wrap = page.locator(".ant-checkbox-wrapper").filter(
-                        has_text=needle
-                    ).first
-                    if await wrap.count() == 0:
-                        continue
-                    if "ant-checkbox-wrapper-checked" in (
-                        await wrap.get_attribute("class") or ""
-                    ):
-                        return True
-                    box = wrap.locator(".ant-checkbox-inner, .ant-checkbox").first
-                    target = box if await box.count() > 0 else wrap
-                    await target.scroll_into_view_if_needed()
-                    box_rect = await target.bounding_box()
-                    if box_rect:
-                        await page.mouse.click(
-                            box_rect["x"] + box_rect["width"] / 2,
-                            box_rect["y"] + box_rect["height"] / 2,
-                        )
-                        await page.wait_for_timeout(300)
-                        logger.info("s03a mouse.click 方块: %s", needle[:12])
-                    mid = await self._verify_esubmit_terms_checked(page)
-                    if (mid or {}).get(key):
-                        return True
-                except Exception:
-                    logger.debug(
-                        "s03a mouse.click 失败 needle=%s", needle, exc_info=True
-                    )
-            mid = await self._verify_esubmit_terms_checked(page)
-            return bool((mid or {}).get(key))
+            return bool((await self._verify_esubmit_terms_checked(page) or {}).get(key))
 
-        terms_ok = await _check_one(
-            already=False,
-            pat=terms_pat,
-            needles=(
-                ("本人已阅读、理解并同意", "条款约束"),
-                ("本人已閱讀、理解並同意", "条款约束(繁)"),
-            ),
-            key="terms",
-        )
-        confirm_ok = await _check_one(
-            already=False,
-            pat=confirm_pat,
-            needles=(
-                ("本人确认以上提供的资料正确完整", "资料确认"),
-                ("本人確認以上提供的資料正確完整", "资料确认(繁)"),
-            ),
-            key="confirm",
-        )
+        terms_ok = await _ensure_key("terms", terms_needles)
+        confirm_ok = await _ensure_key("confirm", confirm_needles)
 
+        # 仍缺：JS 按简繁正则强制设 checked（只设不 toggle）
         verify = await self._verify_esubmit_terms_checked(page)
-        terms_ok = bool((verify or {}).get("terms")) or terms_ok
-        confirm_ok = bool((verify or {}).get("confirm")) or confirm_ok
-        both_ok = bool((verify or {}).get("ok")) or (terms_ok and confirm_ok)
+        if not (verify or {}).get("ok"):
+            await page.evaluate(
+                """() => {
+                    const TERMS_RE = /本人已(阅读|閱讀)[、,，]?理解(并|並)同意|本人已(阅读|閱讀).*(约束|約束)/;
+                    const CONFIRM_RE = /本人(确认|確認)以上提供的(资料|資料)(正确|正確)完整/;
+                    function rowText(el) {
+                        return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, '');
+                    }
+                    function forceOn(re) {
+                        const wraps = Array.from(document.querySelectorAll(
+                            '.ant-checkbox-wrapper, label'
+                        ));
+                        let best = null, bestLen = Infinity;
+                        for (const w of wraps) {
+                            const t = rowText(w);
+                            if (!t || t.length > 500 || !re.test(t)) continue;
+                            if (t.length < bestLen) { best = w; bestLen = t.length; }
+                        }
+                        if (!best) return false;
+                        const inp = best.querySelector("input[type='checkbox']");
+                        const ant = best.querySelector('.ant-checkbox');
+                        const inner = best.querySelector('.ant-checkbox-inner');
+                        if (inp && inp.checked) return true;
+                        if (inner) { try { inner.click(); } catch (e) {} }
+                        else if (ant) { try { ant.click(); } catch (e) {} }
+                        else { try { best.click(); } catch (e) {} }
+                        if (inp && !inp.checked) {
+                            inp.checked = true;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        if (ant) ant.classList.add('ant-checkbox-checked');
+                        best.classList.add('ant-checkbox-wrapper-checked');
+                        return !!(inp && inp.checked) || best.classList.contains('ant-checkbox-wrapper-checked');
+                    }
+                    return { terms: forceOn(TERMS_RE), confirm: forceOn(CONFIRM_RE) };
+                }"""
+            )
+            await page.wait_for_timeout(400)
+            # 再幂等 check 一遍（只补未勾）
+            for needle, lab in terms_needles[:2] + confirm_needles[:2]:
+                await self._force_check_esubmit_row(page, needle=needle, label=f"{lab}-补")
+            verify = await self._verify_esubmit_terms_checked(page)
+
+        terms_ok = bool((verify or {}).get("terms"))
+        confirm_ok = bool((verify or {}).get("confirm"))
+        both_ok = bool((verify or {}).get("ok"))
         logger.info(
-            "s03a 校验 terms=%s confirm=%s ok=%s",
+            "s03a 校验 terms=%s confirm=%s ok=%s found=%s/%s",
             terms_ok,
             confirm_ok,
             both_ok,
+            (verify or {}).get("found_terms"),
+            (verify or {}).get("found_confirm"),
         )
 
         if not both_ok:
@@ -4177,8 +4251,25 @@ class IcrisRegistrationBot:
             )
             return False
 
+        # 短暂等待后复验，防止 Vue 打回
+        await page.wait_for_timeout(500)
+        still = await self._verify_esubmit_terms_checked(page)
+        if not (still or {}).get("ok"):
+            logger.warning("s03a 勾选态被打回，再补勾一次")
+            for needle, lab in (
+                (terms_needles[0] if terms_needles else ("本人已阅读", "条款")),
+                (confirm_needles[0] if confirm_needles else ("本人确认以上", "确认")),
+            ):
+                await self._force_check_esubmit_row(
+                    page, needle=needle[0], label=f"{needle[1]}-保活"
+                )
+            still = await self._verify_esubmit_terms_checked(page)
+            if not (still or {}).get("ok"):
+                logger.error("s03a 勾选无法保持，放弃提交")
+                return False
+
         logger.info(
-            "s03a 两框已勾选 submit=%s allow_submit=%s",
+            "s03a 两框已勾选并保持 submit=%s allow_submit=%s",
             submit,
             self.allow_submit,
         )
@@ -4187,7 +4278,6 @@ class IcrisRegistrationBot:
             logger.info("s03a dry_run/未允许提交：已勾选但不点提交")
             return True
 
-        # 提交前再验两句对应框仍勾着（不用「任意 2 个 checkbox」）
         still = await self._verify_esubmit_terms_checked(page)
         if not (still or {}).get("ok"):
             logger.error("s03a 提交前校验失败：勾选状态丢失")

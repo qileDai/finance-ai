@@ -44,8 +44,9 @@ def import_async_playwright():
 
 
 def _try_launch_cdp_chrome() -> bool:
-    """尝试启动带 remote-debugging-port 的 Chrome（Windows）"""
+    """尝试启动带 remote-debugging-port 的 Chrome（Windows/Linux/macOS）"""
     import os
+    import platform
     import subprocess
     import time
     from pathlib import Path
@@ -54,30 +55,47 @@ def _try_launch_cdp_chrome() -> bool:
 
     parsed = urlparse(settings.chrome_cdp_url)
     port = parsed.port or 9222
-    profile = Path(os.environ.get("TEMP", ".")) / "icris-chrome-cdp-profile"
+    # 跨平台临时目录：Windows 用 TEMP，Linux/macOS 用 /tmp
+    tmp_base = os.environ.get("TEMP") or "/tmp"
+    profile = Path(tmp_base) / "icris-chrome-cdp-profile"
     profile.mkdir(parents=True, exist_ok=True)
 
     candidates = [
+        # Windows
         Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
         Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+        # Linux（容器/宝塔/服务器）
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/usr/bin/chromium"),
+        # macOS
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     ]
     chrome = next((p for p in candidates if p.is_file()), None)
     if not chrome:
         return False
+
+    is_linux = platform.system() == "Linux"
+    launch_args = [
+        str(chrome),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        f"--user-agent={USER_AGENT}",
+    ]
+    # Linux/容器环境：无法开 sandbox + 无 X11 显示需 headless
+    if is_linux:
+        launch_args.extend(["--no-sandbox", "--disable-dev-shm-usage", "--headless=new"])
+    launch_args.append("about:blank")
+
     try:
         subprocess.Popen(
-            [
-                str(chrome),
-                f"--remote-debugging-port={port}",
-                f"--user-data-dir={profile}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                f"--user-agent={USER_AGENT}",
-                "about:blank",
-            ],
+            launch_args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
