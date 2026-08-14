@@ -27,6 +27,8 @@ docker compose ps
 首次构建很慢；日常更新也会再 build，通常几分钟。  
 **反代 / SSL / 域名一般不用动**（除非改了端口或路径）。
 
+管理后台前端打进镜像：改了 `web/admin` 后**必须** `--build`，否则接口已返回 `{level,message}` 对象、旧 JS 仍用 `messages.join` 时，步骤日志会整页变成 `[object Object]`。上线后对 `/admin/` 做一次 **Ctrl+F5**。
+
 ### 验收
 
 ```bash

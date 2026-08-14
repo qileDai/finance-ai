@@ -622,14 +622,18 @@ table.data tr.clickable:hover td {
 }
 .reg-log {
   margin-top: 8px;
-  max-height: 380px;
+  max-height: 480px;
   overflow: auto;
-  background: #f7f7f8;
-  border: 1px solid var(--border, #eee);
+  background: var(--bg-soft, #f7f7f8);
+  border: 1px solid var(--line, #eee);
   border-radius: 6px;
-  padding: 8px 10px;
-  font-family: monospace;
-  font-size: 0.78rem;
+  padding: 10px 12px;
+  font-family: var(--mono, monospace);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.reg-log.job-log {
+  margin-top: 8px;
 }
 .reg-log-line {
   padding: 1px 0;
@@ -678,7 +682,7 @@ table.data tr.clickable:hover td {
 
 .job-log {
   margin: 0;
-  max-height: 320px;
+  max-height: 480px;
   overflow: auto;
   padding: 10px 12px;
   background: var(--bg-soft);
@@ -686,8 +690,37 @@ table.data tr.clickable:hover td {
   border-radius: var(--radius);
   font-family: var(--mono);
   font-size: 0.8rem;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.job-log-line {
+  margin: 0 0 2px;
+}
+
+.job-log-line.is-error {
+  color: #e11d48;
+  font-weight: 500;
+}
+
+.job-log-line.is-warning {
+  color: #d97706;
+}
+
+.job-log-time {
+  color: var(--muted);
+  margin-right: 6px;
+}
+
+.job-log-level {
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.job-log-line.is-error .job-log-level,
+.job-log-line.is-warning .job-log-level {
+  color: inherit;
 }
 
 @media (max-width: 960px) {

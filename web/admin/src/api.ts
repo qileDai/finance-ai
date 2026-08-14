@@ -65,6 +65,12 @@ export type JobRow = {
   started_at?: string;
 };
 
+export type JobLogLine = {
+  level: string;
+  message: string;
+  time?: string;
+};
+
 export type JobField = { key: string; label?: string; value: string };
 
 export type JobDetailResponse = ApiOk<{
@@ -76,7 +82,7 @@ export type JobDetailResponse = ApiOk<{
   };
   payload: Record<string, unknown>;
   fields: JobField[];
-  messages: string[];
+  messages: Array<JobLogLine | string>;
 }>;
 
 export type QualityResponse = ApiOk<{
@@ -117,7 +123,7 @@ export type RunnerStatus = {
   status: "idle" | "running" | "succeeded" | "failed" | "pending";
   started_at?: string;
   finished_at?: string;
-  messages?: string[];
+  messages?: Array<JobLogLine | string>;
   error?: string;
   company_name?: string;
   case_id?: string;

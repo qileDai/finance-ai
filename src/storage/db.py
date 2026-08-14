@@ -1294,7 +1294,7 @@ class ExternalGroupStore:
         job_id: int,
         *,
         package_dir: str = "",
-        result_messages: list[str] | None = None,
+        result_messages: list[Any] | None = None,
     ) -> None:
         import json
 
@@ -1320,6 +1320,31 @@ class ExternalGroupStore:
                 (package_dir, package_dir, msgs, msgs, now, now, job_id),
             )
 
+    def update_job_result_messages(
+        self, job_id: int, result_messages: list[Any] | None
+    ) -> None:
+        """Flush step logs while job is still running (does not change status)."""
+        import json
+
+        if result_messages is None:
+            return
+        try:
+            msgs = json.dumps(list(result_messages), ensure_ascii=False)
+        except (TypeError, ValueError):
+            msgs = "[]"
+        if not msgs:
+            return
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET result_messages = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (msgs, now, job_id),
+            )
+
     def mark_job_failed(
         self,
         job_id: int,
@@ -1329,7 +1354,7 @@ class ExternalGroupStore:
         available_at: str = "",
         package_dir: str = "",
         screenshot_path: str = "",
-        result_messages: list[str] | None = None,
+        result_messages: list[Any] | None = None,
     ) -> None:
         import json
 

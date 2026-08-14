@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { formatDateTime } from "../format";
+import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import { statusBadge } from "../components/ui";
 
 type Props = {
@@ -213,6 +214,7 @@ export function RegisterPage({ onToast }: Props) {
 
   const isRunning =
     runnerStatus?.status === "running" || runnerStatus?.status === "pending";
+  const statusLogs = normalizeLogLines(runnerStatus?.messages);
 
   function setField(key: string, val: string) {
     setFields((p) => ({ ...p, [key]: val }));
@@ -271,7 +273,12 @@ export function RegisterPage({ onToast }: Props) {
         case_id: res.case_id,
         job_id: res.job_id ?? null,
         messages: res.job_id
-          ? [`已入队任务 #${res.job_id}，等待 Worker 执行`]
+          ? [
+              {
+                level: "INFO",
+                message: `已入队任务 #${res.job_id}，等待 Worker 执行`,
+              },
+            ]
           : [],
         dry_run: res.dry_run ?? dryRun,
       });
@@ -460,13 +467,25 @@ export function RegisterPage({ onToast }: Props) {
               {runnerStatus.error ? (
                 <div className="error-box">{runnerStatus.error}</div>
               ) : null}
-              <div className="reg-log" ref={logRef}>
-                {(runnerStatus.messages || []).map((m, i) => (
-                  <div key={i} className="reg-log-line">
-                    {m}
-                  </div>
-                ))}
-                {!runnerStatus.messages?.length ? (
+              <div className="reg-log job-log" ref={logRef} role="log">
+                {statusLogs.map((line, i) => {
+                  const msg = asLogText(line.message);
+                  const level = asLogText(line.level) || "INFO";
+                  const time = asLogText(line.time);
+                  return (
+                    <div
+                      key={`${i}-${time}-${msg.slice(0, 24)}`}
+                      className={logLineClass(level)}
+                    >
+                      {time ? (
+                        <span className="job-log-time">{time}</span>
+                      ) : null}
+                      <span className="job-log-level">[{level}]</span>{" "}
+                      <span className="job-log-msg">{msg}</span>
+                    </div>
+                  );
+                })}
+                {!statusLogs.length ? (
                   <div className="muted">暂无日志…</div>
                 ) : null}
               </div>

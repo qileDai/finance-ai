@@ -12,6 +12,7 @@ from typing import Any
 from config.settings import settings
 from src.storage.db import ExternalGroupStore
 from src.wework.external_workflow import ExternalGroupWorkflow
+from src.wework.job_log_capture import JobLogCapture
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,15 @@ class IcrisJobWorker:
         delay = min(delay, 3600.0)
         return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
+    def _flush_job_logs(self, job_id: int, capture: JobLogCapture, *, force: bool = False) -> None:
+        if not force and capture.dirty_count() < 50:
+            return
+        try:
+            self.store.update_job_result_messages(job_id, capture.snapshot())
+            capture.mark_flushed()
+        except Exception:
+            logger.exception("flush job logs failed id=%s", job_id)
+
     def _process_job(self, job: dict[str, Any]) -> None:
         job_id = int(job["id"])
         roomid = str(job.get("roomid") or "")
@@ -104,11 +114,25 @@ class IcrisJobWorker:
             allow_submit,
         )
         package_dir = str(job.get("package_dir") or "")
+        capture = JobLogCapture()
+        capture.install()
+        stop_flush = threading.Event()
+
+        def _flush_loop() -> None:
+            while not stop_flush.wait(5.0):
+                if capture.dirty_count() > 0:
+                    self._flush_job_logs(job_id, capture, force=True)
+
+        flush_thread = threading.Thread(
+            target=_flush_loop, daemon=True, name=f"job-log-flush-{job_id}"
+        )
+        flush_thread.start()
         try:
             # 与 python main.py --step register 一致：走 Chrome CDP + stealth，避免 s02 指纹卡加载
             ctx = self.workflow.run_icris_job(job, force_isolated_browser=False)
             package_dir = str(ctx.package_dir or package_dir)
-            msgs = list(getattr(ctx, "messages", None) or [])
+            capture.merge_ctx_messages(list(getattr(ctx, "messages", None) or []))
+            msgs = capture.snapshot()
             self.store.mark_job_succeeded(
                 job_id, package_dir=package_dir, result_messages=msgs
             )
@@ -144,11 +168,13 @@ class IcrisJobWorker:
 
             if isinstance(e, IcrisFlowError):
                 screenshot_path = e.screenshot_path or ""
-            msgs: list[str] = []
-            # 失败时尽量保留已有步骤日志（若异常对象挂了 ctx）
             ctx_fail = getattr(e, "ctx", None)
             if ctx_fail is not None:
-                msgs = list(getattr(ctx_fail, "messages", None) or [])
+                capture.merge_ctx_messages(
+                    list(getattr(ctx_fail, "messages", None) or [])
+                )
+            capture.append_error(err)
+            msgs = capture.snapshot()
             self.store.mark_job_failed(
                 job_id,
                 error=err,
@@ -174,6 +200,10 @@ class IcrisJobWorker:
                 self.workflow.notify_job_result(
                     job, ok=False, package_dir=package_dir, error=notify_err
                 )
+        finally:
+            stop_flush.set()
+            flush_thread.join(timeout=2.0)
+            capture.uninstall()
 
     def status_payload(self) -> dict[str, Any]:
         stats = self.store.registration_job_stats()

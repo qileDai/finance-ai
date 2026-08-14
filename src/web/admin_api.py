@@ -432,6 +432,45 @@ def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
     return fields
 
 
+def _normalize_job_messages(
+    raw_msgs: Any, *, last_error: str = ""
+) -> list[dict[str, str]]:
+    """Parse result_messages into [{level, message, time?}]; attach last_error if missing."""
+    import json
+
+    messages: list[dict[str, str]] = []
+    if isinstance(raw_msgs, str) and raw_msgs.strip():
+        try:
+            parsed = json.loads(raw_msgs)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    level = str(item.get("level") or "INFO").upper()
+                    msg = str(item.get("message") or "").strip()
+                    if not msg:
+                        continue
+                    entry: dict[str, str] = {"level": level, "message": msg}
+                    t = str(item.get("time") or "").strip()
+                    if t:
+                        entry["time"] = t
+                    messages.append(entry)
+                else:
+                    text = str(item or "").strip()
+                    if text:
+                        messages.append({"level": "INFO", "message": text})
+    err = str(last_error or "").strip()
+    if err:
+        already = any(
+            m.get("level") in ("ERROR", "CRITICAL") and err in str(m.get("message") or "")
+            for m in messages[-5:]
+        )
+        if not already:
+            messages.append({"level": "ERROR", "message": err})
+    return messages
+
+
 def _handle_job_detail(
     store: ExternalGroupStore, job_id: int
 ) -> tuple[dict[str, Any], int]:
@@ -450,15 +489,10 @@ def _handle_job_detail(
                 payload = parsed
         except (TypeError, ValueError, json.JSONDecodeError):
             payload = {}
-    messages: list[str] = []
-    raw_msgs = out.get("result_messages") or ""
-    if raw_msgs:
-        try:
-            parsed_msgs = json.loads(raw_msgs)
-            if isinstance(parsed_msgs, list):
-                messages = [str(x) for x in parsed_msgs]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            messages = []
+    messages = _normalize_job_messages(
+        out.get("result_messages") or "",
+        last_error=str(out.get("last_error") or ""),
+    )
     fields = _flatten_payload_fields(payload) if payload else []
     # 无 payload 时回退 materials（中文 label）
     if not fields:

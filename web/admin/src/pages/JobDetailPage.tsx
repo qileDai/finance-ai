@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
+import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import { StateBox, statusBadge } from "../components/ui";
 
 type Props = {
@@ -43,6 +44,28 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
     };
   }, [jobId, refreshKey]);
 
+  const jobStatus = detail?.job?.status;
+  useEffect(() => {
+    if (!Number.isFinite(jobId) || jobId <= 0) return;
+    if (jobStatus !== "pending" && jobStatus !== "running") return;
+    let alive = true;
+    const tick = () => {
+      api
+        .job(jobId)
+        .then((d) => {
+          if (alive) setDetail(d);
+        })
+        .catch(() => {
+          /* keep last detail */
+        });
+    };
+    const id = window.setInterval(tick, 3000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [jobId, jobStatus]);
+
   async function act(kind: "cancel" | "requeue") {
     const label = kind === "cancel" ? "取消" : "重跑";
     if (!window.confirm(`确认${label}任务 #${jobId}？`)) return;
@@ -61,7 +84,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
 
   const job = detail?.job;
   const fields: JobField[] = detail?.fields || [];
-  const messages = detail?.messages || [];
+  const messages = normalizeLogLines(detail?.messages);
 
   return (
     <>
@@ -184,9 +207,33 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
             </section>
 
             <section className="reg-card">
-              <h2>步骤日志</h2>
+              <h2>
+                步骤日志
+                {job.status === "running" || job.status === "pending" ? (
+                  <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 400 }}>
+                    {" "}
+                    · 自动刷新中
+                  </span>
+                ) : null}
+              </h2>
               {messages.length ? (
-                <pre className="job-log">{messages.join("\n")}</pre>
+                <div className="job-log" role="log">
+                  {messages.map((line, i) => {
+                    const msg = asLogText(line.message);
+                    const level = asLogText(line.level) || "INFO";
+                    const time = asLogText(line.time);
+                    return (
+                      <div
+                        key={`${i}-${time}-${msg.slice(0, 24)}`}
+                        className={logLineClass(level)}
+                      >
+                        {time ? <span className="job-log-time">{time}</span> : null}
+                        <span className="job-log-level">[{level}]</span>{" "}
+                        <span className="job-log-msg">{msg}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               ) : (
                 <p className="muted">暂无日志</p>
               )}

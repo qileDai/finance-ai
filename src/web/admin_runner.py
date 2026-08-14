@@ -57,7 +57,7 @@ class RunnerState:
     status: str = "idle"  # idle | running | succeeded | failed | pending
     started_at: str = ""
     finished_at: str = ""
-    messages: list[str] = field(default_factory=list)
+    messages: list[Any] = field(default_factory=list)
     error: str = ""
     company_name: str = ""
     case_id: str = ""
@@ -228,6 +228,43 @@ def _validate(
     return errs
 
 
+def _parse_result_messages(
+    raw_msgs: Any, *, last_error: str = ""
+) -> list[dict[str, str]]:
+    """Normalize DB result_messages for runner status UI."""
+    messages: list[dict[str, str]] = []
+    if isinstance(raw_msgs, str) and raw_msgs.strip():
+        try:
+            parsed = json.loads(raw_msgs)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    level = str(item.get("level") or "INFO").upper()
+                    text = str(item.get("message") or "").strip()
+                    if not text:
+                        continue
+                    entry: dict[str, str] = {"level": level, "message": text}
+                    t = str(item.get("time") or "").strip()
+                    if t:
+                        entry["time"] = t
+                    messages.append(entry)
+                else:
+                    text = str(item or "").strip()
+                    if text:
+                        messages.append({"level": "INFO", "message": text})
+    err = str(last_error or "").strip()
+    if err:
+        already = any(
+            m.get("level") in ("ERROR", "CRITICAL") and err in str(m.get("message") or "")
+            for m in messages[-5:]
+        )
+        if not already:
+            messages.append({"level": "ERROR", "message": err})
+    return messages
+
+
 def _sync_state_from_job(job: dict[str, Any] | None) -> None:
     global _state
     if not job:
@@ -240,15 +277,10 @@ def _sync_state_from_job(job: dict[str, Any] | None) -> None:
         "failed": "failed",
         "cancelled": "failed",
     }.get(st, st or "idle")
-    msgs: list[str] = []
-    raw_msgs = job.get("result_messages") or ""
-    if raw_msgs:
-        try:
-            parsed = json.loads(raw_msgs)
-            if isinstance(parsed, list):
-                msgs = [str(x) for x in parsed]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
+    msgs = _parse_result_messages(
+        job.get("result_messages") or "",
+        last_error=str(job.get("last_error") or ""),
+    )
     with _lock:
         _state.status = mapped
         _state.job_id = int(job["id"]) if job.get("id") is not None else _state.job_id
@@ -349,7 +381,7 @@ def submit(
         _state = RunnerState(
             status="pending",
             started_at=_utc_now(),
-            messages=[f"已入队任务 #{job_id}，等待 Worker 执行"],
+            messages=[{"level": "INFO", "message": f"已入队任务 #{job_id}，等待 Worker 执行"}],
             error="",
             company_name=company_name,
             case_id=case_id,
