@@ -3,7 +3,6 @@ import { Link } from "react-router-dom";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
-import { ImageModal } from "../components/ImageModal";
 import { statusBadge } from "../components/ui";
 
 type Props = {
@@ -25,8 +24,6 @@ const TEXT_FIELDS: TextField[] = [
   { key: "registered_office_cn", label: "注册地址（中文）" },
   { key: "registered_office_en", label: "注册地址（英文）" },
   { key: "director_name", label: "董事兼股东姓名", required: true },
-  { key: "director_name_cn", label: "董事中文名" },
-  { key: "director_name_en", label: "董事英文名" },
   { key: "id_number", label: "身份证号码", required: true },
   {
     key: "contact_email",
@@ -166,21 +163,13 @@ export function RegisterPage({ onToast }: Props) {
   const [idType, setIdType] = useState("PRC_ID");
   const [idFile, setIdFile] = useState<File | undefined>();
   const [taiwanIdFile, setTaiwanIdFile] = useState<File | undefined>();
-  const [needTaiwanId, setNeedTaiwanId] = useState(false);
-  const [extractHints, setExtractHints] = useState<string[]>([]);
-  const [extracting, setExtracting] = useState(false);
   const [dryRun, setDryRun] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [runnerStatus, setRunnerStatus] = useState<RunnerStatus | null>(null);
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [defaultEmail, setDefaultEmail] = useState("");
-  const [modalSrc, setModalSrc] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
-
-  const showTaiwanUpload =
-    needTaiwanId ||
-    (idType === "PASSPORT" && isTaiwanIssuing(fields.issuing_country || ""));
 
   // 预填默认邮箱 + 恢复运行中任务状态
   useEffect(() => {
@@ -253,8 +242,6 @@ export function RegisterPage({ onToast }: Props) {
     setIdType("PRC_ID");
     setIdFile(undefined);
     setTaiwanIdFile(undefined);
-    setNeedTaiwanId(false);
-    setExtractHints([]);
   }
 
   function onParse() {
@@ -266,70 +253,6 @@ export function RegisterPage({ onToast }: Props) {
     }
     setFields((p) => ({ ...p, ...parsed }));
     onToast(`已填充 ${keys.length} 项`);
-  }
-
-  async function applyExtractFromFile(file: File, isTaiwanDoc = false) {
-    setExtracting(true);
-    setExtractHints([]);
-    try {
-      const dataUrl = await readFileAsDataUrl(file);
-      const res = await api.registerRunner.extractId({
-        data_url: dataUrl,
-        filename: file.name,
-        current_fields: { ...fields, id_type: idType },
-        fill_empty_only: true,
-        expected_id_type: isTaiwanDoc ? "TW_ID" : undefined,
-      });
-      const filled = res.fields || {};
-      const nextType = (filled.id_type || "").trim();
-      if (nextType && ["PRC_ID", "HKID", "PASSPORT"].includes(nextType)) {
-        setIdType(nextType);
-      }
-      setFields((p) => {
-        const merged = { ...p };
-        for (const [k, v] of Object.entries(filled)) {
-          if (!v) continue;
-          if (k === "id_type") continue;
-          if (!(merged[k] || "").trim()) merged[k] = v;
-        }
-        return merged;
-      });
-      if (res.need_taiwan_id || isTaiwanDoc) {
-        setNeedTaiwanId(true);
-      }
-      const hints = res.hints || [];
-      setExtractHints(hints);
-      const n = Object.keys(filled).length;
-      onToast(
-        n
-          ? `已识别并填充 ${n} 项${res.vision?.type_label ? `（${res.vision.type_label}）` : ""}`
-          : "识别完成，无可填充空字段（已有值未覆盖）"
-      );
-    } catch (e) {
-      onToast((e as Error).message || "证件识别失败");
-    } finally {
-      setExtracting(false);
-    }
-  }
-
-  async function onIdFileChange(file: File | undefined) {
-    setIdFile(file);
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      onToast("PDF 请手工填写字段；图片可点「识别填充」");
-      return;
-    }
-    await applyExtractFromFile(file, false);
-  }
-
-  async function onTaiwanFileChange(file: File | undefined) {
-    setTaiwanIdFile(file);
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      onToast("台湾身份证请上传图片以便识别住址");
-      return;
-    }
-    await applyExtractFromFile(file, true);
   }
 
   function validate(): string | null {
@@ -350,10 +273,9 @@ export function RegisterPage({ onToast }: Props) {
     if (
       idType === "PASSPORT" &&
       isTaiwanIssuing(fields.issuing_country || "") &&
-      !taiwanIdFile &&
       !(fields.director_address_cn || "").trim()
     ) {
-      return "台湾护照需上传台湾身份证或填写住址中文";
+      return "台湾护照请填写住址中文";
     }
     return null;
   }
@@ -364,23 +286,24 @@ export function RegisterPage({ onToast }: Props) {
       onToast(err);
       return;
     }
-    const files: Record<string, RunnerFile> = {};
-    if (idFile) {
-      const dataUrl = await readFileAsDataUrl(idFile);
-      const key = primaryIdFileKey(idType);
-      files[key] = { name: idFile.name, data_url: dataUrl };
-    }
-    if (taiwanIdFile) {
-      const dataUrl = await readFileAsDataUrl(taiwanIdFile);
-      files.taiwan_id = { name: taiwanIdFile.name, data_url: dataUrl };
-    }
     setSubmitting(true);
     try {
+      const files: Record<string, RunnerFile> = {};
+      if (idFile) {
+        const dataUrl = await readFileAsDataUrl(idFile);
+        files[primaryIdFileKey(idType)] = { name: idFile.name, data_url: dataUrl };
+      }
+      if (taiwanIdFile) {
+        const dataUrl = await readFileAsDataUrl(taiwanIdFile);
+        files.taiwan_id = { name: taiwanIdFile.name, data_url: dataUrl };
+      }
       const payload = {
         ...fields,
         id_type: idType,
         issuing_country: fields.issuing_country || "",
       };
+      delete payload.director_name_cn;
+      delete payload.director_name_en;
       const res = await api.registerRunner.submit(payload, files, dryRun);
       onToast(
         res.job_id
@@ -463,7 +386,7 @@ export function RegisterPage({ onToast }: Props) {
                   value={fields[f.key] || ""}
                   placeholder={f.placeholder}
                   onChange={(e) => setField(f.key, e.target.value)}
-                  disabled={submitting || extracting}
+                  disabled={submitting}
                 />
                 {f.key === "director_address_en" &&
                 (fields.director_address_cn || fields.director_address_en) ? (
@@ -494,13 +417,11 @@ export function RegisterPage({ onToast }: Props) {
                 onChange={(e) => {
                   setIdType(e.target.value);
                   setIdFile(undefined);
-                  setExtractHints([]);
                   if (e.target.value !== "PASSPORT") {
-                    setNeedTaiwanId(false);
                     setTaiwanIdFile(undefined);
                   }
                 }}
-                disabled={submitting || extracting}
+                disabled={submitting}
               >
                 {ID_TYPE_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -516,9 +437,8 @@ export function RegisterPage({ onToast }: Props) {
                   value={fields.issuing_country || ""}
                   onChange={(e) => {
                     setField("issuing_country", e.target.value);
-                    if (isTaiwanIssuing(e.target.value)) setNeedTaiwanId(true);
                   }}
-                  disabled={submitting || extracting}
+                  disabled={submitting}
                 >
                   <option value="">未指定 / 其他</option>
                   <option value="CHN">中国大陆</option>
@@ -526,16 +446,15 @@ export function RegisterPage({ onToast }: Props) {
                   <option value="TWN">台湾</option>
                   <option value="OTHER">其他国家/地区</option>
                 </select>
-                {showTaiwanUpload ? (
-                  <small className="muted">
-                    台湾护照需另传台湾身份证以提取住址
-                  </small>
+                {idType === "PASSPORT" &&
+                isTaiwanIssuing(fields.issuing_country || "") ? (
+                  <small className="muted">台湾护照请填写住址中文</small>
                 ) : null}
               </label>
             ) : null}
           </div>
 
-          <h2>证件识别</h2>
+          <h2>证件文件</h2>
           <div className="reg-form">
             <label className="reg-field">
               <span>
@@ -546,57 +465,32 @@ export function RegisterPage({ onToast }: Props) {
                 key={`id-${idType}-${idFile ? idFile.name : "empty"}`}
                 type="file"
                 accept="image/*,application/pdf"
-                disabled={submitting || extracting}
-                onChange={(e) => onIdFileChange(e.target.files?.[0])}
+                disabled={submitting}
+                onChange={(e) => setIdFile(e.target.files?.[0])}
               />
               {idFile ? (
                 <small className="muted">{idFile.name}</small>
               ) : (
-                <small className="muted">
-                  上传图片后自动识别：内地证抽姓名/号码/住址并译英；港证抽中英名/号码；护照抽姓名/号码
-                </small>
+                <small className="muted">上传身份证或护照文件，不自动识别</small>
               )}
             </label>
-            {idFile && idFile.type.startsWith("image/") ? (
-              <div className="reg-paste-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={submitting || extracting}
-                  onClick={() => applyExtractFromFile(idFile, false)}
-                >
-                  {extracting ? "识别中…" : "重新识别填充"}
-                </button>
-              </div>
-            ) : null}
-            {showTaiwanUpload ? (
+            {idType === "PASSPORT" &&
+            isTaiwanIssuing(fields.issuing_country || "") ? (
               <label className="reg-field">
-                <span>
-                  台湾身份证（住址）
-                  <em>*</em>
-                </span>
+                <span>台湾身份证（可选）</span>
                 <input
                   key={taiwanIdFile ? taiwanIdFile.name : "tw-empty"}
                   type="file"
-                  accept="image/*"
-                  disabled={submitting || extracting}
-                  onChange={(e) => onTaiwanFileChange(e.target.files?.[0])}
+                  accept="image/*,application/pdf"
+                  disabled={submitting}
+                  onChange={(e) => setTaiwanIdFile(e.target.files?.[0])}
                 />
                 {taiwanIdFile ? (
                   <small className="muted">{taiwanIdFile.name}</small>
                 ) : (
-                  <small className="muted">
-                    用于提取户籍/住址中文，并自动翻译住址英文
-                  </small>
+                  <small className="muted">可另传台证原件，住址请在上方手填</small>
                 )}
               </label>
-            ) : null}
-            {extractHints.length ? (
-              <div className="muted">
-                {extractHints.map((h) => (
-                  <div key={h}>· {h}</div>
-                ))}
-              </div>
             ) : null}
           </div>
 
@@ -620,7 +514,7 @@ export function RegisterPage({ onToast }: Props) {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={submitting || extracting}
+              disabled={submitting}
               onClick={onSubmit}
             >
               {submitting ? "提交中…" : "跑注册"}

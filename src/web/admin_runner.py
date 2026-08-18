@@ -204,7 +204,7 @@ def _persist_materials(
 
 
 def _validate(
-    fields: dict[str, str], files: dict[str, dict[str, Any]]
+    fields: dict[str, str], files: dict[str, dict[str, Any]] | None = None
 ) -> list[str]:
     errs: list[str] = []
     if not (fields.get("company_name_en") or "").strip():
@@ -232,10 +232,9 @@ def _validate(
     issuing = (fields.get("issuing_country") or "").strip().upper()
     id_type = (fields.get("id_type") or "").strip().upper()
     if id_type == "PASSPORT" and issuing in ("TWN", "TW", "TAIWAN", "ROC"):
-        has_tw = str((files.get("taiwan_id") or {}).get("data_url") or "").strip()
-        if not has_tw and not (fields.get("director_address_cn") or "").strip():
-            errs.append("台湾护照需上传台湾身份证或填写住址中文")
-    # 至少 1 个证件文件（PDF/图片）
+        if not (fields.get("director_address_cn") or "").strip():
+            errs.append("台湾护照请填写住址中文")
+    files = files or {}
     has_file = any(
         str((files.get(f) or {}).get("data_url") or "").strip() for f in FILE_FIELDS
     ) or str((files.get("id_document") or {}).get("data_url") or "").strip()

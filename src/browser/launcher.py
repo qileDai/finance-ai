@@ -20,8 +20,26 @@ USER_AGENT = (
 )
 
 
+def _try_import_patchright():
+    """尝试导入 patchright（反 CDP 检测的 Playwright fork）。"""
+    try:
+        from patchright.async_api import async_playwright
+
+        logger.info("使用 patchright（反 CDP 检测模式）")
+        return async_playwright
+    except ImportError:
+        return None
+
+
 def import_async_playwright():
-    """导入 Playwright；Windows 上 greenlet DLL 失败时给出可操作的修复提示。"""
+    """导入 Playwright；优先使用 patchright（如安装），否则用普通 Playwright。"""
+    # patchright 可选：环境变量 PATCHRIGHT=1 时启用
+    import os
+    if os.environ.get("PATCHRIGHT", "").lower() in ("1", "true", "yes"):
+        pw = _try_import_patchright()
+        if pw:
+            return pw
+
     try:
         from playwright.async_api import async_playwright
 
@@ -86,11 +104,10 @@ def _try_launch_cdp_chrome() -> bool:
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
-        f"--user-agent={USER_AGENT}",
     ]
-    # Linux/容器环境：无法开 sandbox + 无 X11 显示需 headless
+    # Linux/容器环境：无法开 sandbox；Xvfb 提供虚拟 DISPLAY，不需要 headless
     if is_linux:
-        launch_args.extend(["--no-sandbox", "--disable-dev-shm-usage", "--headless=new"])
+        launch_args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
     launch_args.append("about:blank")
 
     try:
@@ -113,6 +130,15 @@ class BrowserSession:
     external_cdp: bool = False
 
 
+def _is_patchright() -> bool:
+    """是否正在使用 patchright（而非普通 Playwright）"""
+    import sys
+
+    return "patchright" in sys.modules or any(
+        "patchright" in str(m) for m in sys.modules.values() if m
+    )
+
+
 async def launch_browser(
     playwright: Any,
     *,
@@ -122,7 +148,32 @@ async def launch_browser(
     """启动浏览器，降低被识别为自动化脚本的概率。
 
     force_isolated=True 时忽略 CHROME_USE_EXISTING，供队列 Worker 使用，避免抢 CDP。
+    patchright 优先：用 launch(channel=chrome) 替代 CDP 连接，绕过 F5 bot 检测。
     """
+    # patchright 模式：直接 launch(channel=chrome)，不用 CDP（避免 F5 检测）
+    if _is_patchright():
+        headless_flag = settings.browser_headless if headless is None else bool(headless)
+        launch_kwargs: dict[str, Any] = {
+            "headless": headless_flag,
+            "channel": "chrome",
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-infobars",
+            ],
+        }
+        if settings.browser_no_proxy:
+            launch_kwargs["args"].append("--no-proxy-server")
+            launch_kwargs["args"].append("--proxy-server=direct://")
+        try:
+            browser = await playwright.chromium.launch(**launch_kwargs)
+            logger.info("patchright 启动 Chrome (channel=chrome) headless=%s", headless_flag)
+            return browser
+        except Exception as e:
+            logger.warning("patchright 启动失败: %s，回退到 CDP 模式", e)
+
     use_existing = bool(settings.chrome_use_existing) and not force_isolated
     if use_existing:
         try:

@@ -8,6 +8,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DISABLE_DEVTOOL_MARKER = "disable-devtool"
+# native-override.js: ICRIS 反调试脚本，检测 CDP 连接后阻止页面渲染
+NATIVE_OVERRIDE_MARKER = "native-override"
 
 PRELOAD_SCRIPT = """
 (() => {
@@ -247,6 +249,9 @@ async def setup_stealth_context(context: Any) -> None:
                 logger.warning("拦截导航重定向到公开站: %s", route.request.url[:100])
                 await route.abort()
                 return
+            # 导航请求直接放行，不修改头（让 Chrome 原生指纹通过 F5 检测）
+            await route.continue_()
+            return
 
         # 拦截媒体请求
         if route.request.resource_type == "media":
@@ -256,18 +261,6 @@ async def setup_stealth_context(context: Any) -> None:
         # 拦截追踪/分析脚本
         if any(host in url for host in _BLOCKED_HOST_FRAGMENTS):
             await route.abort()
-            return
-
-        # 为导航请求添加 Sec-CH-UA Client Hints
-        headers = route.request.headers
-        if route.request.is_navigation_request():
-            override_headers = {
-                **headers,
-                "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="99", "Google Chrome";v="131"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-            }
-            await route.continue_(headers=override_headers)
             return
 
         await route.continue_()
