@@ -95,6 +95,10 @@ def handle_admin_api(
             return _ok(**runner_status())
         if method == "POST" and rel == "register-runner/submit":
             return _handle_runner_submit(body)
+        if method == "POST" and rel == "register-runner/extract-id":
+            return _handle_runner_extract_id(body)
+        if method == "POST" and rel == "id-extract":
+            return _handle_id_extract(body)
         if method == "GET" and rel == "wework/send-modes":
             return _handle_wework_send_modes()
         if method == "POST" and rel == "wework/send":
@@ -185,6 +189,81 @@ def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:
     else:
         dry_run = bool(raw_dry)
     return runner_submit(fields, files, dry_run=dry_run)
+
+
+def _handle_runner_extract_id(body: dict | None) -> tuple[dict[str, Any], int]:
+    """证件图片识别：回填姓名/号码/住址等（不覆盖已填）。"""
+    from src.web.admin_runner import extract_id_fields
+
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+    data_url = str(body.get("data_url") or "").strip()
+    if not data_url:
+        file_obj = body.get("file") or {}
+        if isinstance(file_obj, dict):
+            data_url = str(file_obj.get("data_url") or "").strip()
+            filename = str(file_obj.get("name") or body.get("filename") or "")
+        else:
+            filename = str(body.get("filename") or "")
+    else:
+        filename = str(body.get("filename") or "")
+    if not data_url:
+        return _err("data_url required", 400)
+    current = body.get("current_fields") or body.get("fields") or {}
+    if not isinstance(current, dict):
+        current = {}
+    fill_empty = body.get("fill_empty_only", True)
+    if isinstance(fill_empty, str):
+        fill_empty_only = fill_empty.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        fill_empty_only = bool(fill_empty)
+    return extract_id_fields(
+        data_url=data_url,
+        filename=filename,
+        fill_empty_only=fill_empty_only,
+        current_fields={str(k): str(v or "") for k, v in current.items()},
+    )
+
+
+def _handle_id_extract(body: dict | None) -> tuple[dict[str, Any], int]:
+    """独立证件识别模块：选择类型后上传图片识别。"""
+    import base64
+    import re
+
+    from src.materials.id_extract import run_id_extract
+
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+
+    expected = str(body.get("expected_id_type") or body.get("id_type") or "").strip().upper()
+    data_url = str(body.get("data_url") or "").strip()
+    filename = str(body.get("filename") or "")
+    if not data_url:
+        file_obj = body.get("file") or {}
+        if isinstance(file_obj, dict):
+            data_url = str(file_obj.get("data_url") or "").strip()
+            filename = str(file_obj.get("name") or filename or "")
+    if not data_url:
+        return _err("data_url required", 400)
+    if not expected:
+        return _err("请选择证件类型：PRC_ID / HKID / PASSPORT", 400)
+
+    m = re.match(r"^data:([\w/+.-]+);base64,(.*)$", data_url, re.DOTALL)
+    if not m:
+        return _err("invalid data_url", 400)
+    try:
+        raw = base64.b64decode(m.group(2))
+    except Exception:
+        return _err("invalid base64 image", 400)
+
+    result = run_id_extract(
+        image_bytes=raw,
+        filename=filename or "id.jpg",
+        expected_id_type=expected,
+    )
+    if not result.get("ok"):
+        return result, 422 if "未能识别" in str(result.get("error") or "") else 400
+    return result, 200
 
 
 def _parse_job_id(rel: str, *, suffix: str) -> int | None:
@@ -323,6 +402,10 @@ _FIELD_LABELS: dict[str, str] = {
     "id_card_back": "身份证反面",
     "id_card_handheld": "手持身份证",
     "passport": "护照",
+    "taiwan_id": "台湾身份证",
+    "director_name_cn": "董事中文名",
+    "director_name_en": "董事英文名",
+    "issuing_country": "证件签发地",
 }
 
 

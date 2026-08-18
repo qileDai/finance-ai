@@ -6,6 +6,7 @@ const TITLES: Record<string, string> = {
   "/": "概览",
   "/sessions": "会话材料",
   "/register": "快速注册",
+  "/id-extract": "证件识别",
   "/wework-send": "外部群发消息",
   "/jobs": "注册任务",
   "/quality": "回答质量",
@@ -54,6 +55,7 @@ export function Layout({ onRefresh, toast }: Props) {
             概览
           </NavLink>
           <NavLink to="/sessions">会话材料</NavLink>
+          <NavLink to="/id-extract">证件识别</NavLink>
           <NavLink to="/register">快速注册</NavLink>
           <NavLink to="/wework-send">外部群发消息</NavLink>
           <NavLink to="/jobs">注册任务</NavLink>

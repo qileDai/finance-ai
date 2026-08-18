@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_api_base: str = "https://ai-yyds.com/v1"
     openai_model: str = "gpt-4o-mini"
-    openai_vision_model: str = ""  # 空则回退 openai_model；证件看图识别用
+    # 证件看图：建议配置 gpt-4o（中英兼顾）；空则回退 openai_model
+    openai_vision_model: str = ""
 
     # 管理后台登录（空密码则无法登录 /admin）
     admin_username: str = Field(default="admin", validation_alias="ADMIN_USERNAME")
@@ -231,7 +232,7 @@ class Settings(BaseSettings):
     icris_username_prefix: str = "Yingtai"  # 用户名前缀
     icris_username_random_length: int = 4  # 月日后追加的随机字符数
     icris_username_timestamp_digits: int = 4  # 兼容旧名；未设 random_length 时作回退
-    icris_password_suffix: str = "@1"  # 密码后缀（拼在用户名后）
+    icris_password_suffix: str = "@"  # 密码后缀（拼在用户名后；仅特色字符 @）
     # ICRIS 注册是否跳过「電子查冊」+「主要账户」选择（默认跳过；False 回退旧行为）
     icris_skip_esearch_principal: bool = True
 

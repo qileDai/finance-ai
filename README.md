@@ -44,6 +44,7 @@ playwright install chromium
 OPENAI_API_KEY=your-key
 OPENAI_API_BASE=https://ai-yyds.com/v1
 OPENAI_MODEL=gpt-4o-mini
+OPENAI_VISION_MODEL=gpt-4o
 DRY_RUN=true
 BROWSER_HEADLESS=false
 ```

@@ -28,6 +28,8 @@ MATERIAL_FIELDS: list[MaterialField] = [
     MaterialField("registered_office_en", "注册地址（英文）"),
     MaterialField("registered_office", "公司注册地址（香港）", required=False),  # 旧键兼容
     MaterialField("director_name", "董事兼股东姓名"),
+    MaterialField("director_name_cn", "董事中文名", required=False),
+    MaterialField("director_name_en", "董事英文名", required=False),
     MaterialField("directors", "董事资料", required=False),  # 旧键兼容
     MaterialField("founder_members", "股东/创办成员资料", required=False),  # 旧键兼容
     MaterialField("id_number", "身份证号码"),
@@ -41,11 +43,13 @@ MATERIAL_FIELDS: list[MaterialField] = [
     MaterialField("applicant_email", "ICRIS 申请人电邮", required=False),
     MaterialField("applicant_phone", "ICRIS 申请人电话", required=False),
     MaterialField("id_type", "身份证明类型（HKID/PRC_ID/PASSPORT）", required=False),
+    MaterialField("issuing_country", "证件签发地（CHN/HKG/TWN/OTHER）", required=False),
     MaterialField("id_card_front", "身份证正面", field_type="file", required=False),
     MaterialField("id_card_back", "身份证反面", field_type="file", required=False),
     MaterialField("id_card_handheld", "手持身份证明照片", field_type="file", required=False),
     MaterialField("address_proof", "地址证明", field_type="file", required=False),
     MaterialField("passport", "护照复印件", field_type="file", required=False),
+    MaterialField("taiwan_id", "台湾身份证（住址用）", field_type="file", required=False),
 ]
 
 FILE_FIELD_KEYS = {f.key for f in MATERIAL_FIELDS if f.field_type == "file"}
@@ -154,12 +158,23 @@ def _is_field_required(field: MaterialField, materials: dict[str, dict[str, Any]
       - 护照：仅护照页。
     """
     id_type = _field_value(materials, "id_type").upper()
+    issuing = _field_value(materials, "issuing_country").upper()
     if field.key in ("id_card_front", "id_card_back"):
         return id_type in ("", "PRC_ID", "HKID")
     if field.key == "id_card_handheld":
         return False
     if field.key == "passport":
         return id_type == "PASSPORT"
+    if field.key == "taiwan_id":
+        # 台湾护照需另传台湾身份证以取得住址
+        return id_type == "PASSPORT" and issuing in ("TWN", "TW", "TAIWAN", "ROC")
+    if field.key == "director_address_cn" and id_type == "PASSPORT" and issuing in (
+        "TWN",
+        "TW",
+        "TAIWAN",
+        "ROC",
+    ):
+        return True
     return field.required
 
 
@@ -356,6 +371,7 @@ FIELD_PRIORITY: dict[str, int] = {
     "id_card_front": 11,
     "id_card_back": 12,
     "passport": 13,
+    "taiwan_id": 14,
 }
 CRITICAL_FIELD_KEYS = {
     "company_name_en",

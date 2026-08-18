@@ -89,7 +89,7 @@ def _generate_icris_credentials() -> tuple[str, str]:
     if rand_len <= 0:
         # 兼容旧配置名 icris_username_timestamp_digits
         rand_len = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
-    pw_suffix = getattr(settings, "icris_password_suffix", "@1")
+    pw_suffix = getattr(settings, "icris_password_suffix", "@")
     md = datetime.now().strftime("%m%d")
     alphabet = string.ascii_lowercase + string.digits
     rand = "".join(secrets.choice(alphabet) for _ in range(rand_len))
@@ -139,7 +139,14 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         br_int = 1
 
     person = _director_name(materials)
-    person_cn, person_en = _split_cjk_latin_name(person)
+    person_cn = _get_val(materials, "director_name_cn")
+    person_en = _get_val(materials, "director_name_en")
+    if not person_cn and not person_en:
+        person_cn, person_en = _split_cjk_latin_name(person)
+    elif not person_cn or not person_en:
+        split_cn, split_en = _split_cjk_latin_name(person)
+        person_cn = person_cn or split_cn
+        person_en = person_en or split_en
     applicant_name_raw = _get_val(materials, "applicant_name")
     if applicant_name_raw:
         am_cn, am_en = _split_cjk_latin_name(applicant_name_raw)
@@ -186,26 +193,28 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         "founder_members": (
             [
                 {
-                    "name_en": person,
+                    "name_en": person_en or person,
+                    "name_cn": person_cn,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
                     "raw": True,
                 }
             ]
-            if person
+            if person or person_cn or person_en
             else []
         ),
         "directors": (
             [
                 {
-                    "name_en": person,
+                    "name_en": person_en or person,
+                    "name_cn": person_cn,
                     "email": contact_email,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
                     "raw": True,
                 }
             ]
-            if person
+            if person or person_cn or person_en
             else []
         ),
         "company_secretary": {"name_en": secretary, "raw": True} if secretary else {},

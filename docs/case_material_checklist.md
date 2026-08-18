@@ -68,7 +68,7 @@
 | 项目 | 规则 | 示例 |
 |---|---|---|
 | 用户名 (username) | `Yingtai` + 当前时间戳后4位 | `Yingtai8492` |
-| 密码 (password) | 用户名 + `@1` | `Yingtai8492@1` |
+| 密码 (password) | 用户名 + `@` | `Yingtai8492@` |
 
 **配置项**（`config/settings.py`）：
 
@@ -76,10 +76,10 @@
 icris_credential_mode: str = "yingtai"       # "yingtai" 新规则 | "legacy" 旧规则
 icris_username_prefix: str = "Yingtai"       # 用户名前缀
 icris_username_timestamp_digits: int = 4     # 时间戳取后 N 位
-icris_password_suffix: str = "@1"            # 密码后缀
+icris_password_suffix: str = "@"             # 密码后缀（仅特色字符）
 ```
 
-**密码合规性**：`Yingtai8492@1` 满足 ICRIS 密码规则（≥10位、首字母大写、含字母+数字）。
+**密码合规性**：`Yingtai8492@` 满足 ICRIS 密码规则（≥10位、首字母大写、含字母+数字）。
 
 **一致性保证**：同一注册流程内，`derive_icris_credentials` 通过 `_icris_session` 缓存保证用户名/密码一致，不会因多次调用而变化。
 

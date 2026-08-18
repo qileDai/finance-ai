@@ -229,9 +229,55 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ fields, files, dry_run }),
       }),
+    extractId: (payload: {
+      data_url: string;
+      filename?: string;
+      current_fields?: Record<string, string>;
+      fill_empty_only?: boolean;
+    }) =>
+      request<
+        ApiOk<{
+          fields: Record<string, string>;
+          merged_fields?: Record<string, string>;
+          need_taiwan_id?: boolean;
+          hints?: string[];
+          vision?: {
+            id_type?: string;
+            type_label?: string;
+            confidence?: number;
+            issuing_country?: string;
+          };
+        }>
+      >("/admin/api/register-runner/extract-id", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
     status: () =>
       request<ApiOk<RunnerStatus>>("/admin/api/register-runner/status"),
   },
+  idExtract: (payload: {
+    expected_id_type: string;
+    data_url: string;
+    filename?: string;
+  }) =>
+    request<
+      ApiOk<{
+        fields: Record<string, string>;
+        display?: { key: string; label: string; value: string }[];
+        need_taiwan_id?: boolean;
+        type_mismatch?: boolean;
+        hints?: string[];
+        vision?: {
+          id_type?: string;
+          type_label?: string;
+          confidence?: number;
+          issuing_country?: string;
+        };
+      }>
+    >("/admin/api/id-extract", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   wework: {
     sendModes: () =>
       request<ApiOk<WeworkSendModes>>("/admin/api/wework/send-modes"),

@@ -8,6 +8,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { QualityPage } from "./pages/QualityPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { IdExtractPage } from "./pages/IdExtractPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
 import { WeworkSendPage } from "./pages/WeworkSendPage";
 
@@ -68,6 +69,10 @@ export default function App() {
             <Route
               path="register"
               element={<RegisterPage onToast={onToast} />}
+            />
+            <Route
+              path="id-extract"
+              element={<IdExtractPage onToast={onToast} />}
             />
             <Route
               path="wework-send"

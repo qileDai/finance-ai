@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import re
+import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,14 +30,23 @@ TEXT_FIELDS = (
     "registered_office_cn",
     "registered_office_en",
     "director_name",
+    "director_name_cn",
+    "director_name_en",
     "id_number",
     "director_address_cn",
     "director_address_en",
     "contact_email",
+    "issuing_country",
 )
 
-# 可落盘的证件字段（快速注册只需其一）
-FILE_FIELDS = ("id_card_front", "id_card_back", "id_card_handheld", "passport")
+# 可落盘的证件字段（快速注册：主证件 + 台湾身份证）
+FILE_FIELDS = (
+    "id_card_front",
+    "id_card_back",
+    "id_card_handheld",
+    "passport",
+    "taiwan_id",
+)
 
 _DATA_URL_RE = re.compile(r"^data:([\w/+.-]+);base64,(.*)$", re.DOTALL)
 
@@ -219,6 +229,12 @@ def _validate(
     )
     if not has_addr:
         errs.append("至少填写一个地址（住址或注册地址）")
+    issuing = (fields.get("issuing_country") or "").strip().upper()
+    id_type = (fields.get("id_type") or "").strip().upper()
+    if id_type == "PASSPORT" and issuing in ("TWN", "TW", "TAIWAN", "ROC"):
+        has_tw = str((files.get("taiwan_id") or {}).get("data_url") or "").strip()
+        if not has_tw and not (fields.get("director_address_cn") or "").strip():
+            errs.append("台湾护照需上传台湾身份证或填写住址中文")
     # 至少 1 个证件文件（PDF/图片）
     has_file = any(
         str((files.get(f) or {}).get("data_url") or "").strip() for f in FILE_FIELDS
@@ -226,6 +242,137 @@ def _validate(
     if not has_file:
         errs.append("请上传证件文件（PDF 或图片，至少 1 个）")
     return errs
+
+
+def extract_id_fields(
+    *,
+    data_url: str,
+    filename: str = "",
+    fill_empty_only: bool = True,
+    current_fields: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """管理后台：上传证件图 → 视觉识别 + 翻译补全 → 可回填字段。
+
+    fill_empty_only=True 时不覆盖 current_fields 中已有非空值。
+    """
+    from src.materials.id_document_ocr import enrich_number_from_ocr
+    from src.materials.id_document_translate import enrich_extracted_fields
+    from src.materials.id_document_vision import (
+        ID_TYPE_PASSPORT,
+        ID_TYPE_PRC,
+        ID_TYPE_TW,
+        recognize_id_document,
+    )
+
+    try:
+        raw, _ext = _decode_data_url(data_url)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}, 400
+
+    name = (filename or "id.jpg").strip() or "id.jpg"
+    vision = recognize_id_document(raw, filename=name)
+    if vision.error == "not_image":
+        return {"ok": False, "error": "仅支持图片识别（请上传 JPG/PNG/WEBP）"}, 400
+    if vision.error == "no_api_key":
+        return {"ok": False, "error": "未配置 OpenAI API Key，无法识别证件"}, 400
+    if vision.error == "vision_disabled":
+        return {"ok": False, "error": "证件视觉识别已关闭"}, 400
+
+    try:
+        otype, onum = enrich_number_from_ocr(
+            image_bytes=raw,
+            id_type=vision.id_type,
+            id_number=vision.id_number,
+        )
+        if onum and not vision.id_number:
+            vision.id_number = onum
+        if otype and vision.id_type in ("unknown", ""):
+            vision.id_type = otype
+    except Exception:
+        logger.debug("OCR 号码兜底跳过", exc_info=True)
+
+    extracted = vision.to_admin_fields()
+    if vision.id_type == ID_TYPE_TW:
+        extracted.pop("id_type", None)
+        if vision.issuing_country:
+            extracted["issuing_country"] = vision.issuing_country
+
+    extracted = enrich_extracted_fields(extracted)
+
+    current = {
+        k: (v or "").strip()
+        for k, v in (current_fields or {}).items()
+        if (v or "").strip()
+    }
+    merged: dict[str, str] = dict(current) if fill_empty_only else {}
+    filled: dict[str, str] = {}
+    for k, v in extracted.items():
+        if not v:
+            continue
+        if fill_empty_only and merged.get(k):
+            continue
+        merged[k] = v
+        filled[k] = v
+
+    need_taiwan_id = (
+        vision.id_type == ID_TYPE_PASSPORT
+        and (vision.issuing_country or "").upper() == "TWN"
+    ) or vision.id_type == ID_TYPE_TW
+
+    ok_enough = bool(
+        vision.classify_ok
+        or vision.id_number
+        or vision.name_cn
+        or vision.name_en
+        or vision.address_cn
+    )
+    if not ok_enough and not filled:
+        return {
+            "ok": False,
+            "error": vision.error or "未能识别证件信息，请换更清晰的图片或手工填写",
+            "vision": {
+                "id_type": vision.id_type,
+                "confidence": vision.confidence,
+                "side": vision.side,
+            },
+        }, 422
+
+    return {
+        "ok": True,
+        "fields": filled,
+        "merged_fields": merged,
+        "vision": {
+            "id_type": vision.id_type,
+            "id_number": vision.id_number,
+            "name_cn": vision.name_cn,
+            "name_en": vision.name_en,
+            "address_cn": vision.address_cn,
+            "issuing_country": vision.issuing_country,
+            "confidence": vision.confidence,
+            "side": vision.side,
+            "ok": vision.ok,
+            "error": vision.error,
+            "type_label": vision.type_label,
+        },
+        "need_taiwan_id": need_taiwan_id,
+        "hints": _extract_hints(vision.id_type, vision.issuing_country, need_taiwan_id),
+    }, 200
+
+
+def _extract_hints(id_type: str, issuing: str, need_taiwan_id: bool) -> list[str]:
+    hints: list[str] = []
+    t = (id_type or "").upper()
+    if t == ID_TYPE_PRC:
+        hints.append("已识别内地身份证：姓名、号码、住址中文；住址英文已自动翻译（可改）")
+    elif t == "HKID":
+        hints.append("已识别香港身份证：中文名、英文名、号码")
+    elif t == ID_TYPE_PASSPORT:
+        hints.append("已识别护照：英文名/中文名（可空）、护照号码")
+        if (issuing or "").upper() == "TWN" or need_taiwan_id:
+            hints.append("台湾护照：请再上传台湾身份证以提取住址")
+    elif t == ID_TYPE_TW:
+        hints.append("已识别台湾身份证：可用于住址；ICRIS 证件类型仍请选护照并上传护照页")
+    return hints
 
 
 def _parse_result_messages(
@@ -322,8 +469,9 @@ def submit(
     if errs:
         return {"ok": False, "error": "；".join(errs)}, 400
 
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    case_id = safe_dirname(f"admin-quick-{ts}")
+    now = datetime.now()
+    ts = now.strftime("%Y%m%d-%H%M%S-") + f"{now.microsecond // 1000:03d}"
+    case_id = safe_dirname(f"admin-quick-{ts}-{secrets.token_hex(2)}")
     case_dir = materials_root() / case_id
     try:
         file_paths = _save_uploaded_files(files, case_dir)

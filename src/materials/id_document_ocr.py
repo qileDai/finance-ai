@@ -18,7 +18,7 @@ from src.materials.id_document_vision import (
 
 logger = logging.getLogger(__name__)
 
-_PRC_FIND = re.compile(r"\d{17}[\dXx]")
+_PRC_FIND = re.compile(r"\d{17}[\dXxＸｘ×✕\*]")
 _HKID_FIND = re.compile(r"[A-Z]{1,2}\d{6}\(?[\dA]\)?", re.I)
 _PASSPORT_FIND = re.compile(r"\b[A-Z0-9]{8,9}\b", re.I)
 
@@ -93,6 +93,10 @@ def extract_id_number_ocr(
         if not m:
             continue
         num = normalize_id_number(itype, m.group(0))
+        if itype == ID_TYPE_PRC:
+            # OCR 末位形似符已在 normalize 里转成 X
+            if not validate_id_number(itype, num):
+                continue
         if itype == ID_TYPE_PASSPORT:
             # 护照号启发式：避免把随机串当护照；长度 8–9 且含字母
             if not re.search(r"[A-Za-z]", num):
