@@ -258,6 +258,7 @@ def extract_id_fields(
     from src.materials.id_document_ocr import enrich_number_from_ocr
     from src.materials.id_document_translate import enrich_extracted_fields
     from src.materials.id_document_vision import (
+        ID_TYPE_HKID,
         ID_TYPE_PASSPORT,
         ID_TYPE_PRC,
         ID_TYPE_TW,
@@ -291,13 +292,54 @@ def extract_id_fields(
     except Exception:
         logger.debug("OCR 号码兜底跳过", exc_info=True)
 
+    hint_type = (
+        str((current_fields or {}).get("id_type") or "").strip().upper()
+        or vision.id_type
+    )
+    issuing = (
+        vision.issuing_country
+        or str((current_fields or {}).get("issuing_country") or "").strip()
+    )
+    from src.materials.id_document_vision import (
+        display_name,
+        should_convert_name_to_traditional,
+        to_traditional_name,
+        ID_TYPE_HKID,
+        ID_TYPE_SCREENSHOT,
+        ID_TYPE_TW,
+    )
+
+    # 国内身份证/截图姓名 → 繁体；港台原样
+    if vision.name_cn:
+        if vision.id_type in (ID_TYPE_HKID, ID_TYPE_TW) or hint_type in (
+            ID_TYPE_HKID,
+            ID_TYPE_TW,
+        ):
+            pass
+        elif should_convert_name_to_traditional(
+            vision.id_type, issuing
+        ) or should_convert_name_to_traditional(hint_type, issuing):
+            vision.name_cn = to_traditional_name(vision.name_cn)
+            vision.full_name = display_name(
+                vision.name_cn, vision.name_en, vision.full_name
+            )
+            if vision.id_type in ("unknown", "") and hint_type == ID_TYPE_PRC:
+                vision.id_type = ID_TYPE_PRC
+
     extracted = vision.to_admin_fields()
     if vision.id_type == ID_TYPE_TW:
         extracted.pop("id_type", None)
         if vision.issuing_country:
             extracted["issuing_country"] = vision.issuing_country
+    elif vision.id_type == ID_TYPE_SCREENSHOT:
+        # 截图不是 ICRIS 证件类型，但 enrich 需要 id_type 来生成英文姓名
+        extracted["id_type"] = ID_TYPE_SCREENSHOT
 
     extracted = enrich_extracted_fields(extracted)
+
+    # 截图最终不输出 id_type
+    if extracted.get("id_type") == ID_TYPE_SCREENSHOT:
+        extracted.pop("id_type", None)
 
     current = {
         k: (v or "").strip()

@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     openai_timeout_seconds: float = Field(
         default=20.0, validation_alias="OPENAI_TIMEOUT_SECONDS"
     )
+    # 证件视觉识别超时（秒），vision 大图 + 复杂 prompt 耗时较长，单独放宽
+    openai_vision_timeout_seconds: float = Field(
+        default=30.0, validation_alias="OPENAI_VISION_TIMEOUT_SECONDS"
+    )
 
     # QA Agent Loop（检索/回答打分 + 自我纠错）
     agent_max_retries: int = 2

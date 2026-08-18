@@ -245,8 +245,9 @@ def _handle_id_extract(body: dict | None) -> tuple[dict[str, Any], int]:
             filename = str(file_obj.get("name") or filename or "")
     if not data_url:
         return _err("data_url required", 400)
-    if not expected:
-        return _err("请选择证件类型：PRC_ID / HKID / PASSPORT", 400)
+    # expected 可选：空则由视觉模型自动判别证件类型
+    if expected and expected not in ("PRC_ID", "HKID", "PASSPORT", "TW_ID"):
+        return _err("expected_id_type 须为 PRC_ID / HKID / PASSPORT / TW_ID", 400)
 
     m = re.match(r"^data:([\w/+.-]+);base64,(.*)$", data_url, re.DOTALL)
     if not m:

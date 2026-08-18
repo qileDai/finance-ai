@@ -1,34 +1,10 @@
 import { useMemo, useState } from "react";
 import { api } from "../api";
+import { ImageModal } from "../components/ImageModal";
 
 type Props = {
   onToast: (msg: string) => void;
 };
-
-type IdKind = "PRC_ID" | "HKID" | "PASSPORT" | "TW_ID";
-
-const ID_OPTIONS: { value: IdKind; label: string; desc: string }[] = [
-  {
-    value: "PRC_ID",
-    label: "中国身份证",
-    desc: "姓名、身份证号码、住址中文 → 自动译住址英文",
-  },
-  {
-    value: "HKID",
-    label: "香港身份证",
-    desc: "中文名、英文名、香港身份证号码",
-  },
-  {
-    value: "PASSPORT",
-    label: "护照",
-    desc: "中文名（可空）、英文名、护照号码；台湾护照可再传台湾身份证取住址",
-  },
-  {
-    value: "TW_ID",
-    label: "台湾身份证",
-    desc: "配合台湾护照：姓名、号码、住址中文 → 译英文",
-  },
-];
 
 type DisplayRow = { key: string; label: string; value: string };
 
@@ -42,11 +18,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 async function copyText(text: string): Promise<boolean> {
-  const t = (text || "").trim();
-  if (!t) return false;
+  const cleaned = (text || "").trim();
+  if (!cleaned) return false;
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(t);
+      await navigator.clipboard.writeText(cleaned);
       return true;
     }
   } catch {
@@ -54,7 +30,7 @@ async function copyText(text: string): Promise<boolean> {
   }
   try {
     const ta = document.createElement("textarea");
-    ta.value = t;
+    ta.value = cleaned;
     ta.setAttribute("readonly", "");
     ta.style.position = "fixed";
     ta.style.left = "-9999px";
@@ -69,7 +45,6 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 export function IdExtractPage({ onToast }: Props) {
-  const [idType, setIdType] = useState<IdKind>("PRC_ID");
   const [file, setFile] = useState<File | undefined>();
   const [previewUrl, setPreviewUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -77,11 +52,7 @@ export function IdExtractPage({ onToast }: Props) {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [hints, setHints] = useState<string[]>([]);
   const [meta, setMeta] = useState<string>("");
-
-  const option = useMemo(
-    () => ID_OPTIONS.find((o) => o.value === idType) || ID_OPTIONS[0],
-    [idType]
-  );
+  const [modalOpen, setModalOpen] = useState(false);
 
   const copyBlock = useMemo(() => {
     return display
@@ -118,7 +89,6 @@ export function IdExtractPage({ onToast }: Props) {
     try {
       const dataUrl = await readFileAsDataUrl(file);
       const res = await api.idExtract({
-        expected_id_type: idType,
         data_url: dataUrl,
         filename: file.name,
       });
@@ -137,7 +107,7 @@ export function IdExtractPage({ onToast }: Props) {
           ? `置信度 ${(res.vision.confidence * 100).toFixed(0)}%`
           : "";
       setMeta(
-        [res.vision?.type_label || idType, conf, res.type_mismatch ? "类型可能不符" : ""]
+        [res.vision?.type_label || res.vision?.id_type || "已识别", conf]
           .filter(Boolean)
           .join(" · ")
       );
@@ -169,44 +139,17 @@ export function IdExtractPage({ onToast }: Props) {
         <section className="reg-card">
           <h2>证件识别</h2>
           <small className="muted">
-            先选择证件类型，再上传图片识别。结果可逐项复制或一键复制全部。
+            上传中国身份证、香港身份证、护照或台湾身份证图片，由模型自动判别类型并抽取字段。结果可逐项复制或一键复制全部。
           </small>
 
           <div className="reg-form" style={{ marginTop: 16 }}>
-            <div className="reg-field">
-              <span>证件类型</span>
-              <div className="id-type-grid">
-                {ID_OPTIONS.map((o) => (
-                  <button
-                    key={o.value}
-                    type="button"
-                    className={
-                      idType === o.value
-                        ? "btn btn-primary id-type-btn"
-                        : "btn id-type-btn"
-                    }
-                    disabled={loading}
-                    onClick={() => {
-                      setIdType(o.value);
-                      setDisplay([]);
-                      setFields({});
-                      setHints([]);
-                      setMeta("");
-                    }}
-                  >
-                    {o.label}
-                  </button>
-                ))}
-              </div>
-              <small className="muted">{option.desc}</small>
-            </div>
-
             <label className="reg-field">
               <span>
                 上传图片
                 <em>*</em>
               </span>
               <input
+                key={file ? file.name : "empty"}
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/jpg"
                 disabled={loading}
@@ -217,7 +160,13 @@ export function IdExtractPage({ onToast }: Props) {
 
             {previewUrl ? (
               <div className="id-preview-wrap">
-                <img src={previewUrl} alt="证件预览" className="id-preview" />
+                <img
+                  src={previewUrl}
+                  alt="证件预览"
+                  className="id-preview id-preview-zoom"
+                  title="点击放大"
+                  onClick={() => setModalOpen(true)}
+                />
               </div>
             ) : null}
 
@@ -257,7 +206,7 @@ export function IdExtractPage({ onToast }: Props) {
             </div>
           ) : null}
           {!display.length && !loading ? (
-            <div className="empty-box">选择类型并上传图片后点「开始识别」</div>
+            <div className="empty-box">上传图片后点「开始识别」</div>
           ) : null}
           {loading ? <div className="muted">正在调用视觉模型…</div> : null}
           {display.length ? (
@@ -304,6 +253,12 @@ export function IdExtractPage({ onToast }: Props) {
           ) : null}
         </section>
       </div>
+      <ImageModal
+        src={previewUrl}
+        alt="证件图片"
+        open={modalOpen && !!previewUrl}
+        onClose={() => setModalOpen(false)}
+      />
     </div>
   );
 }

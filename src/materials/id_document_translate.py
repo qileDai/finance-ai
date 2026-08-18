@@ -108,12 +108,12 @@ def enrich_extracted_fields(fields: dict[str, str]) -> dict[str, str]:
     id_type = (out.get("id_type") or "").upper()
     name_cn = out.get("director_name_cn", "")
     name_en = out.get("director_name_en", "")
-    if id_type == "PASSPORT" or (name_cn and not looks_like_latin_name(name_en)):
-        if not looks_like_latin_name(name_en) and name_cn:
-            fixed = ensure_passport_english_name(name_cn, name_en)
-            if fixed:
-                out["director_name_en"] = fixed
-                name_en = fixed
+    # 护照/截图缺英文名时补罗马化；港/台中文名勿走此路径
+    if id_type in ("PASSPORT", "SCREENSHOT") and name_cn and not looks_like_latin_name(name_en):
+        fixed = ensure_passport_english_name(name_cn, name_en)
+        if fixed:
+            out["director_name_en"] = fixed
+            name_en = fixed
 
     # 同步 director_name 展示
     cn = out.get("director_name_cn", "")

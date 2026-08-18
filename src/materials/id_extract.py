@@ -7,7 +7,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_EXPECTED = frozenset({"PRC_ID", "HKID", "PASSPORT", "TW_ID"})
+ALLOWED_EXPECTED = frozenset({"PRC_ID", "HKID", "PASSPORT", "TW_ID", "SCREENSHOT"})
 
 
 def run_id_extract(
@@ -20,11 +20,12 @@ def run_id_extract(
 
     expected_id_type: PRC_ID | HKID | PASSPORT | TW_ID（可空=自动判别）
     """
-    from src.materials.id_document_ocr import enrich_number_from_ocr
+    from src.materials.id_document_ocr import enrich_number_from_ocr, extract_id_number_ocr
     from src.materials.id_document_translate import enrich_extracted_fields
     from src.materials.id_document_vision import (
         ID_TYPE_PASSPORT,
         ID_TYPE_PRC,
+        ID_TYPE_SCREENSHOT,
         ID_TYPE_TW,
         ID_TYPE_UNKNOWN,
         recognize_id_document,
@@ -34,14 +35,30 @@ def run_id_extract(
     if expected and expected not in ALLOWED_EXPECTED:
         return {
             "ok": False,
-            "error": "expected_id_type 须为 PRC_ID / HKID / PASSPORT / TW_ID",
+            "error": "expected_id_type 须为 PRC_ID / HKID / PASSPORT / TW_ID / SCREENSHOT",
         }
 
-    vision = recognize_id_document(
-        image_bytes,
-        filename=filename or "id.jpg",
-        expected_id_type=expected,
-    )
+    # vision + OCR 并行（OCR 不依赖 vision 结果，可提前跑）
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_vision = pool.submit(
+            recognize_id_document,
+            image_bytes,
+            filename=filename or "id.jpg",
+            expected_id_type=expected,
+        )
+        f_ocr = pool.submit(
+            extract_id_number_ocr,
+            image_bytes,
+            hint_type=expected,
+        )
+        vision = f_vision.result()
+        try:
+            otype, onum = f_ocr.result()
+        except Exception:
+            otype, onum = "", ""
+
     if vision.error == "not_image":
         return {"ok": False, "error": "仅支持图片识别（请上传 JPG/PNG/WEBP）"}
     if vision.error == "no_api_key":
@@ -50,13 +67,20 @@ def run_id_extract(
         return {"ok": False, "error": "证件视觉识别已关闭"}
 
     try:
-        otype, onum = enrich_number_from_ocr(
-            image_bytes=image_bytes,
-            id_type=vision.id_type if vision.id_type != ID_TYPE_UNKNOWN else expected,
-            id_number=vision.id_number,
-        )
+        # OCR 已有结果直接用；vision 无数码时才跑 enrich（内部会再调 OCR 兜底）
+        if not onum:
+            otype2, onum2 = enrich_number_from_ocr(
+                image_bytes=image_bytes,
+                id_type=vision.id_type if vision.id_type != ID_TYPE_UNKNOWN else expected,
+                id_number=vision.id_number,
+            )
+            if onum2:
+                onum = onum2
+            if otype2 and not otype:
+                otype = otype2
         if onum and not vision.id_number:
             vision.id_number = onum
+        # 仅类型未知时采用 OCR 类型；已是 TW/HK 等不得被 OCR 改写
         if otype and vision.id_type in (ID_TYPE_UNKNOWN, ""):
             vision.id_type = otype
     except Exception:
@@ -82,7 +106,7 @@ def run_id_extract(
         if fixed and validate_id_number(ID_TYPE_PRC, fixed):
             vision.id_number = fixed
 
-    # 港证号码：从 raw 抢救并格式化为 A123456(7)
+    # 港证号码：从 raw 抢救并格式化为 A123456（7）
     if expected == "HKID" or vision.id_type == "HKID":
         from src.materials.id_document_vision import salvage_id_number, validate_id_number
         import re as _re
@@ -96,11 +120,61 @@ def run_id_extract(
             vision.id_number = fixed
             vision.id_type = "HKID"
 
+    # 台证号码：宽松保留
+    if expected == ID_TYPE_TW or vision.id_type == ID_TYPE_TW:
+        from src.materials.id_document_vision import salvage_id_number, validate_id_number
+        import re as _re
+
+        raw_num = str((vision.raw or {}).get("id_number") or vision.id_number or "")
+        fixed = salvage_id_number(ID_TYPE_TW, raw_num)
+        if fixed and (
+            validate_id_number(ID_TYPE_TW, fixed)
+            or _re.match(r"^[A-Z][12]\d{8}$", fixed, _re.I)
+            or (len(fixed) >= 8 and fixed.isalnum())
+        ):
+            vision.id_number = fixed
+            vision.id_type = ID_TYPE_TW
+
     type_mismatch = bool(
         expected
         and vision.id_type not in (ID_TYPE_UNKNOWN, "", expected)
         and not (expected == ID_TYPE_PASSPORT and vision.id_type == ID_TYPE_TW)
+        and not (expected == ID_TYPE_SCREENSHOT and vision.id_type in (ID_TYPE_SCREENSHOT,))
     )
+
+    # 港/台/截图姓名：仅从 raw 兜底补空
+    if not vision.name_cn and (
+        expected in ("HKID", ID_TYPE_TW, ID_TYPE_SCREENSHOT)
+        or vision.id_type in ("HKID", ID_TYPE_TW, ID_TYPE_SCREENSHOT)
+    ):
+        from src.materials.id_document_vision import _pick_name_cn
+
+        picked = _pick_name_cn(vision.raw or {})
+        if picked:
+            vision.name_cn = picked
+            from src.materials.id_document_vision import display_name
+
+            vision.full_name = display_name(
+                vision.name_cn, vision.name_en, vision.full_name
+            )
+
+    # 国内身份证/截图姓名 → 繁体；港台原样
+    if vision.name_cn:
+        from src.materials.id_document_vision import (
+            display_name,
+            should_convert_name_to_traditional,
+            to_traditional_name,
+        )
+
+        tid = vision.id_type if vision.id_type not in ("", ID_TYPE_UNKNOWN) else expected
+        # 港/台绝不转繁（含误判兜底：expected 为港台时也不转）
+        if tid in ("HKID", ID_TYPE_TW) or expected in ("HKID", ID_TYPE_TW):
+            pass
+        elif should_convert_name_to_traditional(tid, vision.issuing_country):
+            vision.name_cn = to_traditional_name(vision.name_cn)
+            vision.full_name = display_name(
+                vision.name_cn, vision.name_en, vision.full_name
+            )
 
     # 内地/台湾住址：极轻量换行漏字纠错（须在翻译前）
     if vision.address_cn and (
@@ -116,10 +190,17 @@ def run_id_extract(
         extracted.pop("id_type", None)
         if vision.issuing_country:
             extracted["issuing_country"] = vision.issuing_country
+    elif vision.id_type == ID_TYPE_SCREENSHOT:
+        # 截图不是 ICRIS 证件类型，但 enrich 需要 id_type 来生成英文姓名
+        extracted["id_type"] = ID_TYPE_SCREENSHOT
     elif expected in ("PRC_ID", "HKID", "PASSPORT") and not extracted.get("id_type"):
         extracted["id_type"] = expected
 
     extracted = enrich_extracted_fields(extracted)
+
+    # 截图最终不输出 id_type（不是 ICRIS 证件类型）
+    if extracted.get("id_type") == ID_TYPE_SCREENSHOT:
+        extracted.pop("id_type", None)
 
     # 结果展示字段（按证件类型裁剪）
     result = _shape_result(expected or vision.id_type, extracted, vision)
@@ -186,6 +267,7 @@ def _label(id_type: str) -> str:
         "HKID": "香港身份证",
         "PASSPORT": "护照",
         "TW_ID": "台湾身份证",
+        "SCREENSHOT": "聊天截图/图片文字",
     }.get((id_type or "").upper(), id_type or "未知")
 
 
@@ -202,6 +284,8 @@ def _hints(id_type: str, issuing: str, need_taiwan_id: bool) -> list[str]:
             hints.append("台湾护照：请再选「台湾身份证」上传以提取住址")
     elif t == "TW_ID":
         hints.append("台湾身份证：姓名、号码、住址（供台湾护照住址用）")
+    elif t == "SCREENSHOT":
+        hints.append("聊天截图/图片文字：从中提取姓名和住址，住址英文已自动翻译")
     return hints
 
 
@@ -255,6 +339,16 @@ def _shape_result(
     elif t == "TW_ID":
         add("director_name_cn", "姓名", extracted.get("director_name_cn") or vision.name_cn)
         add("id_number", "台湾身份证号码", extracted.get("id_number") or vision.id_number)
+        add(
+            "director_address_cn",
+            "住址中文",
+            extracted.get("director_address_cn") or vision.address_cn,
+        )
+        add("director_address_en", "住址英文", extracted.get("director_address_en", ""))
+    elif t == "SCREENSHOT":
+        add("director_name_cn", "姓名", extracted.get("director_name_cn") or vision.name_cn)
+        add("director_name_en", "英文名", extracted.get("director_name_en") or vision.name_en)
+        add("id_number", "证件号码", extracted.get("id_number") or vision.id_number)
         add(
             "director_address_cn",
             "住址中文",

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
+import { ImageModal } from "../components/ImageModal";
 import { statusBadge } from "../components/ui";
 
 type Props = {
@@ -174,6 +175,7 @@ export function RegisterPage({ onToast }: Props) {
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [defaultEmail, setDefaultEmail] = useState("");
+  const [modalSrc, setModalSrc] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
   const showTaiwanUpload =
@@ -491,6 +493,7 @@ export function RegisterPage({ onToast }: Props) {
                 onChange={(e) => {
                   setIdType(e.target.value);
                   setIdFile(undefined);
+                  setExtractHints([]);
                   if (e.target.value !== "PASSPORT") {
                     setNeedTaiwanId(false);
                     setTaiwanIdFile(undefined);
@@ -539,7 +542,7 @@ export function RegisterPage({ onToast }: Props) {
                 <em>*</em>
               </span>
               <input
-                key={idFile ? idFile.name : "id-empty"}
+                key={`id-${idType}-${idFile ? idFile.name : "empty"}`}
                 type="file"
                 accept="image/*,application/pdf"
                 disabled={submitting || extracting}

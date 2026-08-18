@@ -256,7 +256,7 @@ export const api = {
       request<ApiOk<RunnerStatus>>("/admin/api/register-runner/status"),
   },
   idExtract: (payload: {
-    expected_id_type: string;
+    expected_id_type?: string;
     data_url: string;
     filename?: string;
   }) =>

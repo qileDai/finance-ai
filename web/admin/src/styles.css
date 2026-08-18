@@ -753,6 +753,94 @@ table.data tr.clickable:hover td {
   display: block;
 }
 
+.id-preview-zoom {
+  cursor: zoom-in;
+}
+
+.id-preview-zoom:hover {
+  opacity: 0.85;
+}
+
+/* 缩略图 */
+.id-thumb-wrap {
+  margin-top: 8px;
+}
+
+.id-thumb {
+  max-width: 200px;
+  max-height: 140px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: zoom-in;
+  object-fit: contain;
+}
+
+.id-thumb:hover {
+  opacity: 0.85;
+}
+
+/* 图片放大 Modal */
+.img-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.img-modal-toolbar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.img-modal-toolbar button {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+
+.img-modal-toolbar button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.img-modal-toolbar span {
+  color: #fff;
+  font-size: 13px;
+  min-width: 40px;
+  text-align: center;
+}
+
+.img-modal-body {
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.img-modal-body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.1s ease-out;
+  user-select: none;
+}
+
 .id-result-label {
   display: flex;
   align-items: center;

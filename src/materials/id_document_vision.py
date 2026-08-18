@@ -19,6 +19,7 @@ ID_TYPE_HKID = "HKID"
 ID_TYPE_PRC = "PRC_ID"
 ID_TYPE_PASSPORT = "PASSPORT"
 ID_TYPE_TW = "TW_ID"
+ID_TYPE_SCREENSHOT = "SCREENSHOT"
 ID_TYPE_UNKNOWN = "unknown"
 
 ID_TYPE_LABELS = {
@@ -26,6 +27,7 @@ ID_TYPE_LABELS = {
     ID_TYPE_PRC: "中华人民共和国身份证",
     ID_TYPE_PASSPORT: "护照",
     ID_TYPE_TW: "台湾身份证",
+    ID_TYPE_SCREENSHOT: "聊天截图/图片文字",
 }
 
 ISSUING_CHN = "CHN"
@@ -35,10 +37,14 @@ ISSUING_OTHER = "OTHER"
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _PRC_RE = re.compile(r"^\d{17}[\dXx]$")
-_HKID_RE = re.compile(r"^[A-Z]{1,2}\d{6}\(?[\dA]\)?$", re.I)
+# 港证：半角 () 或中文 （） 均可
+_HKID_RE = re.compile(
+    r"^[A-Z]{1,2}\d{6}(?:\([\dA]\)|（[\dA]）)?$",
+    re.I,
+)
 # 从脏字符串中抓取香港身份证号（含括号校验位 / 无括号 7 位尾）
 _HKID_FIND = re.compile(
-    r"[A-Z]{1,2}\s*\d{6}\s*(?:\(?\s*[\dA]\s*\)?|\d)",
+    r"[A-Z]{1,2}\s*\d{6}\s*(?:[\(（]\s*[\dA]\s*[\)）]|\d)?",
     re.I,
 )
 _PASSPORT_RE = re.compile(r"^[A-Z0-9]{5,15}$", re.I)
@@ -85,6 +91,48 @@ def display_name(name_cn: str, name_en: str, full_name: str = "") -> str:
     return cn or en or (full_name or "").strip()
 
 
+def to_traditional_name(name: str) -> str:
+    """中文姓名转繁体（仅国内证/国内护照输出用）；失败则原样。港/台等勿调用。"""
+    s = (name or "").strip()
+    if not s:
+        return s
+    try:
+        import zhconv
+
+        return zhconv.convert(s, "zh-hant")
+    except Exception:
+        return s
+
+
+def should_convert_name_to_traditional(id_type: str, issuing_country: str = "") -> bool:
+    """是否应对中文姓名做繁体转换：PRC_ID / SCREENSHOT / 签发地 CHN 的护照。港台原样。"""
+    t = (id_type or "").upper()
+    if t == ID_TYPE_PRC:
+        return True
+    if t == ID_TYPE_SCREENSHOT:
+        return True
+    if t == ID_TYPE_PASSPORT and (issuing_country or "").upper() == ISSUING_CHN:
+        return True
+    return False
+
+
+def _pick_name_cn(data: dict[str, Any]) -> str:
+    """从视觉 JSON 多键兜底取中文姓名。"""
+    for key in (
+        "name_cn",
+        "chinese_name",
+        "姓名",
+        "中文姓名",
+        "中文名",
+        "名字",
+        "持有人姓名",
+    ):
+        v = str(data.get(key) or "").strip()
+        if v and re.search(r"[\u4e00-\u9fff]", v):
+            return v
+    return ""
+
+
 @dataclass
 class IdDocumentResult:
     id_type: str = ID_TYPE_UNKNOWN
@@ -93,6 +141,7 @@ class IdDocumentResult:
     name_cn: str = ""
     name_en: str = ""
     address_cn: str = ""
+    address_en: str = ""
     issuing_country: str = ""
     confidence: float = 0.0
     ok: bool = False
@@ -136,7 +185,7 @@ class IdDocumentResult:
     def to_admin_fields(self) -> dict[str, str]:
         """管理后台可回填的字段（空值省略）。"""
         out: dict[str, str] = {}
-        # TW_ID 不是 ICRIS id_type，仅作住址来源
+        # TW_ID / SCREENSHOT 不是 ICRIS id_type，仅作住址/姓名来源
         if self.id_type in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_PASSPORT):
             out["id_type"] = self.id_type
         if self.id_number:
@@ -150,6 +199,8 @@ class IdDocumentResult:
             out["director_name"] = shown
         if self.address_cn:
             out["director_address_cn"] = self.address_cn
+        if self.address_en:
+            out["director_address_en"] = self.address_en
         if self.issuing_country:
             out["issuing_country"] = self.issuing_country
         return out
@@ -205,7 +256,7 @@ def _to_halfwidth(s: str) -> str:
 
 
 def _format_hkid(raw: str) -> str:
-    """把各种 OCR/视觉脏串整理成 A123456(7) / AB123456(A) 形式。"""
+    """把各种 OCR/视觉脏串整理成 A123456（7） / AB123456（A）形式（中文括号）。"""
     s = _to_halfwidth(raw or "")
     s = (
         s.upper()
@@ -247,15 +298,15 @@ def _format_hkid(raw: str) -> str:
             return s
         prefix, digits, check = m2.group(1), m2.group(2), m2.group(3) or ""
         if check:
-            return f"{prefix}{digits}({check})"
+            return f"{prefix}{digits}（{check}）"
         return f"{prefix}{digits}"
     m3 = re.match(r"^([A-Z]{1,2})(\d{6})\(?([\dA])\)?$", token, re.I)
     if m3:
         prefix, digits, check = m3.group(1).upper(), m3.group(2), m3.group(3).upper()
-        return f"{prefix}{digits}({check})"
+        return f"{prefix}{digits}（{check}）"
     m4 = re.match(r"^([A-Z]{1,2})(\d{6})(\d)$", token, re.I)
     if m4:
-        return f"{m4.group(1).upper()}{m4.group(2)}({m4.group(3)})"
+        return f"{m4.group(1).upper()}{m4.group(2)}（{m4.group(3)}）"
     m5 = re.match(r"^([A-Z]{1,2})(\d{6})$", token, re.I)
     if m5:
         return f"{m5.group(1).upper()}{m5.group(2)}"
@@ -284,9 +335,18 @@ def normalize_id_number(id_type: str, id_number: str) -> str:
         if re.fullmatch(r"\d{17}", cand):
             return cand
         return cand
-    if t in (ID_TYPE_PASSPORT, ID_TYPE_TW):
+    if t == ID_TYPE_TW:
+        cand = raw.upper()
+        m = re.search(r"[A-Z][12]\d{8}", cand)
+        if m:
+            return m.group(0)
+        return cand
+    if t == ID_TYPE_PASSPORT:
         return raw.upper()
-    # 未知类型：优先尝试港证 / 内地证形态
+    # 未知类型：先台号（10位）再港证，避免台号被港证截断
+    tw = re.search(r"[A-Z][12]\d{8}", raw.upper())
+    if tw:
+        return tw.group(0)
     hkid = _format_hkid(id_number or "")
     if _HKID_RE.match(hkid):
         return hkid
@@ -311,10 +371,18 @@ def salvage_id_number(id_type: str, id_number: str) -> str:
                 return f"{base}({cm.group(1).upper()})"
             return base
         return n if n else ""
+    if t == ID_TYPE_TW:
+        n = normalize_id_number(ID_TYPE_TW, id_number)
+        if n and (_TW_ID_RE.match(n) or (len(n) >= 8 and n.isalnum())):
+            return n
+        return n if n else ""
     n = normalize_id_number(t, id_number)
     if n and validate_id_number(t, n):
         return n
     if not t or t == ID_TYPE_UNKNOWN:
+        n_tw = salvage_id_number(ID_TYPE_TW, id_number)
+        if n_tw and _TW_ID_RE.match(n_tw):
+            return n_tw
         n_hk = salvage_id_number(ID_TYPE_HKID, id_number)
         if n_hk and (_HKID_RE.match(n_hk) or re.match(r"^[A-Z]{1,2}\d{6}", n_hk)):
             return n_hk
@@ -377,6 +445,45 @@ def _guess_mime(filename: str, data: bytes) -> str:
     return "image/jpeg"
 
 
+def _compress_image(data: bytes, *, max_dim: int = 1024, quality: int = 80) -> bytes:
+    """压缩图片到 max_dim 内，JPEG quality=80。失败返回原图。
+
+    大图（手机拍照 3-5MB）直接 base64 传给 LLM 会：① 传输慢 ② 上下文超限
+    压缩到 1024px + JPEG q80 后约 100-200KB，显著提速且不影响证件文字识别。
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(data))
+        # 已是小图不压
+        if max(img.width, img.height) <= max_dim:
+            return data
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+        # 转 RGB（PNG 透明背景 → 白底）
+        if img.mode in ("RGBA", "P"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=quality, optimize=True)
+        compressed = out.getvalue()
+        logger.info(
+            "证件图片压缩: %dKB → %dKB (%dx%d)",
+            len(data) // 1024,
+            len(compressed) // 1024,
+            img.width,
+            img.height,
+        )
+        return compressed if len(compressed) < len(data) else data
+    except Exception:
+        logger.debug("图片压缩跳过", exc_info=True)
+        return data
+
+
 def _normalize_issuing(raw: str, id_type: str) -> str:
     s = (raw or "").strip().upper()
     aliases = {
@@ -416,7 +523,15 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         raw_type = ID_TYPE_PASSPORT
     if raw_type in ("TW", "TW_ID", "TAIWAN_ID", "ROC_ID", "TAIWAN"):
         raw_type = ID_TYPE_TW
-    if raw_type not in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_PASSPORT, ID_TYPE_TW):
+    if raw_type in ("SCREENSHOT", "CHAT", "CHAT_SCREENSHOT", "MESSAGE", "TEXT", "IMAGE_TEXT"):
+        raw_type = ID_TYPE_SCREENSHOT
+    if raw_type not in (
+        ID_TYPE_HKID,
+        ID_TYPE_PRC,
+        ID_TYPE_PASSPORT,
+        ID_TYPE_TW,
+        ID_TYPE_SCREENSHOT,
+    ):
         raw_type = ID_TYPE_UNKNOWN
 
     try:
@@ -442,8 +557,14 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         elif _TW_ID_RE.match(number):
             raw_type = ID_TYPE_TW
 
-    name_cn = str(data.get("name_cn") or "").strip()
-    name_en = str(data.get("name_en") or "").strip()
+    name_cn = _pick_name_cn(data)
+    name_en = str(
+        data.get("name_en")
+        or data.get("english_name")
+        or data.get("英文姓名")
+        or data.get("英文名")
+        or ""
+    ).strip()
     full_name = str(data.get("full_name") or data.get("name") or "").strip()
     if not name_cn and not name_en and full_name:
         # 兼容旧字段：按是否含拉丁粗分
@@ -459,11 +580,21 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
             latin = "".join(c for c in full_name if c.isascii()).strip()
             name_cn = cjk or name_cn
             name_en = latin or name_en
+    # 有 full_name 含中文但 name_cn 仍空（常见于台证只填了 name）
+    if not name_cn and full_name and re.search(r"[\u4e00-\u9fff]", full_name):
+        cjk = "".join(
+            c for c in full_name if not c.isascii() or c in "·•、・"
+        ).strip()
+        if cjk:
+            name_cn = cjk
     if not full_name:
         full_name = display_name(name_cn, name_en)
 
     address_cn = str(
         data.get("address_cn") or data.get("address") or data.get("住址") or ""
+    ).strip()
+    address_en = str(
+        data.get("address_en") or data.get("english_address") or ""
     ).strip()
     if address_cn and raw_type in (ID_TYPE_PRC, ID_TYPE_TW, ID_TYPE_UNKNOWN, ""):
         from src.materials.id_document_translate import repair_prc_address_ocr
@@ -482,6 +613,9 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
     number_ok = bool(number) and (
         raw_type == ID_TYPE_UNKNOWN or validate_id_number(raw_type, number)
     )
+    # 截图：号码来自聊天内容，不做格式校验，原样保留
+    if raw_type == ID_TYPE_SCREENSHOT and number:
+        number_ok = True
     # 港证：校验失败再抢救，至少保留字母+6位数字
     if (not number_ok) and raw_type in (ID_TYPE_HKID, ID_TYPE_UNKNOWN, ""):
         salvaged = salvage_id_number(ID_TYPE_HKID, raw_id_number or number)
@@ -501,9 +635,26 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
             if raw_type in (ID_TYPE_UNKNOWN, ""):
                 raw_type = ID_TYPE_PRC
             number_ok = True
+    # 台证：宽松保留
+    if (not number_ok) and raw_type in (ID_TYPE_TW, ID_TYPE_UNKNOWN, ""):
+        salvaged = salvage_id_number(ID_TYPE_TW, raw_id_number or number)
+        if salvaged and (
+            validate_id_number(ID_TYPE_TW, salvaged)
+            or re.match(r"^[A-Z][12]\d{8}$", salvaged, re.I)
+            or (len(salvaged) >= 8 and salvaged.isalnum())
+        ):
+            number = salvaged
+            if raw_type in (ID_TYPE_UNKNOWN, ""):
+                raw_type = ID_TYPE_TW
+            number_ok = True
     if number and not number_ok:
-        # 港证宽松保留；内地证宽松保留；否则清空
+        # 港证宽松保留；内地证宽松保留；台证宽松保留；否则清空
         if raw_type == ID_TYPE_HKID and re.match(r"^[A-Z]{1,2}\d{6}", number, re.I):
+            number_ok = True
+        elif raw_type == ID_TYPE_TW and (
+            re.match(r"^[A-Z][12]\d{8}$", number, re.I)
+            or (len(number) >= 8 and number.isalnum())
+        ):
             number_ok = True
         elif re.fullmatch(r"\d{17}[\dX]", normalize_id_number(ID_TYPE_PRC, raw_id_number or number) or ""):
             number = normalize_id_number(ID_TYPE_PRC, raw_id_number or number)
@@ -511,10 +662,13 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
             if raw_type in (ID_TYPE_UNKNOWN, ""):
                 raw_type = ID_TYPE_PRC
         else:
-            # 仍保留原始可读串供展示（避免港证被整段丢掉）
+            # 仍保留原始可读串供展示（避免港证/台证被整段丢掉）
             keep = salvage_id_number(raw_type or ID_TYPE_HKID, raw_id_number) or raw_id_number.strip()
             if raw_type == ID_TYPE_HKID and keep:
                 number = _format_hkid(keep)
+                number_ok = bool(number)
+            elif raw_type == ID_TYPE_TW and keep:
+                number = normalize_id_number(ID_TYPE_TW, keep) or keep
                 number_ok = bool(number)
             else:
                 number = ""
@@ -532,6 +686,9 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         ok = False
     if raw_type == ID_TYPE_PASSPORT and not number_ok:
         ok = False
+    # 截图/普通图片：有姓名或住址即视为识别成功，不要求证件号码
+    if raw_type == ID_TYPE_SCREENSHOT:
+        ok = bool(conf_ok and (name_cn or name_en or address_cn or address_en or number))
 
     return IdDocumentResult(
         id_type=raw_type,
@@ -540,6 +697,7 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         name_cn=name_cn,
         name_en=name_en,
         address_cn=address_cn,
+        address_en=address_en,
         issuing_country=issuing_country,
         confidence=conf,
         ok=ok,
@@ -570,17 +728,23 @@ def recognize_id_document(
         from openai import OpenAI
 
         model = (settings.openai_vision_model or "").strip() or settings.openai_model
+        vision_timeout = float(
+            getattr(settings, "openai_vision_timeout_seconds", 30.0) or 30.0
+        )
         client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_api_base,
+            timeout=vision_timeout,
         )
-        mime = _guess_mime(filename, image_bytes)
-        b64 = base64.b64encode(image_bytes).decode("ascii")
+        # 压缩大图（手机拍照 3-5MB → ~150KB），提速且避免上下文超限
+        compressed = _compress_image(image_bytes)
+        mime = "image/jpeg" if compressed is not image_bytes else _guess_mime(filename, image_bytes)
+        b64 = base64.b64encode(compressed).decode("ascii")
         data_url = f"data:{mime};base64,{b64}"
 
         expected = (expected_id_type or "").strip().upper()
         expect_hint = ""
-        if expected in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_PASSPORT, ID_TYPE_TW):
+        if expected in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_PASSPORT, ID_TYPE_TW, ID_TYPE_SCREENSHOT):
             expect_hint = (
                 f"用户已指定本图为 {ID_TYPE_LABELS.get(expected, expected)}（id_type={expected}），"
                 f"请按该类型抽取字段；若明显不是该证件仍可输出真实类型。\n"
@@ -589,40 +753,32 @@ def recognize_id_document(
         system = (
             "你是香港公司注册材料助手。对每张证件图片必须完成判别并抽取结构化字段。"
             "只输出 JSON，不要解释。"
-            "中国大陆/香港身份证的国徽面、机读码面（反面）也是有效身份证明；"
-            "即使看不见人像，也应输出对应 id_type，并将 side 设为 back。"
+            "国徽面/机读码面（反面）也是有效证件，side 设 back。"
         )
         user_text = (
             expect_hint
             + "请判别本图并读取信息。\n"
-            "id_type 只能是:\n"
-            "- HKID（香港身份证）\n"
-            "- PRC_ID（中国大陆居民身份证）\n"
-            "- PASSPORT（护照资料页）\n"
-            "- TW_ID（台湾国民身份证）\n"
-            "- unknown（确非证件）\n"
-            "side: front（人像/照片面）/ back（国徽面、机读码面）；"
-            "护照资料页填 front 或空字符串。\n"
+            "id_type: HKID / PRC_ID / PASSPORT / TW_ID / SCREENSHOT / unknown\n"
+            "side: front（人像面）/ back（国徽面、机读码面）；护照资料页填 front；截图/other 留空。\n"
+            "通用规则：所有中文姓名与住址按原文字形输出，禁止繁简转换；"
+            "多行住址拼成一行，行末字与下行首字都保留。\n"
             "按类型抽取：\n"
-            "- PRC_ID: name_cn=中文姓名；id_number=18位身份证号（末位可能是数字或大写字母X，"
-            "必须完整输出，勿漏写X，勿写成小写x或其它符号）；"
-            "address_cn=住址中文（正面优先）：必须按证件原文逐字抄录，禁止漏字/改字；"
-            "若住址分两行印刷，必须拼成一行完整地址，行末字与下行首字都要保留"
-            "（例如上行以「西丽」结尾、下行以「南路」开头时，结果须含「西丽南路」，"
-            "不得写成「丽南路」）；反光遮挡处尽量根据可见笔画推断，仍不确定则照可见部分抄录\n"
-            "- HKID: name_cn=中文名；name_en=英文名；"
-            "id_number=香港身份证号码，格式如 A123456(7) 或 AB123456(A)，必须含字母前缀+6位数字+校验位，"
-            "校验位用半角括号包裹；勿漏读号码\n"
-            "- PASSPORT: name_en=护照英文名；name_cn=中文名可空；id_number=护照号；"
-            "issuing_country=CHN/HKG/TWN/OTHER（台湾护照务必 TWN）\n"
-            "- TW_ID: name_cn；id_number；address_cn=户籍/住址中文"
-            "（同样逐字抄录，多行住址拼成一行）\n"
-            "full_name: 兼容字段，可用 name_cn/name_en 拼接。\n"
-            "confidence: 0~1；is_handheld: 是否手持证件。\n"
-            "输出 JSON 示例: "
-            '{"id_type":"PRC_ID","side":"front","name_cn":"张三","name_en":"",'
-            '"full_name":"张三","id_number":"110101199001011234",'
-            '"address_cn":"北京市东城区…","issuing_country":"CHN",'
+            "- PRC_ID: name_cn=中文姓名；id_number=18位（末位可能大写X）；"
+            "address_cn=住址中文（正面）；若有 address_cn 同时输出 address_en=英文住址\n"
+            "- HKID: name_cn=中文姓名（原文，禁繁简转换）；name_en=英文名（大写拉丁）；"
+            "id_number=A123456（7）格式，含字母前缀+6位数字+校验位，校验位用中文括号（）\n"
+            "- PASSPORT: name_en=护照英文名；name_cn=中文名（可空）；id_number=护照号；"
+            "issuing_country=CHN/HKG/TWN/OTHER；若 name_cn 非空但 name_en 空，输出拼音式英文名\n"
+            "- TW_ID: name_cn=姓名（原文，禁繁简转换，不可留空）；"
+            "id_number=字母+[1或2]+8位数字；address_cn=户籍地/住址（多行拼一行）；"
+            "若有 address_cn 同时输出 address_en=英文住址\n"
+            "- SCREENSHOT: 聊天截图/普通图片/手写纸条等，非标准证件。"
+            "从中提取 name_cn=姓名；name_en=英文名（如有）；address_cn=住址中文；"
+            "address_en=英文住址（如有）；id_number=证件号（如有则填，没有留空）；"
+            "confidence 按提取完整度给 0~1。\n"
+            "full_name: name_cn/name_en 拼接。confidence: 0~1。is_handheld: 是否手持证件。\n"
+            '输出 JSON 示例: {"id_type":"TW_ID","side":"front","name_cn":"王小明",'
+            '"id_number":"A123456789","address_cn":"臺北市…","issuing_country":"TWN",'
             '"confidence":0.9,"is_handheld":false}'
         )
 
@@ -660,6 +816,12 @@ def recognize_id_document(
                     r"^[A-Z]{1,2}\d{6}", result.id_number, re.I
                 ):
                     result.id_number = salvage_id_number(ID_TYPE_HKID, result.id_number) or result.id_number
+                elif result.id_type == ID_TYPE_TW:
+                    fixed = salvage_id_number(ID_TYPE_TW, result.id_number)
+                    if fixed:
+                        result.id_number = fixed
+                    else:
+                        result.error = result.error or "number_invalid"
                 else:
                     fixed = salvage_id_number(result.id_type, result.id_number)
                     if fixed and (
