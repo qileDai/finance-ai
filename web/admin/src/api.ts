@@ -234,6 +234,7 @@ export const api = {
       filename?: string;
       current_fields?: Record<string, string>;
       fill_empty_only?: boolean;
+      expected_id_type?: string;
     }) =>
       request<
         ApiOk<{

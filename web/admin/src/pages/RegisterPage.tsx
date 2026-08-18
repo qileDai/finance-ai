@@ -278,6 +278,7 @@ export function RegisterPage({ onToast }: Props) {
         filename: file.name,
         current_fields: { ...fields, id_type: idType },
         fill_empty_only: true,
+        expected_id_type: isTaiwanDoc ? "TW_ID" : undefined,
       });
       const filled = res.fields || {};
       const nextType = (filled.id_type || "").trim();

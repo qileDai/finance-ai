@@ -48,8 +48,16 @@ _HKID_FIND = re.compile(
     re.I,
 )
 _PASSPORT_RE = re.compile(r"^[A-Z0-9]{5,15}$", re.I)
-_TW_ID_RE = re.compile(r"^[A-Z][12]\d{8}$", re.I)
+# 台湾身分证：1 字母 + 性别码 1/2/6/7/8/9 + 8 位数字
+_TW_ID_BODY = r"[A-Z][126789]\d{8}"
+_TW_ID_RE = re.compile(rf"^{_TW_ID_BODY}$", re.I)
+_TW_ID_FIND = re.compile(_TW_ID_BODY, re.I)
+# 性别码偶发误识时仍须带字母，排除背面绿色流水号（纯数字）
+_TW_ID_LOOSE = re.compile(r"^[A-Z]\d{8,9}$", re.I)
 _LATIN_NAME_RE = re.compile(r"[A-Za-z]")
+_TW_ADDR_COUNTY = re.compile(r"[縣市]")
+_TW_ADDR_TOWNSHIP = re.compile(r"[鄉鎮市區]")
+_TW_ADDR_VILLAGE = re.compile(r"[村里]|鄰")
 
 # 身份证末位 X 常见误识字符 → 标准 X
 _X_LOOKALIKES = str.maketrans(
@@ -80,6 +88,32 @@ def _to_bool(val: Any) -> bool:
 
 def _has_latin(s: str) -> bool:
     return bool(_LATIN_NAME_RE.search(s or ""))
+
+
+def _is_tw_card_serial(raw: str) -> bool:
+    """背面绿色/印刷纯数字流水号，不是身分證字號。"""
+    s = _to_halfwidth(raw or "").replace(" ", "").replace("-", "").replace("_", "")
+    return bool(re.fullmatch(r"\d{8,12}", s or ""))
+
+
+def tw_number_acceptable(num: str) -> bool:
+    """可接受的台湾身分證字號（须含字母，拒绝纯数字流水号）。"""
+    n = (num or "").strip().upper()
+    if not n or n.isdigit() or _is_tw_card_serial(n):
+        return False
+    return bool(_TW_ID_RE.match(n) or _TW_ID_LOOSE.match(n))
+
+
+def looks_like_taiwan_address(address_cn: str) -> bool:
+    """户籍地形态：縣/市 + 鄉/鎮/區 + 村/里/鄰。"""
+    text = (address_cn or "").strip()
+    if not text:
+        return False
+    return bool(
+        _TW_ADDR_COUNTY.search(text)
+        and _TW_ADDR_TOWNSHIP.search(text)
+        and _TW_ADDR_VILLAGE.search(text)
+    )
 
 
 def display_name(name_cn: str, name_en: str, full_name: str = "") -> str:
@@ -236,9 +270,7 @@ def validate_id_number(id_type: str, id_number: str) -> bool:
     if t == ID_TYPE_PASSPORT:
         return bool(_PASSPORT_RE.match(num))
     if t == ID_TYPE_TW:
-        return bool(_TW_ID_RE.match(num)) or (
-            len(num) >= 8 and len(num) <= 12 and num.isalnum()
-        )
+        return tw_number_acceptable(num)
     return False
 
 
@@ -337,14 +369,19 @@ def normalize_id_number(id_type: str, id_number: str) -> str:
         return cand
     if t == ID_TYPE_TW:
         cand = raw.upper()
-        m = re.search(r"[A-Z][12]\d{8}", cand)
+        if _is_tw_card_serial(cand):
+            return ""
+        m = _TW_ID_FIND.search(cand)
         if m:
             return m.group(0)
+        m2 = _TW_ID_LOOSE.search(cand)
+        if m2:
+            return m2.group(0)
         return cand
     if t == ID_TYPE_PASSPORT:
         return raw.upper()
     # 未知类型：先台号（10位）再港证，避免台号被港证截断
-    tw = re.search(r"[A-Z][12]\d{8}", raw.upper())
+    tw = _TW_ID_FIND.search(raw.upper())
     if tw:
         return tw.group(0)
     hkid = _format_hkid(id_number or "")
@@ -373,9 +410,9 @@ def salvage_id_number(id_type: str, id_number: str) -> str:
         return n if n else ""
     if t == ID_TYPE_TW:
         n = normalize_id_number(ID_TYPE_TW, id_number)
-        if n and (_TW_ID_RE.match(n) or (len(n) >= 8 and n.isalnum())):
+        if tw_number_acceptable(n):
             return n
-        return n if n else ""
+        return ""
     n = normalize_id_number(t, id_number)
     if n and validate_id_number(t, n):
         return n
@@ -390,6 +427,14 @@ def salvage_id_number(id_type: str, id_number: str) -> str:
         if validate_id_number(ID_TYPE_PRC, n2):
             return n2
     return n if n else ""
+
+
+def looks_like_hkid_number(id_number: str) -> bool:
+    """号码是否已是港证格式（含宽松字母+6位）。用于误判类型时仍跳过姓名转繁。"""
+    n = salvage_id_number(ID_TYPE_HKID, id_number) or ""
+    if not n:
+        return False
+    return bool(_HKID_RE.match(n) or re.match(r"^[A-Z]{1,2}\d{6}", n, re.I))
 
 
 def normalize_person_name(name: str) -> str:
@@ -600,6 +645,11 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         from src.materials.id_document_translate import repair_prc_address_ocr
 
         address_cn = repair_prc_address_ocr(address_cn)
+    # 模型把台证背面判成 unknown/截图时，用户籍地址形态升为 TW_ID
+    if raw_type in (ID_TYPE_UNKNOWN, ID_TYPE_SCREENSHOT, "") and looks_like_taiwan_address(
+        address_cn
+    ):
+        raw_type = ID_TYPE_TW
     issuing_country = _normalize_issuing(
         str(data.get("issuing_country") or data.get("nationality") or ""),
         raw_type,
@@ -608,6 +658,8 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
     side = str(data.get("side") or "").strip().lower()
     if side not in ("front", "back"):
         side = ""
+    if raw_type == ID_TYPE_TW and not side and looks_like_taiwan_address(address_cn):
+        side = "back"
     is_handheld = _to_bool(data.get("is_handheld"))
 
     number_ok = bool(number) and (
@@ -635,26 +687,24 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
             if raw_type in (ID_TYPE_UNKNOWN, ""):
                 raw_type = ID_TYPE_PRC
             number_ok = True
-    # 台证：宽松保留
+    # 台证：须含字母；拒绝背面绿色纯数字流水号
+    if raw_type in (ID_TYPE_TW, ID_TYPE_UNKNOWN, "") and (
+        _is_tw_card_serial(number) or _is_tw_card_serial(raw_id_number)
+    ):
+        number = ""
+        number_ok = False
     if (not number_ok) and raw_type in (ID_TYPE_TW, ID_TYPE_UNKNOWN, ""):
         salvaged = salvage_id_number(ID_TYPE_TW, raw_id_number or number)
-        if salvaged and (
-            validate_id_number(ID_TYPE_TW, salvaged)
-            or re.match(r"^[A-Z][12]\d{8}$", salvaged, re.I)
-            or (len(salvaged) >= 8 and salvaged.isalnum())
-        ):
+        if tw_number_acceptable(salvaged):
             number = salvaged
             if raw_type in (ID_TYPE_UNKNOWN, ""):
                 raw_type = ID_TYPE_TW
             number_ok = True
     if number and not number_ok:
-        # 港证宽松保留；内地证宽松保留；台证宽松保留；否则清空
+        # 港证宽松保留；内地证宽松保留；台证须像身分證字號；否则清空
         if raw_type == ID_TYPE_HKID and re.match(r"^[A-Z]{1,2}\d{6}", number, re.I):
             number_ok = True
-        elif raw_type == ID_TYPE_TW and (
-            re.match(r"^[A-Z][12]\d{8}$", number, re.I)
-            or (len(number) >= 8 and number.isalnum())
-        ):
+        elif raw_type == ID_TYPE_TW and tw_number_acceptable(number):
             number_ok = True
         elif re.fullmatch(r"\d{17}[\dX]", normalize_id_number(ID_TYPE_PRC, raw_id_number or number) or ""):
             number = normalize_id_number(ID_TYPE_PRC, raw_id_number or number)
@@ -667,9 +717,11 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
             if raw_type == ID_TYPE_HKID and keep:
                 number = _format_hkid(keep)
                 number_ok = bool(number)
-            elif raw_type == ID_TYPE_TW and keep:
-                number = normalize_id_number(ID_TYPE_TW, keep) or keep
-                number_ok = bool(number)
+            elif raw_type == ID_TYPE_TW:
+                number = salvage_id_number(ID_TYPE_TW, keep) or ""
+                number_ok = tw_number_acceptable(number)
+                if not number_ok:
+                    number = ""
             else:
                 number = ""
 
@@ -682,8 +734,15 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         and conf_ok
         and (number_ok or side == "back" or (raw_type == ID_TYPE_PASSPORT and number_ok))
     )
-    if raw_type in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_TW) and side != "back" and not number_ok:
+    if raw_type in (ID_TYPE_HKID, ID_TYPE_PRC) and side != "back" and not number_ok:
         ok = False
+    if raw_type == ID_TYPE_TW:
+        # 有合法号码或住址即成功（背面无印刷字号时仍返回住址）
+        has_payload = bool(number_ok or address_cn or address_en)
+        ok = bool(
+            has_payload
+            and (conf_ok or looks_like_taiwan_address(address_cn))
+        )
     if raw_type == ID_TYPE_PASSPORT and not number_ok:
         ok = False
     # 截图/普通图片：有姓名或住址即视为识别成功，不要求证件号码
@@ -753,32 +812,44 @@ def recognize_id_document(
         system = (
             "你是香港公司注册材料助手。对每张证件图片必须完成判别并抽取结构化字段。"
             "只输出 JSON，不要解释。"
-            "国徽面/机读码面（反面）也是有效证件，side 设 back。"
+            "反面也是有效证件：大陆证国徽面、港证机读码面、台湾证米色户籍/住址面均 side=back。"
         )
         user_text = (
             expect_hint
             + "请判别本图并读取信息。\n"
             "id_type: HKID / PRC_ID / PASSPORT / TW_ID / SCREENSHOT / unknown\n"
-            "side: front（人像面）/ back（国徽面、机读码面）；护照资料页填 front；截图/other 留空。\n"
-            "通用规则：所有中文姓名与住址按原文字形输出，禁止繁简转换；"
-            "多行住址拼成一行，行末字与下行首字都保留。\n"
+            "side: front（人像面）/ back（大陆证国徽面、港证机读码面、台湾证无照片户籍面）；"
+            "护照资料页填 front；截图/other 留空。\n"
+            "通用规则：所有中文姓名与住址按卡面原文字形逐字抄录，禁止繁简转换、禁止纠正错字；"
+            "同一姓名内繁简混用也必须原样；多行住址拼成一行，行末字与下行首字都保留。\n"
             "按类型抽取：\n"
             "- PRC_ID: name_cn=中文姓名；id_number=18位（末位可能大写X）；"
             "address_cn=住址中文（正面）；若有 address_cn 同时输出 address_en=英文住址\n"
-            "- HKID: name_cn=中文姓名（原文，禁繁简转换）；name_en=英文名（大写拉丁）；"
+            "- HKID: name_cn=中文姓名，按卡面逐字抄录，禁止繁简转换、禁止纠正错字；"
+            "同一姓名内繁简混用也必须原样（例如卡面是「賴傳广」就输出「賴傳广」，"
+            "不得改成「賴傳廣」或「赖传广」）；"
+            "name_en=英文名按卡面抄录（如 LAI, Chuanguang）；"
             "id_number=A123456（7）格式，含字母前缀+6位数字+校验位，校验位用中文括号（）\n"
             "- PASSPORT: name_en=护照英文名；name_cn=中文名（可空）；id_number=护照号；"
             "issuing_country=CHN/HKG/TWN/OTHER；若 name_cn 非空但 name_en 空，输出拼音式英文名\n"
-            "- TW_ID: name_cn=姓名（原文，禁繁简转换，不可留空）；"
-            "id_number=字母+[1或2]+8位数字；address_cn=户籍地/住址（多行拼一行）；"
-            "若有 address_cn 同时输出 address_en=英文住址\n"
+            "- TW_ID: 台湾国民身份证（繁体）。正面：粉紫/淡紫横式，标题「中華民國國民身分證」，"
+            "人像、姓名、身分證字號；id_number=1字母+9位数字（如A123456789）；"
+            "name_cn=持证人姓名（原文，禁繁简转换）。"
+            "背面：米色无照片，字段「父/母/配偶/役別/出生地/住址」，底部条码与圆形徽章；"
+            "address_cn=「住址」原文（多行拼一行，禁止把「出生地」当住址）；"
+            "不要把父/母/配偶姓名填入 name_cn。"
+            "背面若印有身分證字號则抄录；若仅有条码尽量解读为 id_number；"
+            "底部绿色/印刷纯数字流水号（如0051533923）不是身分證字號，禁止当作 id_number；"
+            "解不出则 id_number 留空，不要编造。"
+            "若有 address_cn 同时输出 address_en=英文住址。issuing_country=TWN。\n"
             "- SCREENSHOT: 聊天截图/普通图片/手写纸条等，非标准证件。"
             "从中提取 name_cn=姓名；name_en=英文名（如有）；address_cn=住址中文；"
             "address_en=英文住址（如有）；id_number=证件号（如有则填，没有留空）；"
             "confidence 按提取完整度给 0~1。\n"
             "full_name: name_cn/name_en 拼接。confidence: 0~1。is_handheld: 是否手持证件。\n"
-            '输出 JSON 示例: {"id_type":"TW_ID","side":"front","name_cn":"王小明",'
-            '"id_number":"A123456789","address_cn":"臺北市…","issuing_country":"TWN",'
+            '输出 JSON 示例: {"id_type":"TW_ID","side":"back","id_number":"A123456789",'
+            '"address_cn":"彰化縣埔鹽鄉新興村3鄰中興路52號","address_en":"No. 52, Zhongxing Rd, '
+            'Xinxing Village, Puyan Township, Changhua County","issuing_country":"TWN",'
             '"confidence":0.9,"is_handheld":false}'
         )
 

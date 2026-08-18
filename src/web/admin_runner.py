@@ -250,10 +250,12 @@ def extract_id_fields(
     filename: str = "",
     fill_empty_only: bool = True,
     current_fields: dict[str, str] | None = None,
+    expected_id_type: str = "",
 ) -> tuple[dict[str, Any], int]:
     """管理后台：上传证件图 → 视觉识别 + 翻译补全 → 可回填字段。
 
     fill_empty_only=True 时不覆盖 current_fields 中已有非空值。
+    expected_id_type: 如台湾身份证上传传 TW_ID，优先按该类型抽取住址/号码。
     """
     from src.materials.id_document_ocr import enrich_number_from_ocr
     from src.materials.id_document_translate import enrich_extracted_fields
@@ -271,7 +273,8 @@ def extract_id_fields(
         return {"ok": False, "error": str(e)}, 400
 
     name = (filename or "id.jpg").strip() or "id.jpg"
-    vision = recognize_id_document(raw, filename=name)
+    expected = (expected_id_type or "").strip().upper()
+    vision = recognize_id_document(raw, filename=name, expected_id_type=expected)
     if vision.error == "not_image":
         return {"ok": False, "error": "仅支持图片识别（请上传 JPG/PNG/WEBP）"}, 400
     if vision.error == "no_api_key":
@@ -292,6 +295,34 @@ def extract_id_fields(
     except Exception:
         logger.debug("OCR 号码兜底跳过", exc_info=True)
 
+    from src.materials.id_document_vision import (
+        display_name,
+        looks_like_taiwan_address,
+        salvage_id_number,
+        should_convert_name_to_traditional,
+        to_traditional_name,
+        tw_number_acceptable,
+        looks_like_hkid_number,
+        ID_TYPE_HKID,
+        ID_TYPE_SCREENSHOT,
+        ID_TYPE_TW,
+    )
+
+    if expected == ID_TYPE_TW and vision.id_type in ("unknown", ""):
+        vision.id_type = ID_TYPE_TW
+    if vision.id_type in ("unknown", "", ID_TYPE_SCREENSHOT) and looks_like_taiwan_address(
+        vision.address_cn
+    ):
+        vision.id_type = ID_TYPE_TW
+    if expected == ID_TYPE_TW or vision.id_type == ID_TYPE_TW:
+        raw_num = str((vision.raw or {}).get("id_number") or vision.id_number or "")
+        fixed = salvage_id_number(ID_TYPE_TW, raw_num)
+        if tw_number_acceptable(fixed):
+            vision.id_number = fixed
+            vision.id_type = ID_TYPE_TW
+        elif not tw_number_acceptable(vision.id_number):
+            vision.id_number = ""
+
     hint_type = (
         str((current_fields or {}).get("id_type") or "").strip().upper()
         or vision.id_type
@@ -300,20 +331,13 @@ def extract_id_fields(
         vision.issuing_country
         or str((current_fields or {}).get("issuing_country") or "").strip()
     )
-    from src.materials.id_document_vision import (
-        display_name,
-        should_convert_name_to_traditional,
-        to_traditional_name,
-        ID_TYPE_HKID,
-        ID_TYPE_SCREENSHOT,
-        ID_TYPE_TW,
-    )
 
     # 国内身份证/截图姓名 → 繁体；港台原样
     if vision.name_cn:
-        if vision.id_type in (ID_TYPE_HKID, ID_TYPE_TW) or hint_type in (
-            ID_TYPE_HKID,
-            ID_TYPE_TW,
+        if (
+            vision.id_type in (ID_TYPE_HKID, ID_TYPE_TW)
+            or hint_type in (ID_TYPE_HKID, ID_TYPE_TW)
+            or looks_like_hkid_number(vision.id_number)
         ):
             pass
         elif should_convert_name_to_traditional(
@@ -413,7 +437,7 @@ def _extract_hints(id_type: str, issuing: str, need_taiwan_id: bool) -> list[str
         if (issuing or "").upper() == "TWN" or need_taiwan_id:
             hints.append("台湾护照：请再上传台湾身份证以提取住址")
     elif t == ID_TYPE_TW:
-        hints.append("已识别台湾身份证：可用于住址；ICRIS 证件类型仍请选护照并上传护照页")
+        hints.append("已识别台湾身份证：提取身分證字號与户籍/住址，住址英文已自动翻译")
     return hints
 
 

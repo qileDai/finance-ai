@@ -217,11 +217,15 @@ def _handle_runner_extract_id(body: dict | None) -> tuple[dict[str, Any], int]:
         fill_empty_only = fill_empty.strip().lower() not in ("0", "false", "no", "off")
     else:
         fill_empty_only = bool(fill_empty)
+    expected = str(body.get("expected_id_type") or "").strip().upper()
+    if expected and expected not in ("PRC_ID", "HKID", "PASSPORT", "TW_ID", "SCREENSHOT"):
+        expected = ""
     return extract_id_fields(
         data_url=data_url,
         filename=filename,
         fill_empty_only=fill_empty_only,
         current_fields={str(k): str(v or "") for k, v in current.items()},
+        expected_id_type=expected,
     )
 
 

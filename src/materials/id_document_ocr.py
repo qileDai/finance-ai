@@ -14,6 +14,7 @@ from src.materials.id_document_vision import (
     ID_TYPE_TW,
     ID_TYPE_UNKNOWN,
     normalize_id_number,
+    tw_number_acceptable,
     validate_id_number,
 )
 
@@ -21,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 _PRC_FIND = re.compile(r"\d{17}[\dXxＸｘ×✕\*]")
 _HKID_FIND = re.compile(r"[A-Z]{1,2}\d{6}(?:\([\dA]\)|（[\dA]）)?", re.I)
-# 台湾身分证：字母 + 1/2 + 8 位；须优先于港证，避免 A123456789 被截成港证
-_TW_FIND = re.compile(r"[A-Z][12]\d{8}", re.I)
+# 台湾身分证：字母 + 性别码 1/2/6/7/8/9 + 8 位；须优先于港证，避免 A123456789 被截成港证
+_TW_FIND = re.compile(r"[A-Z][126789]\d{8}", re.I)
 _PASSPORT_FIND = re.compile(r"\b[A-Z0-9]{8,9}\b", re.I)
 
 _ocr_engine = None
@@ -118,10 +119,7 @@ def extract_id_number_ocr(
             if not re.search(r"[A-Za-z]", num):
                 continue
         if itype == ID_TYPE_TW:
-            if not (
-                validate_id_number(itype, num)
-                or re.fullmatch(r"[A-Z][12]\d{8}", num or "", re.I)
-            ):
+            if not tw_number_acceptable(num):
                 continue
             logger.info("证件 OCR 兜底命中 type=%s num=%s…", itype, (num or "")[:4])
             return itype, num
@@ -149,11 +147,7 @@ def enrich_number_from_ocr(
         return id_type, id_number
     if t == ID_TYPE_TW and id_number:
         n = normalize_id_number(ID_TYPE_TW, id_number)
-        if n and (
-            validate_id_number(ID_TYPE_TW, n)
-            or re.fullmatch(r"[A-Z][12]\d{8}", n, re.I)
-            or (len(n) >= 8 and n.isalnum())
-        ):
+        if tw_number_acceptable(n):
             return ID_TYPE_TW, n
     if id_number and t == ID_TYPE_UNKNOWN:
         for cand in (ID_TYPE_TW, ID_TYPE_PRC, ID_TYPE_HKID, ID_TYPE_PASSPORT):
@@ -164,9 +158,7 @@ def enrich_number_from_ocr(
     if onum:
         if t == ID_TYPE_TW:
             # 已是台证：仅接受 TW 号码，不改类型
-            if otype == ID_TYPE_TW or re.fullmatch(
-                r"[A-Z][12]\d{8}", onum or "", re.I
-            ):
+            if otype == ID_TYPE_TW or tw_number_acceptable(onum):
                 return ID_TYPE_TW, normalize_id_number(ID_TYPE_TW, onum) or onum
             return id_type, id_number
         return (otype or id_type or ID_TYPE_UNKNOWN), onum

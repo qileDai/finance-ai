@@ -28,6 +28,7 @@ def run_id_extract(
         ID_TYPE_SCREENSHOT,
         ID_TYPE_TW,
         ID_TYPE_UNKNOWN,
+        looks_like_taiwan_address,
         recognize_id_document,
     )
 
@@ -90,6 +91,11 @@ def run_id_extract(
     if expected and vision.id_type in (ID_TYPE_UNKNOWN, ""):
         vision.id_type = expected
 
+    if vision.id_type in (ID_TYPE_UNKNOWN, "", ID_TYPE_SCREENSHOT) and looks_like_taiwan_address(
+        vision.address_cn
+    ):
+        vision.id_type = ID_TYPE_TW
+
     # 内地证号码末位 X：再从 raw 抢救一次
     if (expected == ID_TYPE_PRC or vision.id_type == ID_TYPE_PRC) and not vision.id_number:
         from src.materials.id_document_vision import salvage_id_number
@@ -120,20 +126,17 @@ def run_id_extract(
             vision.id_number = fixed
             vision.id_type = "HKID"
 
-    # 台证号码：宽松保留
+    # 台证号码：须像身分證字號，拒绝纯数字流水号
     if expected == ID_TYPE_TW or vision.id_type == ID_TYPE_TW:
-        from src.materials.id_document_vision import salvage_id_number, validate_id_number
-        import re as _re
+        from src.materials.id_document_vision import salvage_id_number, tw_number_acceptable
 
         raw_num = str((vision.raw or {}).get("id_number") or vision.id_number or "")
         fixed = salvage_id_number(ID_TYPE_TW, raw_num)
-        if fixed and (
-            validate_id_number(ID_TYPE_TW, fixed)
-            or _re.match(r"^[A-Z][12]\d{8}$", fixed, _re.I)
-            or (len(fixed) >= 8 and fixed.isalnum())
-        ):
+        if tw_number_acceptable(fixed):
             vision.id_number = fixed
             vision.id_type = ID_TYPE_TW
+        elif not tw_number_acceptable(vision.id_number):
+            vision.id_number = ""
 
     type_mismatch = bool(
         expected
@@ -162,13 +165,18 @@ def run_id_extract(
     if vision.name_cn:
         from src.materials.id_document_vision import (
             display_name,
+            looks_like_hkid_number,
             should_convert_name_to_traditional,
             to_traditional_name,
         )
 
         tid = vision.id_type if vision.id_type not in ("", ID_TYPE_UNKNOWN) else expected
-        # 港/台绝不转繁（含误判兜底：expected 为港台时也不转）
-        if tid in ("HKID", ID_TYPE_TW) or expected in ("HKID", ID_TYPE_TW):
+        # 港/台绝不转繁（含误判兜底：expected 为港台、或号码已是港证格式）
+        if (
+            tid in ("HKID", ID_TYPE_TW)
+            or expected in ("HKID", ID_TYPE_TW)
+            or looks_like_hkid_number(vision.id_number)
+        ):
             pass
         elif should_convert_name_to_traditional(tid, vision.issuing_country):
             vision.name_cn = to_traditional_name(vision.name_cn)
@@ -283,7 +291,7 @@ def _hints(id_type: str, issuing: str, need_taiwan_id: bool) -> list[str]:
         if (issuing or "").upper() == "TWN" or need_taiwan_id:
             hints.append("台湾护照：请再选「台湾身份证」上传以提取住址")
     elif t == "TW_ID":
-        hints.append("台湾身份证：姓名、号码、住址（供台湾护照住址用）")
+        hints.append("台湾身份证：提取身分證字號与户籍/住址，住址英文已自动翻译")
     elif t == "SCREENSHOT":
         hints.append("聊天截图/图片文字：从中提取姓名和住址，住址英文已自动翻译")
     return hints
@@ -337,7 +345,6 @@ def _shape_result(
         )
         fields["id_type"] = "PASSPORT"
     elif t == "TW_ID":
-        add("director_name_cn", "姓名", extracted.get("director_name_cn") or vision.name_cn)
         add("id_number", "台湾身份证号码", extracted.get("id_number") or vision.id_number)
         add(
             "director_address_cn",
@@ -345,6 +352,7 @@ def _shape_result(
             extracted.get("director_address_cn") or vision.address_cn,
         )
         add("director_address_en", "住址英文", extracted.get("director_address_en", ""))
+        add("director_name_cn", "姓名", extracted.get("director_name_cn") or vision.name_cn)
     elif t == "SCREENSHOT":
         add("director_name_cn", "姓名", extracted.get("director_name_cn") or vision.name_cn)
         add("director_name_en", "英文名", extracted.get("director_name_en") or vision.name_en)
