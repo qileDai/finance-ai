@@ -43,13 +43,23 @@ export function ImageModal({ src, alt = "", open, onClose }: Props) {
 
   const onMouseUp = () => setDragging(false);
 
+  // 点击 overlay 空白处（非图片、非 toolbar）关闭浮层
+  const onOverlayMouseDown = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) onClose();
+  };
+
   return (
-    <div className="img-modal-overlay" onClick={onClose}>
-      <div className="img-modal-toolbar" onClick={(e) => e.stopPropagation()}>
-        <button onClick={() => setScale((s) => Math.min(5, s + 0.2))}>+</button>
+    <div className="img-modal-overlay" onMouseDown={onOverlayMouseDown}>
+      <div className="img-modal-toolbar">
+        <button type="button" onClick={() => setScale((s) => Math.min(5, s + 0.2))}>
+          +
+        </button>
         <span>{(scale * 100).toFixed(0)}%</span>
-        <button onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}>-</button>
+        <button type="button" onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}>
+          -
+        </button>
         <button
+          type="button"
           onClick={() => {
             setScale(1);
             setOffset({ x: 0, y: 0 });
@@ -57,11 +67,12 @@ export function ImageModal({ src, alt = "", open, onClose }: Props) {
         >
           重置
         </button>
-        <button onClick={onClose}>✕</button>
+        <button type="button" onClick={onClose}>
+          ✕
+        </button>
       </div>
       <div
         className="img-modal-body"
-        onClick={(e) => e.stopPropagation()}
         onWheel={onWheel}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}

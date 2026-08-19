@@ -734,13 +734,25 @@ table.data tr.clickable:hover td {
   justify-content: center;
 }
 
+.id-extract-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.id-extract-form .id-preview-wrap {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .id-preview-wrap {
-  margin: 8px 0 4px;
+  margin: 6px 0 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-soft);
   overflow: hidden;
-  max-height: 280px;
+  max-height: 360px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -748,7 +760,7 @@ table.data tr.clickable:hover td {
 
 .id-preview {
   max-width: 100%;
-  max-height: 280px;
+  max-height: 360px;
   object-fit: contain;
   display: block;
 }
@@ -779,66 +791,73 @@ table.data tr.clickable:hover td {
   opacity: 0.85;
 }
 
-/* 图片放大 Modal */
+/* 图片放大：透明遮罩、图片靠左，不挡右侧结果 */
 .img-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 9999;
-  background: rgba(0, 0, 0, 0.85);
+  z-index: 40;
+  background: transparent;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 52px 12px 12px;
+  pointer-events: none;
 }
 
 .img-modal-toolbar {
   position: absolute;
-  top: 16px;
-  right: 16px;
+  top: 12px;
+  left: 12px;
   display: flex;
   gap: 8px;
   align-items: center;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line, #e8e8e8);
   border-radius: 6px;
   padding: 6px 10px;
+  pointer-events: auto;
+  z-index: 1;
 }
 
 .img-modal-toolbar button {
   background: none;
   border: none;
-  color: #fff;
+  color: #222;
   font-size: 16px;
   cursor: pointer;
   padding: 2px 8px;
 }
 
 .img-modal-toolbar button:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.08);
   border-radius: 4px;
 }
 
 .img-modal-toolbar span {
-  color: #fff;
+  color: #333;
   font-size: 13px;
   min-width: 40px;
   text-align: center;
 }
 
 .img-modal-body {
-  max-width: 90vw;
-  max-height: 85vh;
-  overflow: hidden;
+  max-width: 48vw;
+  max-height: calc(100vh - 72px);
+  overflow: visible;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
+  pointer-events: auto;
 }
 
 .img-modal-body img {
-  max-width: 100%;
-  max-height: 100%;
+  max-width: 48vw;
+  max-height: calc(100vh - 72px);
   object-fit: contain;
   transition: transform 0.1s ease-out;
   user-select: none;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
 }
 
 .id-result-label {
@@ -852,6 +871,62 @@ table.data tr.clickable:hover td {
   padding: 2px 8px;
   font-size: 0.75rem;
   min-height: auto;
+}
+
+/* 微信式框选截图 */
+.ss-crop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: #111;
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+
+.ss-crop-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.ss-crop-shade {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+.ss-crop-box {
+  position: absolute;
+  border: 1px solid #4da3ff;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+}
+
+.ss-crop-hint {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #fff;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 6px 12px;
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+.ss-crop-toolbar {
+  position: absolute;
+  display: flex;
+  gap: 8px;
+  z-index: 3;
+  cursor: default;
 }
 
 @media (max-width: 960px) {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { ImageModal } from "../components/ImageModal";
 
@@ -44,6 +44,39 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+async function readClipboardImage(): Promise<File | null> {
+  try {
+    if (!navigator.clipboard?.read) return null;
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = item.types.find((t) => t.startsWith("image/"));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      const ext = (type.split("/")[1] || "png").split("+")[0];
+      return new File([blob], `clipboard.${ext}`, { type });
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function blobSig(blob: Blob): Promise<string> {
+  const buf = await blob.slice(0, 2048).arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let h = blob.size >>> 0;
+  for (const b of bytes) h = (Math.imul(h, 33) + b) >>> 0;
+  return `${blob.size}:${blob.type}:${h}`;
+}
+
+function launchWindowsSnip() {
+  try {
+    window.location.href = "ms-screenclip:";
+  } catch {
+    /* user can still press Win+Shift+S */
+  }
+}
+
 export function IdExtractPage({ onToast }: Props) {
   const [file, setFile] = useState<File | undefined>();
   const [previewUrl, setPreviewUrl] = useState("");
@@ -53,6 +86,13 @@ export function IdExtractPage({ onToast }: Props) {
   const [hints, setHints] = useState<string[]>([]);
   const [meta, setMeta] = useState<string>("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [snipWaiting, setSnipWaiting] = useState(false);
+  const loadingRef = useRef(false);
+  const previewUrlRef = useRef("");
+  const snipWaitingRef = useRef(false);
+  const beforeClipSigRef = useRef("");
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
 
   const copyBlock = useMemo(() => {
     return display
@@ -67,30 +107,38 @@ export function IdExtractPage({ onToast }: Props) {
     setFields({});
     setHints([]);
     setMeta("");
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = "";
       setPreviewUrl("");
     }
     if (f && f.type.startsWith("image/")) {
-      setPreviewUrl(URL.createObjectURL(f));
+      const url = URL.createObjectURL(f);
+      previewUrlRef.current = url;
+      setPreviewUrl(url);
     }
   }
 
-  async function onRecognize() {
-    if (!file) {
-      onToast("请先上传证件图片");
+  const pickRef = useRef(onPickFile);
+  pickRef.current = onPickFile;
+
+  function applyImageOnly(f: File, toast: string) {
+    pickRef.current(f);
+    onToastRef.current(toast);
+  }
+
+  async function recognizeFile(f: File) {
+    if (!f.type.startsWith("image/")) {
+      onToastRef.current("仅支持图片（JPG/PNG/WEBP）");
       return;
     }
-    if (!file.type.startsWith("image/")) {
-      onToast("仅支持图片（JPG/PNG/WEBP）");
-      return;
-    }
+    loadingRef.current = true;
     setLoading(true);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const dataUrl = await readFileAsDataUrl(f);
       const res = await api.idExtract({
         data_url: dataUrl,
-        filename: file.name,
+        filename: f.name,
       });
       const rows = res.display || [];
       const nextFields = { ...(res.fields || {}) };
@@ -111,17 +159,96 @@ export function IdExtractPage({ onToast }: Props) {
           .filter(Boolean)
           .join(" · ")
       );
-      onToast(
+      onToastRef.current(
         rows.length ? `识别成功：${rows.length} 项` : "识别完成，未得到字段"
       );
     } catch (e) {
       setDisplay([]);
       setFields({});
-      onToast((e as Error).message || "识别失败");
+      onToastRef.current((e as Error).message || "识别失败");
     } finally {
+      loadingRef.current = false;
       setLoading(false);
     }
   }
+
+  async function onRecognize() {
+    if (!file) {
+      onToastRef.current("请先上传或粘贴证件图片");
+      return;
+    }
+    await recognizeFile(file);
+  }
+
+  function stopSnipWait() {
+    snipWaitingRef.current = false;
+    setSnipWaiting(false);
+  }
+
+  async function onScreenshot() {
+    if (loadingRef.current || snipWaitingRef.current) return;
+    const existing = await readClipboardImage();
+    beforeClipSigRef.current = existing ? await blobSig(existing) : "";
+    snipWaitingRef.current = true;
+    setSnipWaiting(true);
+    launchWindowsSnip();
+  }
+
+  useEffect(() => {
+    if (!snipWaiting) return;
+    let stop = false;
+
+    const takeIfNew = async () => {
+      if (stop || !snipWaitingRef.current) return;
+      const clip = await readClipboardImage();
+      if (!clip) return;
+      const sig = await blobSig(clip);
+      if (sig === beforeClipSigRef.current) return;
+      stopSnipWait();
+      applyImageOnly(clip, "已截取图片，请点「开始识别」");
+    };
+
+    const id = window.setInterval(() => void takeIfNew(), 400);
+    const onFocus = () => void takeIfNew();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        stopSnipWait();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [snipWaiting]);
+
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (loadingRef.current) return;
+      const items = e.clipboardData?.items;
+      if (!items?.length) return;
+      const imageItem = Array.from(items).find((i) => i.type.startsWith("image/"));
+      if (!imageItem) return;
+      const blob = imageItem.getAsFile();
+      if (!blob) return;
+      e.preventDefault();
+      if (snipWaitingRef.current) stopSnipWait();
+      const name = blob.name && blob.name !== "image.png" ? blob.name : `paste-${Date.now()}.png`;
+      const f = new File([blob], name, { type: blob.type || "image/png" });
+      applyImageOnly(f, "已粘贴图片，请点「开始识别」");
+    };
+    window.addEventListener("paste", onPaste);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
 
   async function onCopyAll() {
     const ok = await copyText(copyBlock);
@@ -139,11 +266,12 @@ export function IdExtractPage({ onToast }: Props) {
         <section className="reg-card">
           <h2>证件识别</h2>
           <small className="muted">
-            上传中国身份证、香港身份证、护照或台湾身份证图片，由模型自动判别类型并抽取字段。结果可逐项复制或一键复制全部。
+            上传中国身份证、香港身份证、护照或台湾身份证图片。点「截图」后直接框选屏幕上的证件；也可 Ctrl+V
+            粘贴。图片出现在左侧后，再点「开始识别」。
           </small>
 
-          <div className="reg-form" style={{ marginTop: 16 }}>
-            <label className="reg-field">
+          <div className="id-extract-form">
+            <div className="reg-field">
               <span>
                 上传图片
                 <em>*</em>
@@ -156,21 +284,20 @@ export function IdExtractPage({ onToast }: Props) {
                 onChange={(e) => onPickFile(e.target.files?.[0])}
               />
               {file ? <small className="muted">{file.name}</small> : null}
-            </label>
+              {previewUrl ? (
+                <div className="id-preview-wrap">
+                  <img
+                    src={previewUrl}
+                    alt="证件预览"
+                    className="id-preview id-preview-zoom"
+                    title="点击放大"
+                    onClick={() => setModalOpen(true)}
+                  />
+                </div>
+              ) : null}
+            </div>
 
-            {previewUrl ? (
-              <div className="id-preview-wrap">
-                <img
-                  src={previewUrl}
-                  alt="证件预览"
-                  className="id-preview id-preview-zoom"
-                  title="点击放大"
-                  onClick={() => setModalOpen(true)}
-                />
-              </div>
-            ) : null}
-
-            <div className="reg-actions">
+            <div className="reg-actions" style={{ marginTop: 0 }}>
               <button
                 type="button"
                 className="btn btn-primary"
@@ -178,6 +305,14 @@ export function IdExtractPage({ onToast }: Props) {
                 onClick={onRecognize}
               >
                 {loading ? "识别中…" : "开始识别"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={loading || snipWaiting}
+                onClick={onScreenshot}
+              >
+                截图
               </button>
               <button
                 type="button"
@@ -206,7 +341,7 @@ export function IdExtractPage({ onToast }: Props) {
             </div>
           ) : null}
           {!display.length && !loading ? (
-            <div className="empty-box">上传图片后点「开始识别」</div>
+            <div className="empty-box">上传 / 粘贴 / 截图后，点「开始识别」</div>
           ) : null}
           {loading ? <div className="muted">正在调用视觉模型…</div> : null}
           {display.length ? (
