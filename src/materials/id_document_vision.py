@@ -749,6 +749,16 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
     if raw_type == ID_TYPE_SCREENSHOT:
         ok = bool(conf_ok and (name_cn or name_en or address_cn or address_en or number))
 
+    # 解析 alternative_types 和 field_candidates（识别准确性加强）
+    alternative_types = data.get("alternative_types") or []
+    if not isinstance(alternative_types, list):
+        alternative_types = []
+    alternative_types = [str(t).strip().upper() for t in alternative_types if t]
+
+    field_candidates = data.get("field_candidates") or {}
+    if not isinstance(field_candidates, dict):
+        field_candidates = {}
+
     return IdDocumentResult(
         id_type=raw_type,
         id_number=number if number_ok else "",
@@ -760,7 +770,7 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
         issuing_country=issuing_country,
         confidence=conf,
         ok=ok,
-        raw=data,
+        raw={**data, "alternative_types": alternative_types, "field_candidates": field_candidates},
         side=side,
         is_handheld=is_handheld,
     )
@@ -813,6 +823,10 @@ def recognize_id_document(
             "你是香港公司注册材料助手。对每张证件图片必须完成判别并抽取结构化字段。"
             "只输出 JSON，不要解释。"
             "反面也是有效证件：大陆证国徽面、港证机读码面、台湾证米色户籍/住址面均 side=back。"
+            "请仔细判别证件类型，若 confidence < 0.7 请在 JSON 中增加 alternative_types 字段，"
+            "列出可能的其他类型（如 [\"HKID\",\"PASSPORT\"]）。"
+            "请确保抽取所有可见字段，特别是门牌/楼层/室号数字，"
+            "若某字段模糊请降低该字段 confidence 并在 JSON 中增加 field_candidates 字段给出候选值。"
         )
         user_text = (
             expect_hint
@@ -822,6 +836,8 @@ def recognize_id_document(
             "护照资料页填 front；截图/other 留空。\n"
             "通用规则：所有中文姓名与住址按卡面原文字形逐字抄录，禁止繁简转换、禁止纠正错字；"
             "同一姓名内繁简混用也必须原样；多行住址拼成一行，行末字与下行首字都保留。\n"
+            "类型纠正：若判别为 PASSPORT 但图片中有中文姓名与中文住址，请重新判别为 PRC_ID 或 TW_ID；"
+            "若判别为 SCREENSHOT 但图片是标准证件（有证件边框/国徽/机读码），请重新判别为对应证件类型。\n"
             "按类型抽取：\n"
             "- PRC_ID: name_cn=中文姓名；id_number=18位（末位可能大写X）；"
             "address_cn=住址中文（正面）；若有 address_cn 同时输出 address_en=英文住址\n"

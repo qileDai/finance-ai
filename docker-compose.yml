@@ -8,14 +8,16 @@ services:
     build: .
     image: finance-ai:latest
     container_name: finance-ai-bot
+    command: ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x1024x24", "python", "main.py", "wework-external-bot"]
     env_file:
       - .env
     environment:
       TZ: Asia/Shanghai
       WEWORK_EXTERNAL_CALLBACK_PORT: "8081"
       MATERIALS_DIR: data/materials
-      BROWSER_HEADLESS: "true"
+      BROWSER_HEADLESS: "false"
       CHROME_USE_EXISTING: "false"
+      DISPLAY: ":99"
     ports:
       - "8081:8081"
     volumes:

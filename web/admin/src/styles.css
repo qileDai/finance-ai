@@ -747,6 +747,7 @@ table.data tr.clickable:hover td {
 }
 
 .id-preview-wrap {
+  position: relative;
   margin: 6px 0 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -756,6 +757,34 @@ table.data tr.clickable:hover td {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.id-preview-del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.id-preview-del:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.id-preview-del:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .id-preview {

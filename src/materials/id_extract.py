@@ -67,6 +67,38 @@ def run_id_extract(
     if vision.error == "vision_disabled":
         return {"ok": False, "error": "证件视觉识别已关闭"}
 
+    # 低置信度重判：vision 返回 confidence < 0.7 且有 alternative_types 时，
+    # 按第一个 alternative_type 重新识别（仅当当前类型未知/截图时）
+    if (
+        vision.confidence < 0.7
+        and vision.id_type in (ID_TYPE_UNKNOWN, ID_TYPE_SCREENSHOT, "")
+    ):
+        alt_types = (vision.raw or {}).get("alternative_types") or []
+        if alt_types:
+            retry_type = str(alt_types[0]).strip().upper()
+            if retry_type in (ID_TYPE_HKID, ID_TYPE_PRC, ID_TYPE_PASSPORT, ID_TYPE_TW):
+                logger.info(
+                    "低置信度 %.2f (type=%s)，按 alternative_type=%s 重新识别",
+                    vision.confidence,
+                    vision.id_type,
+                    retry_type,
+                )
+                retry_result = recognize_id_document(
+                    image_bytes,
+                    filename=filename or "id.jpg",
+                    expected_id_type=retry_type,
+                )
+                # 若重判成功且置信度提升，采用重判结果
+                if retry_result.confidence > vision.confidence:
+                    logger.info(
+                        "重判成功：confidence %.2f -> %.2f, type %s -> %s",
+                        vision.confidence,
+                        retry_result.confidence,
+                        vision.id_type,
+                        retry_result.id_type,
+                    )
+                    vision = retry_result
+
     try:
         # OCR 已有结果直接用；vision 无数码时才跑 enrich（内部会再调 OCR 兜底）
         if not onum:

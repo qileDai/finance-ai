@@ -293,6 +293,15 @@ export function IdExtractPage({ onToast }: Props) {
                     title="点击放大"
                     onClick={() => setModalOpen(true)}
                   />
+                  <button
+                    type="button"
+                    className="id-preview-del"
+                    title="删除图片"
+                    disabled={loading}
+                    onClick={() => onPickFile(undefined)}
+                  >
+                    ✕
+                  </button>
                 </div>
               ) : null}
             </div>

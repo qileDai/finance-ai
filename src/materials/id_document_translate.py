@@ -37,25 +37,29 @@ def translate_address_cn_to_en(address_cn: str) -> str:
     text = (address_cn or "").strip()
     if not text:
         return ""
-    try:
-        from src.llm.openai_client import LLMClient
+    # 重试 2 次：首次 temperature=0.0，失败后 temperature=0.1 增加多样性
+    for attempt, temp in enumerate([0.0, 0.1], start=1):
+        try:
+            from src.llm.openai_client import LLMClient
 
-        client = LLMClient()
-        data = client.chat_json(
-            system=(
-                "你是地址翻译助手。只把给定中文地址忠实译为英文地址，"
-                "保留门牌、楼层、室号数字与专有名词拼音/官方英文。"
-                "不要编造原文没有的信息；不要输出解释。"
-                '只输出 JSON: {"address_en":"..."}'
-            ),
-            user=f"中文地址：{text}",
-            temperature=0.0,
-        )
-        en = str(data.get("address_en") or data.get("en") or "").strip()
-        return en
-    except Exception as exc:
-        logger.warning("住址翻译失败: %s", exc)
-        return ""
+            client = LLMClient()
+            data = client.chat_json(
+                system=(
+                    "你是地址翻译助手。只把给定中文地址忠实译为英文地址，"
+                    "保留门牌、楼层、室号数字与专有名词拼音/官方英文。"
+                    "不要编造原文没有的信息；不要输出解释。"
+                    '只输出 JSON: {"address_en":"..."}'
+                ),
+                user=f"中文地址：{text}",
+                temperature=temp,
+            )
+            en = str(data.get("address_en") or data.get("en") or "").strip()
+            if en:
+                return en
+        except Exception as exc:
+            logger.warning("住址翻译失败 (尝试 %d/2): %s", attempt, exc)
+    logger.error("住址翻译 2 次均失败: %s", text)
+    return ""
 
 
 def ensure_passport_english_name(name_cn: str, name_en: str) -> str:
@@ -88,7 +92,7 @@ def ensure_passport_english_name(name_cn: str, name_en: str) -> str:
 
 
 def enrich_extracted_fields(fields: dict[str, str]) -> dict[str, str]:
-    """对识别结果做翻译补全（仅填空，不覆盖已有非空值）。
+    """对识别结果做翻译补全（中文地址必出英文）。
 
     入参/出参均为管理后台字段键。
     """
@@ -100,7 +104,8 @@ def enrich_extracted_fields(fields: dict[str, str]) -> dict[str, str]:
         if fixed != addr_cn:
             out["director_address_cn"] = fixed
             addr_cn = fixed
-    if addr_cn and not out.get("director_address_en"):
+    # 始终重新翻译：不信任 vision 输出的 address_en（质量不稳定），确保中文地址必出英文
+    if addr_cn:
         en = translate_address_cn_to_en(addr_cn)
         if en:
             out["director_address_en"] = en
@@ -114,6 +119,12 @@ def enrich_extracted_fields(fields: dict[str, str]) -> dict[str, str]:
         if fixed:
             out["director_name_en"] = fixed
             name_en = fixed
+    # 英文名去空格（如 LAI, Chuanguang → LAI,Chuanguang；ZHANG SAN → ZHANGSAN）
+    if name_en:
+        no_space = name_en.replace(" ", "")
+        if no_space != name_en:
+            out["director_name_en"] = no_space
+            name_en = no_space
 
     # 同步 director_name 展示
     cn = out.get("director_name_cn", "")

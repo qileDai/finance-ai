@@ -27,12 +27,13 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.li
     || sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null \
     || true
 
-# System libs for Pillow / ddddocr; Playwright will install Chromium deps next
+# System libs for Pillow / ddddocr + Xvfb（容器内非 headless 运行 Chrome，绕过 ICRIS headless 检测）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         gnupg \
         wget \
+        xvfb \
         libglib2.0-0 \
         libgomp1 \
         libgl1 \
@@ -41,14 +42,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Chrome Stable（ICRIS 门户 TLS 指纹绕过，比 Playwright Chromium 更强）
-# 国内服务器 dl.google.com 可能不可达，失败时跳过用 Playwright Chromium 兜底
+# Google Chrome 131（ICRIS 门户 TLS 指纹绕过，与本地版本一致）
+# 国内服务器 dl.google.com 可能不可达；失败时用清华 Chrome 镜像源重试
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get install -y --no-install-recommends google-chrome-stable=131.* \
     && rm -rf /var/lib/apt/lists/* \
-    || echo "Chrome install skipped (dl.google.com unreachable), using Playwright Chromium fallback"
+    || (echo "dl.google.com unreachable, trying Tsinghua mirror..." \
+        && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://mirrors.tuna.tsinghua.edu.cn/google-chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends google-chrome-stable=131.* \
+        && rm -rf /var/lib/apt/lists/* \
+        || echo "Chrome 131 install failed on all sources, using Playwright Chromium fallback")
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
