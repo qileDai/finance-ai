@@ -42,19 +42,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Chrome 131（ICRIS 门户 TLS 指纹绕过，与本地版本一致）
-# 国内服务器 dl.google.com 可能不可达；失败时用清华 Chrome 镜像源重试
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable=131.* \
-    && rm -rf /var/lib/apt/lists/* \
-    || (echo "dl.google.com unreachable, trying Tsinghua mirror..." \
-        && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://mirrors.tuna.tsinghua.edu.cn/google-chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-        && apt-get update \
-        && apt-get install -y --no-install-recommends google-chrome-stable=131.* \
-        && rm -rf /var/lib/apt/lists/* \
-        || echo "Chrome 131 install failed on all sources, using Playwright Chromium fallback")
+# Google Chrome（best-effort；失败时删除 apt 源，避免污染后续 playwright install --with-deps）
+# 国内服务器 dl.google.com 可能不可达；清华不镜像 google-chrome apt 仓库，故不再 fallback 到清华
+RUN (wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+     && apt-get update \
+     && apt-get install -y --no-install-recommends google-chrome-stable \
+     && echo "Chrome installed from dl.google.com") \
+    || (echo "Chrome install failed, removing apt source to avoid poisoning playwright install" \
+        && rm -f /etc/apt/sources.list.d/google-chrome.list /usr/share/keyrings/google-chrome.gpg) \
+    ; rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple \
