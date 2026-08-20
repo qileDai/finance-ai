@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     # 证件看图：建议配置 gpt-4o（中英兼顾）；空则回退 openai_model
     openai_vision_model: str = ""
 
+    # 住址中文→英文翻译引擎（证件识别模块的切换按钮：Google / 有道 / DeepL，防止 LLM 翻译不准）
+    # 任一留空则该引擎在后台禁用；至少配一个即可启用对应按钮
+    google_translate_api_key: str = ""
+    youdao_app_key: str = ""
+    youdao_app_secret: str = ""
+    # DeepL：Free 版 key 以 :fx 结尾（走 api-free.deepl.com，50万字符/月免费不绑卡）；Pro 版普通 key
+    deepl_auth_key: str = ""
+    # 证件识别的 LLM 翻译专用模型（空则回退 OPENAI_MODEL；建议 gpt-4o，比 mini 明显更准）
+    translate_model: str = Field(default="", validation_alias="TRANSLATE_MODEL")
+
     # 管理后台登录（空密码则无法登录 /admin）
     admin_username: str = Field(default="admin", validation_alias="ADMIN_USERNAME")
     admin_password: str = Field(default="", validation_alias="ADMIN_PASSWORD")

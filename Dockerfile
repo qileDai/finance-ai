@@ -27,14 +27,12 @@ RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.li
     || sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null \
     || true
 
-# System libs for Pillow / ddddocr + Xvfb（容器内非 headless 运行 Chrome，绕过 ICRIS headless 检测）
+# System libs for Pillow / ddddocr / opencv（headless 模式，无需 Xvfb）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         gnupg \
         wget \
-        xvfb \
-        xauth \
         libglib2.0-0 \
         libgomp1 \
         libgl1 \

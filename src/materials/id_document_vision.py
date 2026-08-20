@@ -490,11 +490,10 @@ def _guess_mime(filename: str, data: bytes) -> str:
     return "image/jpeg"
 
 
-def _compress_image(data: bytes, *, max_dim: int = 1024, quality: int = 80) -> bytes:
-    """压缩图片到 max_dim 内，JPEG quality=80。失败返回原图。
+def _compress_image(data: bytes, *, max_dim: int = 2048, quality: int = 90) -> bytes:
+    """压缩图片到 max_dim 内，JPEG quality=90。失败返回原图。
 
-    大图（手机拍照 3-5MB）直接 base64 传给 LLM 会：① 传输慢 ② 上下文超限
-    压缩到 1024px + JPEG q80 后约 100-200KB，显著提速且不影响证件文字识别。
+    大图直接 base64 会传输慢、易超上下文。2048px + q90 仍能看清发票「购方地址」等小字。
     """
     try:
         from io import BytesIO
@@ -776,6 +775,58 @@ def _parse_vision_payload(data: dict[str, Any]) -> IdDocumentResult:
     )
 
 
+def _verify_address_cn(client, model: str, data_url: str, current: str) -> str:
+    """对照原图再抄一遍购方地址/住址，纠正用地名知识替换的错字。"""
+    text = (current or "").strip()
+    if not text:
+        return text
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是地址抄录核对助手。只看图中「购方地址」「住址」「地址」标签后的原文。"
+                        "逐字抄录，禁止用地名知识替换区划或路名。只输出 JSON。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "请对照图片核对住址。优先抄「备注」栏「购方地址：」后整段，直到该格结束；"
+                                "否则抄「住址」字段原文。多行拼成一行。"
+                                "禁止把荔湾改成黄埔、西村改成南村、西湾路改成西南街；"
+                                "保留之一/之二、楼盘名（如麒诺公寓）、室号；不要销方地址或项目名称。"
+                                f"先前抽取（可能有错，不可盲从）：{text}\n"
+                                '只输出 JSON: {"address_cn":"..."}'
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return text
+        verified = str(data.get("address_cn") or data.get("address") or "").strip()
+        if not verified:
+            return text
+        if verified != text:
+            logger.info("住址二次核对: %s → %s", text[:48], verified[:48])
+        return verified
+    except Exception as exc:
+        logger.debug("住址二次核对跳过: %s", exc)
+        return text
+
+
 def recognize_id_document(
     image_bytes: bytes,
     *,
@@ -835,7 +886,9 @@ def recognize_id_document(
             "side: front（人像面）/ back（大陆证国徽面、港证机读码面、台湾证无照片户籍面）；"
             "护照资料页填 front；截图/other 留空。\n"
             "通用规则：所有中文姓名与住址按卡面原文字形逐字抄录，禁止繁简转换、禁止纠正错字；"
-            "同一姓名内繁简混用也必须原样；多行住址拼成一行，行末字与下行首字都保留。\n"
+            "同一姓名内繁简混用也必须原样；多行住址拼成一行，行末字与下行首字都保留。"
+            "禁止用地名知识替换区划或路名（荔湾≠黄埔、西村≠南村、西湾路≠西南街）；"
+            "保留「之一/之二」、楼盘名、室号；看不清不要编一个相似地名。\n"
             "类型纠正：若判别为 PASSPORT 但图片中有中文姓名与中文住址，请重新判别为 PRC_ID 或 TW_ID；"
             "若判别为 SCREENSHOT 但图片是标准证件（有证件边框/国徽/机读码），请重新判别为对应证件类型。\n"
             "按类型抽取：\n"
@@ -858,9 +911,11 @@ def recognize_id_document(
             "底部绿色/印刷纯数字流水号（如0051533923）不是身分證字號，禁止当作 id_number；"
             "解不出则 id_number 留空，不要编造。"
             "若有 address_cn 同时输出 address_en=英文住址。issuing_country=TWN。\n"
-            "- SCREENSHOT: 聊天截图/普通图片/手写纸条等，非标准证件。"
+            "- SCREENSHOT: 聊天截图/普通图片/手写纸条/电子发票等，非标准证件。"
             "从中提取 name_cn=姓名；name_en=英文名（如有）；address_cn=住址中文；"
-            "address_en=英文住址（如有）；id_number=证件号（如有则填，没有留空）；"
+            "address_en=英文住址（如有）；id_number=证件号（如有则填，没有留空）。"
+            "电子发票：address_cn 必须抄「备注」栏「购方地址：」后整段直到该格结束，"
+            "不要销方地址、项目名称或开票方地址；购方名称可作 name_cn。"
             "confidence 按提取完整度给 0~1。\n"
             "full_name: name_cn/name_en 拼接。confidence: 0~1。is_handheld: 是否手持证件。\n"
             '输出 JSON 示例: {"id_type":"TW_ID","side":"back","id_number":"A123456789",'
@@ -892,6 +947,16 @@ def recognize_id_document(
             return IdDocumentResult(error="json_parse", raw={"text": raw_text[:500]})
 
         result = _parse_vision_payload(payload if isinstance(payload, dict) else {})
+        if result.address_cn:
+            first_addr = result.address_cn
+            checked = _verify_address_cn(client, model, data_url, first_addr)
+            if checked and checked != first_addr:
+                from src.materials.id_document_translate import repair_prc_address_ocr
+
+                result.address_cn = repair_prc_address_ocr(checked)
+                if isinstance(result.raw, dict):
+                    result.raw["address_cn"] = result.address_cn
+                    result.raw["address_cn_first_pass"] = first_addr
         if not result.ok:
             if (
                 result.id_type != ID_TYPE_UNKNOWN

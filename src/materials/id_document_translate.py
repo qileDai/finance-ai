@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 
+from config.settings import settings
+
 logger = logging.getLogger(__name__)
 
 _LATIN_RE = re.compile(r"[A-Za-z]")
@@ -42,7 +44,7 @@ def translate_address_cn_to_en(address_cn: str) -> str:
         try:
             from src.llm.openai_client import LLMClient
 
-            client = LLMClient()
+            client = LLMClient(model=(settings.translate_model or None))
             data = client.chat_json(
                 system=(
                     "你是地址翻译助手。只把给定中文地址忠实译为英文地址，"

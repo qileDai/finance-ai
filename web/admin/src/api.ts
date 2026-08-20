@@ -279,6 +279,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  idTranslate: (payload: { text: string; engine: "google" | "youdao" | "deepl" }) =>
+    request<ApiOk<{ translated: string; engine: string }>>(
+      "/admin/api/id-extract/translate",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    ),
   wework: {
     sendModes: () =>
       request<ApiOk<WeworkSendModes>>("/admin/api/wework/send-modes"),

@@ -301,6 +301,84 @@ def run_id_extract(
     }
 
 
+def run_id_extract_pdf(
+    *,
+    pdf_bytes: bytes,
+    filename: str = "",
+    expected_id_type: str = "",
+) -> dict[str, Any]:
+    """识别 PDF 证件：逐页渲染为高清 PNG，复用 run_id_extract，合并多页结果。"""
+    import pymupdf  # PyMuPDF
+
+    MAX_PAGES = 4  # 证件极少超 2 页，封顶防滥用
+    try:
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        return {"ok": False, "error": f"PDF 打开失败：{e}"}
+
+    n = min(doc.page_count, MAX_PAGES)
+    if n == 0:
+        doc.close()
+        return {"ok": False, "error": "PDF 无页面"}
+
+    page_results: list[dict[str, Any]] = []
+    for i in range(n):
+        page = doc.load_page(i)
+        zoom = 200 / 72  # 200 DPI，远超截图清晰度
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        png = pix.tobytes("png")
+        r = run_id_extract(
+            image_bytes=png,
+            filename=f"{filename or 'id'}_p{i+1}.png",
+            expected_id_type=expected_id_type,
+        )
+        if r.get("ok"):
+            page_results.append(r)
+    doc.close()
+
+    if not page_results:
+        return {"ok": False, "error": "PDF 各页未能识别（请确认是证件 PDF）"}
+
+    def _field_count(r: dict[str, Any]) -> int:
+        return sum(
+            1
+            for k, v in (r.get("fields") or {}).items()
+            if k != "id_type" and (v or "").strip()
+        )
+
+    # 基准页 = 非空字段最多的一页，其余页补缺
+    best = max(page_results, key=_field_count)
+    merged_fields: dict[str, str] = dict(best.get("fields") or {})
+    merged_display: list[dict[str, str]] = list(best.get("display") or [])
+    seen = set(merged_fields.keys())
+    for other in page_results:
+        if other is best:
+            continue
+        for row in other.get("display") or []:
+            k = row.get("key")
+            v = (row.get("value") or "").strip()
+            if k and k not in seen and v:
+                merged_fields[k] = v
+                merged_display.append(row)
+                seen.add(k)
+
+    vision = dict(best.get("vision") or {})
+    vision["pdf_pages"] = n
+    vision["pdf_pages_recognized"] = len(page_results)
+
+    return {
+        "ok": True,
+        "expected_id_type": expected_id_type,
+        "fields": merged_fields,
+        "display": merged_display,
+        "vision": vision,
+        "need_taiwan_id": best.get("need_taiwan_id", False),
+        "type_mismatch": best.get("type_mismatch", False),
+        "hints": best.get("hints") or [],
+        "pdf": True,
+    }
+
+
 def _label(id_type: str) -> str:
     return {
         "PRC_ID": "中国身份证",

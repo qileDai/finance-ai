@@ -130,6 +130,36 @@ class BrowserSession:
     external_cdp: bool = False
 
 
+def _chromium_launch_args() -> list[str]:
+    """Playwright / patchright 共用启动参数；Linux 容器必须 --no-sandbox。"""
+    import platform
+
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-infobars",
+    ]
+    if platform.system() == "Linux":
+        args.append("--no-sandbox")
+    return args
+
+
+def _launch_fail_hint(err: Exception | None) -> str:
+    msg = str(err or "")
+    if any(
+        s in msg
+        for s in ("Missing X server", "XServer", "$DISPLAY", "ozone_platform_x11")
+    ):
+        return (
+            "headed 启动需要可用 DISPLAY。请确认 finance-ai-bot 已起 Xvfb :99"
+            "（docker compose logs bot 应有 [boot] Xvfb :99 ready），"
+            "且 ICRIS Worker 只在 bot 容器运行（admin 须 ICRIS_WORKER_ENABLED=false）。"
+        )
+    return "请安装 Google Chrome / Microsoft Edge，或执行: python -m playwright install chromium"
+
+
 def _is_patchright() -> bool:
     """是否正在使用 patchright（而非普通 Playwright）"""
     import sys
@@ -156,13 +186,7 @@ async def launch_browser(
         launch_kwargs: dict[str, Any] = {
             "headless": headless_flag,
             "channel": "chrome",
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-infobars",
-            ],
+            "args": _chromium_launch_args(),
         }
         if settings.browser_no_proxy:
             launch_kwargs["args"].append("--no-proxy-server")
@@ -228,13 +252,7 @@ async def launch_browser(
         launch_kwargs: dict[str, Any] = {
             "headless": headless_flag,
             "slow_mo": settings.browser_slow_mo,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-infobars",
-            ],
+            "args": _chromium_launch_args(),
         }
         if settings.browser_no_proxy:
             launch_kwargs["args"].append("--no-proxy-server")
@@ -249,10 +267,7 @@ async def launch_browser(
             last_error = e
             logger.warning("启动浏览器失败 (%s): %s", label, e)
 
-    hint = (
-        "请安装 Google Chrome / Microsoft Edge，或执行: python -m playwright install chromium"
-    )
-    raise RuntimeError(f"无法启动浏览器。{hint}") from last_error
+    raise RuntimeError(f"无法启动浏览器。{_launch_fail_hint(last_error)}") from last_error
 
 
 async def create_browser_context(browser: Any) -> Any:

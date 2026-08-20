@@ -128,8 +128,9 @@ export function IdExtractPage({ onToast }: Props) {
   }
 
   async function recognizeFile(f: File) {
-    if (!f.type.startsWith("image/")) {
-      onToastRef.current("仅支持图片（JPG/PNG/WEBP）");
+    const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
+    if (!f.type.startsWith("image/") && !isPdf) {
+      onToastRef.current("仅支持图片（JPG/PNG/WEBP）或 PDF");
       return;
     }
     loadingRef.current = true;
@@ -279,12 +280,29 @@ export function IdExtractPage({ onToast }: Props) {
               <input
                 key={file ? file.name : "empty"}
                 type="file"
-                accept="image/jpeg,image/png,image/webp,image/jpg"
+                accept="image/jpeg,image/png,image/webp,image/jpg,application/pdf"
                 disabled={loading}
                 onChange={(e) => onPickFile(e.target.files?.[0])}
               />
               {file ? <small className="muted">{file.name}</small> : null}
-              {previewUrl ? (
+              {file &&
+              (file.type === "application/pdf" ||
+                file.name.toLowerCase().endsWith(".pdf")) ? (
+                <div className="id-preview-wrap">
+                  <div className="id-pdf-chip" title={file.name}>
+                    📄 {file.name}
+                  </div>
+                  <button
+                    type="button"
+                    className="id-preview-del"
+                    title="移除文件"
+                    disabled={loading}
+                    onClick={() => onPickFile(undefined)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : previewUrl ? (
                 <div className="id-preview-wrap">
                   <img
                     src={previewUrl}

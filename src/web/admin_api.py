@@ -99,6 +99,8 @@ def handle_admin_api(
             return _handle_runner_extract_id(body)
         if method == "POST" and rel == "id-extract":
             return _handle_id_extract(body)
+        if method == "POST" and rel == "id-extract/translate":
+            return _handle_id_translate(body)
         if method == "GET" and rel == "wework/send-modes":
             return _handle_wework_send_modes()
         if method == "POST" and rel == "wework/send":
@@ -259,16 +261,66 @@ def _handle_id_extract(body: dict | None) -> tuple[dict[str, Any], int]:
     try:
         raw = base64.b64decode(m.group(2))
     except Exception:
-        return _err("invalid base64 image", 400)
+        return _err("invalid base64 payload", 400)
 
-    result = run_id_extract(
-        image_bytes=raw,
-        filename=filename or "id.jpg",
-        expected_id_type=expected,
-    )
+    mime = (m.group(1) or "").lower()
+    is_pdf = mime == "application/pdf" or filename.lower().endswith(".pdf")
+    if is_pdf:
+        from src.materials.id_extract import run_id_extract_pdf
+
+        result = run_id_extract_pdf(
+            pdf_bytes=raw,
+            filename=filename or "id.pdf",
+            expected_id_type=expected,
+        )
+    else:
+        result = run_id_extract(
+            image_bytes=raw,
+            filename=filename or "id.jpg",
+            expected_id_type=expected,
+        )
     if not result.get("ok"):
-        return result, 422 if "未能识别" in str(result.get("error") or "") else 400
+        err = str(result.get("error") or "")
+        return result, 422 if ("未能识别" in err or "PDF" in err) else 400
     return result, 200
+
+
+def _handle_id_translate(body: dict | None) -> tuple[dict[str, Any], int]:
+    """证件识别模块的翻译引擎切换：用 Google / 有道 API 译中文地址为英文，覆盖 LLM 译文。"""
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+    from src.materials.translate_engines import (
+        SUPPORTED_ENGINES,
+        available_engines,
+        translate_with,
+    )
+
+    text = str(body.get("text") or body.get("q") or "").strip()
+    engine = str(body.get("engine") or "").strip().lower()
+    if not text:
+        return _err("text required", 400)
+    if engine not in SUPPORTED_ENGINES:
+        return _err(f"engine 仅支持 {' / '.join(SUPPORTED_ENGINES)}", 400)
+    avail = available_engines()
+    if engine not in avail:
+        configured = "、".join(avail) or "（无）"
+        if engine == "google":
+            hint = "请在 .env 配置 GOOGLE_TRANSLATE_API_KEY"
+        elif engine == "youdao":
+            hint = "请在 .env 配置 YOUDAO_APP_KEY / YOUDAO_APP_SECRET"
+        else:
+            hint = "请在 .env 配置 DEEPL_AUTH_KEY（Free 版以 :fx 结尾）"
+        return _err(f"该翻译引擎未配置密钥（已配置: {configured}）。{hint}", 400)
+    try:
+        translated = translate_with(engine, text)
+    except ValueError as e:
+        return _err(f"{engine} 翻译失败: {e}", 502)
+    except Exception as e:
+        logger.warning("translate engine=%s failed: %s", engine, e)
+        return _err(f"{engine} 翻译失败: {e}", 502)
+    if not translated:
+        return _err(f"{engine} 翻译返回为空", 502)
+    return _ok(translated=translated, engine=engine)
 
 
 def _parse_job_id(rel: str, *, suffix: str) -> int | None:

@@ -759,6 +759,22 @@ table.data tr.clickable:hover td {
   justify-content: center;
 }
 
+.id-pdf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  color: var(--text);
+  font-size: 13px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .id-preview-del {
   position: absolute;
   top: 6px;
@@ -897,6 +913,25 @@ table.data tr.clickable:hover td {
 }
 
 .id-copy-btn {
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  min-height: auto;
+}
+
+/* 住址英文行的右侧操作组（翻译引擎切换 + 复制） */
+.id-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.id-translate-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.id-engine-btn {
   padding: 2px 8px;
   font-size: 0.75rem;
   min-height: auto;

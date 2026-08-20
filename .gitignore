@@ -6,6 +6,7 @@ __pycache__/
 venv/
 output/
 data/materials/
+data/icris_failures
 *.log
 .playwright/
 .pytest_cache/
@@ -13,3 +14,4 @@ data/materials/
 web/admin/node_modules/
 web/admin/dist/
 static/admin/
+.trae/

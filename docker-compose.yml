@@ -8,17 +8,15 @@ services:
     build: .
     image: finance-ai:latest
     container_name: finance-ai-bot
-    # 直接手动起 Xvfb + exec python（xvfb-run --auto-servernum 在容器 PID 1 下会 hang，导致 python 永不启动）
-    command: ["sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & sleep 1 && exec python main.py wework-external-bot"]
+    command: ["python", "main.py", "wework-external-bot"]
     env_file:
       - .env
     environment:
       TZ: Asia/Shanghai
       WEWORK_EXTERNAL_CALLBACK_PORT: "8081"
       MATERIALS_DIR: data/materials
-      BROWSER_HEADLESS: "false"
+      BROWSER_HEADLESS: "true"
       CHROME_USE_EXISTING: "false"
-      DISPLAY: ":99"
     ports:
       - "8081:8081"
     volumes:
@@ -26,7 +24,7 @@ services:
       - ./.env:/app/.env:ro
       # 可选：企微会话存档 Linux SDK
       # - ./vendor/wework-sdk:/app/vendor/wework-sdk:ro
-    # Chromium 需要较大 /dev/shm；宝塔编排 UI 若不识别，请用终端 docker compose up
+    # headless Chromium 仍需较大 /dev/shm；宝塔编排 UI 若不识别，请用终端 docker compose up
     shm_size: "2gb"
     restart: unless-stopped
     healthcheck:
@@ -47,6 +45,7 @@ services:
       TZ: Asia/Shanghai
       ADMIN_PORT: "8082"
       MATERIALS_DIR: data/materials
+      ICRIS_WORKER_ENABLED: "false"
     ports:
       - "8082:8082"
     volumes:
