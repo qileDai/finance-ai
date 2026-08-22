@@ -447,6 +447,8 @@ def _handle_jobs_list(
     director_name: str = "",
     id_number: str = "",
 ) -> tuple[dict[str, Any], int]:
+    import json as _json
+
     items = store.list_registration_jobs(
         limit=limit,
         status=status,
@@ -457,12 +459,59 @@ def _handle_jobs_list(
         director_name=director_name,
         id_number=id_number,
     )
-    # 列表不返回完整 payload，减小响应
+    # 列表不返回完整 payload，但抽取关键字段供列表展示
     slim: list[dict[str, Any]] = []
     for it in items:
         row = dict(it)
-        row.pop("payload_json", None)
+        raw = row.pop("payload_json", "") or ""
         row.pop("result_messages", None)
+        payload: dict[str, Any] = {}
+        if raw:
+            try:
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                payload = {}
+
+        directors = payload.get("directors") or []
+        director = directors[0] if isinstance(directors, list) and directors else {}
+        if not isinstance(director, dict):
+            director = {}
+        applicant = payload.get("applicant") or {}
+        if not isinstance(applicant, dict):
+            applicant = {}
+        account = payload.get("icris_account") or {}
+        if not isinstance(account, dict):
+            account = {}
+        proof = payload.get("identity_proof") or {}
+        if not isinstance(proof, dict):
+            proof = {}
+
+        row["company_name_cn"] = str(payload.get("company_name_cn") or "")
+        row["company_name_en"] = str(payload.get("company_name_en") or "")
+        row["director_name"] = (
+            director.get("name_en")
+            or director.get("name")
+            or director.get("name_cn")
+            or applicant.get("name_cn")
+            or applicant.get("name_en")
+            or ""
+        )
+        row["id_type"] = (
+            applicant.get("id_type")
+            or director.get("id_type")
+            or proof.get("id_type")
+            or ""
+        )
+        row["id_number"] = (
+            applicant.get("id_number")
+            or director.get("id_number")
+            or proof.get("id_number")
+            or ""
+        )
+        row["icris_username"] = str(account.get("username") or "")
+        row["icris_password"] = str(account.get("password") or "")
         slim.append(row)
     return _ok(items=slim, status=status or "all", limit=limit)
 

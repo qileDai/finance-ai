@@ -40,6 +40,7 @@ class WorkflowContext:
     package_dir: Path | None = None
     icris_account: IcrisAccount | None = None
     messages: list[str] = field(default_factory=list)
+    esubmit_screenshot_path: str = ""
 
     def log(self, msg: str) -> None:
         logger.info(msg)
@@ -152,6 +153,7 @@ class RegistrationWorkflow:
                 force_isolated_browser=force_isolated_browser,
             )
         )
+        ctx.esubmit_screenshot_path = bot.esubmit_screenshot_path or ""
         if use_submit:
             ctx.log("ICRIS 注册流程已执行（含提交开关）")
         else:

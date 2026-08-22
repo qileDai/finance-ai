@@ -141,6 +141,61 @@ class AdminWebServer:
                     return True
                 return False
 
+            def _handle_job_screenshot(
+                self, store: ExternalGroupStore, rel: str
+            ) -> None:
+                """读取 job 截图并返回 image/png。
+
+                rel: jobs/<id>/screenshot
+                query: ?type=esubmit|fail（默认 fail）
+                """
+                import re
+                from pathlib import Path
+                from urllib.parse import parse_qs
+
+                m = re.match(r"jobs/(\d+)/screenshot$", rel)
+                if not m:
+                    return self._send_json(
+                        {"ok": False, "error": "invalid screenshot path"}, 400
+                    )
+                job_id = int(m.group(1))
+                qs = urlparse(self.path).query or ""
+                q = parse_qs(qs)
+                shot_type = (q.get("type", ["fail"]) or ["fail"])[0].lower()
+
+                job = store.get_registration_job(job_id)
+                if not job:
+                    return self._send_json({"ok": False, "error": "job not found"}, 404)
+
+                if shot_type == "esubmit":
+                    file_path = str(job.get("esubmit_screenshot_path") or "").strip()
+                else:
+                    file_path = str(job.get("screenshot_path") or "").strip()
+
+                if not file_path:
+                    return self._send_json(
+                        {
+                            "ok": False,
+                            "error": f"no {shot_type} screenshot for job #{job_id}",
+                        },
+                        404,
+                    )
+
+                p = Path(file_path)
+                if not p.is_file():
+                    return self._send_json(
+                        {"ok": False, "error": "screenshot file missing on disk"},
+                        404,
+                    )
+
+                data = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(data)
+
             def do_GET(self) -> None:
                 path = urlparse(self.path).path
                 if path in ("/health", "/healthz"):
@@ -158,6 +213,9 @@ class AdminWebServer:
                     else:
                         if not self._require_session():
                             return
+                    # 截图接口：返回二进制 image/png，不走 JSON admin_api
+                    if rel.startswith("jobs/") and rel.endswith("/screenshot"):
+                        return self._handle_job_screenshot(store, rel)
                     result = handle_admin_api(
                         method="GET",
                         path=self.path,

@@ -178,6 +178,7 @@ class ExternalGroupStore:
                     dry_run INTEGER NOT NULL DEFAULT 1,
                     allow_submit INTEGER NOT NULL DEFAULT 0,
                     screenshot_path TEXT NOT NULL DEFAULT '',
+                    esubmit_screenshot_path TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
                     company_name TEXT NOT NULL DEFAULT '',
@@ -250,6 +251,10 @@ class ExternalGroupStore:
         if "screenshot_path" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "esubmit_screenshot_path" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN esubmit_screenshot_path TEXT NOT NULL DEFAULT ''"
             )
         if "payload_json" not in cols:
             conn.execute(
@@ -1295,6 +1300,7 @@ class ExternalGroupStore:
         *,
         package_dir: str = "",
         result_messages: list[Any] | None = None,
+        esubmit_screenshot_path: str = "",
     ) -> None:
         import json
 
@@ -1312,12 +1318,17 @@ class ExternalGroupStore:
                 SET status = 'succeeded',
                     package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
                     result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
+                    esubmit_screenshot_path = CASE WHEN ? != '' THEN ? ELSE esubmit_screenshot_path END,
                     finished_at = ?,
                     updated_at = ?,
                     last_error = ''
                 WHERE id = ?
                 """,
-                (package_dir, package_dir, msgs, msgs, now, now, job_id),
+                (
+                    package_dir, package_dir, msgs, msgs,
+                    esubmit_screenshot_path, esubmit_screenshot_path,
+                    now, now, job_id
+                ),
             )
 
     def update_job_result_messages(
@@ -1514,12 +1525,32 @@ class ExternalGroupStore:
             kw = f"%{id_number}%"
             clauses.append("payload_json LIKE ?")
             params.append(kw)
+        # created_at 存 UTC ISO（如 2026-08-22T03:17:05+00:00），
+        # 前端传本地日期（YYYY-MM-DD），需转成 UTC 范围再用 ISO 字符串比较
         if date_from:
-            clauses.append("created_at >= ?")
-            params.append(f"{date_from} 00:00:00")
+            try:
+                from datetime import datetime, time, timezone, timedelta
+
+                tz_sh = timezone(timedelta(hours=8))
+                start_local = datetime.strptime(date_from, "%Y-%m-%d").astimezone(tz_sh)
+                start_utc = start_local.astimezone(timezone.utc)
+                clauses.append("created_at >= ?")
+                params.append(start_utc.strftime("%Y-%m-%dT%H:%M:%S"))
+            except (ValueError, TypeError):
+                pass
         if date_to:
-            clauses.append("created_at <= ?")
-            params.append(f"{date_to} 23:59:59")
+            try:
+                from datetime import datetime, time, timezone, timedelta
+
+                tz_sh = timezone(timedelta(hours=8))
+                end_local = datetime.combine(
+                    datetime.strptime(date_to, "%Y-%m-%d").date(), time(23, 59, 59)
+                ).astimezone(tz_sh)
+                end_utc = end_local.astimezone(timezone.utc)
+                clauses.append("created_at <= ?")
+                params.append(end_utc.strftime("%Y-%m-%dT%H:%M:%S"))
+            except (ValueError, TypeError):
+                pass
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._conn() as conn:
             rows = conn.execute(

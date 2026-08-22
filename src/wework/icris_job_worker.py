@@ -134,7 +134,10 @@ class IcrisJobWorker:
             capture.merge_ctx_messages(list(getattr(ctx, "messages", None) or []))
             msgs = capture.snapshot()
             self.store.mark_job_succeeded(
-                job_id, package_dir=package_dir, result_messages=msgs
+                job_id,
+                package_dir=package_dir,
+                result_messages=msgs,
+                esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
             )
             self.store.set_group_status(roomid, "HANDOFF")
             self.workflow.notify_job_result(

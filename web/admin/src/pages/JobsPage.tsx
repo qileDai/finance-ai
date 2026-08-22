@@ -2,18 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, statusBadge } from "../components/ui";
+import { StateBox } from "../components/ui";
 import {
   Button,
   Card,
   DatePicker,
+  Image,
   Input,
   Select,
   Space,
   Table,
   Tag,
   Tooltip,
-  message,
 } from "antd";
 import { SearchOutlined, ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
@@ -59,8 +59,8 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<JobRow[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
-  const [sortKey, setSortKey] = useState<"id" | "status" | "updated_at">("id");
-  const [sortAsc, setSortAsc] = useState(false);
+  const sortKey = "id" as const;
+  const sortAsc = false;
   // 搜索条件（实际触发查询的值）
   const [companyName, setCompanyName] = useState("");
   const [directorName, setDirectorName] = useState("");
@@ -106,14 +106,6 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     });
     return copy;
   }, [items, sortKey, sortAsc]);
-
-  function toggleSort(key: typeof sortKey) {
-    if (sortKey === key) setSortAsc(!sortAsc);
-    else {
-      setSortKey(key);
-      setSortAsc(key !== "id");
-    }
-  }
 
   function onSearch() {
     setCompanyName(companyInput.trim());
@@ -168,17 +160,70 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       render: (v: string) => v || "-",
     },
     {
-      title: "公司",
-      dataIndex: "company_name",
-      key: "company_name",
+      title: "公司中文名",
+      key: "company_name_cn",
+      width: 160,
+      render: (_: unknown, r: JobRow) => r.company_name_cn || r.company_name || "-",
+    },
+    {
+      title: "公司英文名",
+      dataIndex: "company_name_en",
+      key: "company_name_en",
+      width: 180,
       render: (v: string) => v || "-",
     },
     {
-      title: "roomid",
-      dataIndex: "roomid",
-      key: "roomid",
+      title: "姓名",
+      dataIndex: "director_name",
+      key: "director_name",
       width: 120,
-      render: (v: string) => <span className="mono">{v}</span>,
+      render: (v: string) => v || "-",
+    },
+    {
+      title: "证件类型",
+      dataIndex: "id_type",
+      key: "id_type",
+      width: 100,
+      render: (v: string) => v || "-",
+    },
+    {
+      title: "证件号码",
+      dataIndex: "id_number",
+      key: "id_number",
+      width: 160,
+      render: (v: string) => <span className="mono">{v || "-"}</span>,
+    },
+    {
+      title: "用户名",
+      dataIndex: "icris_username",
+      key: "icris_username",
+      width: 140,
+      render: (v: string) => <span className="mono">{v || "-"}</span>,
+    },
+    {
+      title: "密码",
+      dataIndex: "icris_password",
+      key: "icris_password",
+      width: 140,
+      render: (v: string) => <span className="mono">{v || "-"}</span>,
+    },
+    {
+      title: "核对截图",
+      key: "esubmit_screenshot",
+      width: 110,
+      render: (_: unknown, r: JobRow) =>
+        r.esubmit_screenshot_path ? (
+          <Image
+            src={api.jobScreenshotUrl(r.id, "esubmit")}
+            width={80}
+            height={50}
+            style={{ objectFit: "cover", cursor: "pointer" }}
+            onClick={(e) => e.stopPropagation()}
+            preview={{ mask: false }}
+          />
+        ) : (
+          "-"
+        ),
     },
     {
       title: "状态",
@@ -233,6 +278,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       title: "操作",
       key: "action",
       width: 100,
+      fixed: "right" as const,
       render: (_: unknown, r: JobRow) => (
         <Space
           onClick={(e) => e.stopPropagation()}
@@ -321,11 +367,9 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
           columns={columns}
           rowKey="id"
           size="small"
-          pagination={{ pageSize: 50, showSizeChanger: false }}
-          onRow={(r) => ({
-            onClick: () => nav(`/jobs/${r.id}`),
-            style: { cursor: "pointer" },
-          })}
+          scroll={{ x: "max-content", y: 500 }}
+          pagination={{ pageSize: 10, showSizeChanger: false }}
+          style={{ marginBottom: 20 }}
         />
       </StateBox>
     </>

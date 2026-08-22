@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { Image } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -168,8 +169,33 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                   <dd className="mono muted">{job.package_dir || "-"}</dd>
                 </div>
                 <div>
-                  <dt>截图</dt>
-                  <dd className="mono muted">{job.screenshot_path || "-"}</dd>
+                  <dt>核对截图</dt>
+                  <dd>
+                    {job.esubmit_screenshot_path ? (
+                      <Image
+                        src={api.jobScreenshotUrl(job.id, "esubmit")}
+                        width={100}
+                        height={100}
+                        style={{ objectFit: "cover" }}
+                      />
+                    ) : (
+                      "-"
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>失败截图</dt>
+                  <dd>
+                    {job.screenshot_path ? (
+                      <Image
+                        src={api.jobScreenshotUrl(job.id, "fail")}
+                        width={400}
+                        style={{ objectFit: "contain" }}
+                      />
+                    ) : (
+                      "-"
+                    )}
+                  </dd>
                 </div>
               </dl>
               {job.last_error ? (

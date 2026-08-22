@@ -57,7 +57,15 @@ export type JobRow = {
   allow_submit?: number | boolean;
   last_error?: string;
   screenshot_path?: string;
+  esubmit_screenshot_path?: string;
   company_name?: string;
+  company_name_cn?: string;
+  company_name_en?: string;
+  director_name?: string;
+  id_type?: string;
+  id_number?: string;
+  icris_username?: string;
+  icris_password?: string;
   source?: string;
   updated_at?: string;
   finished_at?: string;
@@ -211,6 +219,8 @@ export const api = {
   },
   job: (id: number) =>
     request<JobDetailResponse>(`/admin/api/jobs/${id}`),
+  jobScreenshotUrl: (id: number, type: "esubmit" | "fail" = "fail") =>
+    `/admin/api/jobs/${id}/screenshot?type=${type}`,
   cancelJob: (id: number) =>
     request<ApiOk<{ job: JobRow; message: string }>>(
       `/admin/api/jobs/${id}/cancel`,
