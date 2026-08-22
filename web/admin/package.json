@@ -9,6 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.2",
+    "antd": "^6.6.1",
+    "dayjs": "^1.11.23",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.6.2"

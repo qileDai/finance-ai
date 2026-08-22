@@ -59,11 +59,27 @@ def handle_admin_api(
             return _handle_session_detail(store, roomid)
         if method == "GET" and rel == "jobs":
             status = (query.get("status", [""])[0] or "").strip().lower()
+            keyword = (query.get("keyword", [""])[0] or "").strip()
+            date_from = (query.get("date_from", [""])[0] or "").strip()
+            date_to = (query.get("date_to", [""])[0] or "").strip()
+            company_name = (query.get("company_name", [""])[0] or "").strip()
+            director_name = (query.get("director_name", [""])[0] or "").strip()
+            id_number = (query.get("id_number", [""])[0] or "").strip()
             try:
                 limit = int(query.get("limit", ["50"])[0])
             except ValueError:
                 limit = 50
-            return _handle_jobs_list(store, status=status, limit=limit)
+            return _handle_jobs_list(
+                store,
+                status=status,
+                limit=limit,
+                keyword=keyword,
+                date_from=date_from,
+                date_to=date_to,
+                company_name=company_name,
+                director_name=director_name,
+                id_number=id_number,
+            )
         if method == "GET" and rel.startswith("jobs/"):
             mid = rel[len("jobs/") :]
             if "/" not in mid and mid.isdigit():
@@ -420,9 +436,27 @@ def _handle_session_detail(
 
 
 def _handle_jobs_list(
-    store: ExternalGroupStore, *, status: str, limit: int
+    store: ExternalGroupStore,
+    *,
+    status: str,
+    limit: int,
+    keyword: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    company_name: str = "",
+    director_name: str = "",
+    id_number: str = "",
 ) -> tuple[dict[str, Any], int]:
-    items = store.list_registration_jobs(limit=limit, status=status)
+    items = store.list_registration_jobs(
+        limit=limit,
+        status=status,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        company_name=company_name,
+        director_name=director_name,
+        id_number=id_number,
+    )
     # 列表不返回完整 payload，减小响应
     slim: list[dict[str, Any]] = []
     for it in items:

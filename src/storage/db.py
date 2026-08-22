@@ -1485,28 +1485,47 @@ class ExternalGroupStore:
         *,
         limit: int = 50,
         status: str = "",
+        keyword: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        company_name: str = "",
+        director_name: str = "",
+        id_number: str = "",
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 50), 200))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if keyword:
+            kw = f"%{keyword}%"
+            clauses.append("(company_name LIKE ? OR payload_json LIKE ?)")
+            params.extend([kw, kw])
+        if company_name:
+            kw = f"%{company_name}%"
+            clauses.append("(company_name LIKE ? OR payload_json LIKE ?)")
+            params.extend([kw, kw])
+        if director_name:
+            kw = f"%{director_name}%"
+            clauses.append("payload_json LIKE ?")
+            params.append(kw)
+        if id_number:
+            kw = f"%{id_number}%"
+            clauses.append("payload_json LIKE ?")
+            params.append(kw)
+        if date_from:
+            clauses.append("created_at >= ?")
+            params.append(f"{date_from} 00:00:00")
+        if date_to:
+            clauses.append("created_at <= ?")
+            params.append(f"{date_to} 23:59:59")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._conn() as conn:
-            if status:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM registration_jobs
-                    WHERE status = ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                    """,
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM registration_jobs
-                    ORDER BY id DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM registration_jobs {where} ORDER BY id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def registration_job_stats(self, *, hours: float | None = None) -> dict[str, Any]:

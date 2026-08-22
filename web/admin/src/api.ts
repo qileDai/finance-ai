@@ -188,9 +188,24 @@ export const api = {
     request<SessionsResponse>(`/admin/api/sessions?channel=${encodeURIComponent(channel)}`),
   session: (roomid: string) =>
     request<SessionDetailResponse>(`/admin/api/sessions/${encodeURIComponent(roomid)}`),
-  jobs: (status = "", limit = 50) => {
+  jobs: (
+    status = "",
+    limit = 50,
+    keyword = "",
+    dateFrom = "",
+    dateTo = "",
+    companyName = "",
+    directorName = "",
+    idNumber = "",
+  ) => {
     const q = new URLSearchParams();
     if (status) q.set("status", status);
+    if (keyword) q.set("keyword", keyword);
+    if (dateFrom) q.set("date_from", dateFrom);
+    if (dateTo) q.set("date_to", dateTo);
+    if (companyName) q.set("company_name", companyName);
+    if (directorName) q.set("director_name", directorName);
+    if (idNumber) q.set("id_number", idNumber);
     q.set("limit", String(limit));
     return request<JobsResponse>(`/admin/api/jobs?${q}`);
   },

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { ConfigProvider } from "antd";
+import zhCN from "antd/locale/zh_CN";
 import { AuthProvider, RequireAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { JobsPage } from "./pages/JobsPage";
@@ -29,9 +31,18 @@ export default function App() {
   }, [toast]);
 
   return (
-    <BrowserRouter basename="/admin">
-      <AuthProvider>
-        <Routes>
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        token: {
+          colorPrimary: "#1677ff",
+          borderRadius: 6,
+        },
+      }}
+    >
+      <BrowserRouter basename="/admin">
+        <AuthProvider>
+          <Routes>
           <Route path="login" element={<LoginPage />} />
           <Route
             element={
@@ -83,7 +94,8 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
-      </AuthProvider>
-    </BrowserRouter>
+        </AuthProvider>
+      </BrowserRouter>
+    </ConfigProvider>
   );
 }

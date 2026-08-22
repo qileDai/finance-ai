@@ -277,6 +277,21 @@ select {
   margin-bottom: 12px;
 }
 
+.search-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.search-bar .search-input {
+  flex: 1;
+  min-width: 200px;
+}
+.search-bar .date-input {
+  width: 140px;
+}
+
 .chip {
   border: 1px solid var(--line);
   background: #fff;
