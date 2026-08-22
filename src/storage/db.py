@@ -179,6 +179,7 @@ class ExternalGroupStore:
                     allow_submit INTEGER NOT NULL DEFAULT 0,
                     screenshot_path TEXT NOT NULL DEFAULT '',
                     esubmit_screenshot_path TEXT NOT NULL DEFAULT '',
+                    success_screenshot_path TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
                     company_name TEXT NOT NULL DEFAULT '',
@@ -255,6 +256,10 @@ class ExternalGroupStore:
         if "esubmit_screenshot_path" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN esubmit_screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "success_screenshot_path" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN success_screenshot_path TEXT NOT NULL DEFAULT ''"
             )
         if "payload_json" not in cols:
             conn.execute(
@@ -1301,6 +1306,7 @@ class ExternalGroupStore:
         package_dir: str = "",
         result_messages: list[Any] | None = None,
         esubmit_screenshot_path: str = "",
+        success_screenshot_path: str = "",
     ) -> None:
         import json
 
@@ -1319,6 +1325,7 @@ class ExternalGroupStore:
                     package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
                     result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
                     esubmit_screenshot_path = CASE WHEN ? != '' THEN ? ELSE esubmit_screenshot_path END,
+                    success_screenshot_path = CASE WHEN ? != '' THEN ? ELSE success_screenshot_path END,
                     finished_at = ?,
                     updated_at = ?,
                     last_error = ''
@@ -1327,6 +1334,7 @@ class ExternalGroupStore:
                 (
                     package_dir, package_dir, msgs, msgs,
                     esubmit_screenshot_path, esubmit_screenshot_path,
+                    success_screenshot_path, success_screenshot_path,
                     now, now, job_id
                 ),
             )

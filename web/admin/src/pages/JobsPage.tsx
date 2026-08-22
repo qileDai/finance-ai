@@ -226,6 +226,24 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
         ),
     },
     {
+      title: "成功截图",
+      key: "success_screenshot",
+      width: 110,
+      render: (_: unknown, r: JobRow) =>
+        r.success_screenshot_path ? (
+          <Image
+            src={api.jobScreenshotUrl(r.id, "success")}
+            width={80}
+            height={50}
+            style={{ objectFit: "cover", cursor: "pointer" }}
+            onClick={(e) => e.stopPropagation()}
+            preview={{ mask: false }}
+          />
+        ) : (
+          "-"
+        ),
+    },
+    {
       title: "状态",
       dataIndex: "status",
       key: "status",

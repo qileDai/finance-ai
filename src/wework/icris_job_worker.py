@@ -138,6 +138,7 @@ class IcrisJobWorker:
                 package_dir=package_dir,
                 result_messages=msgs,
                 esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
+                success_screenshot_path=getattr(ctx, "success_screenshot_path", "") or "",
             )
             self.store.set_group_status(roomid, "HANDOFF")
             self.workflow.notify_job_result(

@@ -184,6 +184,21 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                   </dd>
                 </div>
                 <div>
+                  <dt>成功截图</dt>
+                  <dd>
+                    {job.success_screenshot_path ? (
+                      <Image
+                        src={api.jobScreenshotUrl(job.id, "success")}
+                        width={100}
+                        height={100}
+                        style={{ objectFit: "cover" }}
+                      />
+                    ) : (
+                      "-"
+                    )}
+                  </dd>
+                </div>
+                <div>
                   <dt>失败截图</dt>
                   <dd>
                     {job.screenshot_path ? (

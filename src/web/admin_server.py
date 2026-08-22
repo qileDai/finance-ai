@@ -147,7 +147,7 @@ class AdminWebServer:
                 """读取 job 截图并返回 image/png。
 
                 rel: jobs/<id>/screenshot
-                query: ?type=esubmit|fail（默认 fail）
+                query: ?type=esubmit|success|fail（默认 fail）
                 """
                 import re
                 from pathlib import Path
@@ -169,6 +169,8 @@ class AdminWebServer:
 
                 if shot_type == "esubmit":
                     file_path = str(job.get("esubmit_screenshot_path") or "").strip()
+                elif shot_type == "success":
+                    file_path = str(job.get("success_screenshot_path") or "").strip()
                 else:
                     file_path = str(job.get("screenshot_path") or "").strip()
 

@@ -249,6 +249,10 @@ class IcrisRegistrationBot:
         self._locale: str | None = None
         self._user_info_filled: bool = False
         self._identity_proof_filled: bool = False
+        # s03a 截图路径（进入 s03a 时自动截图存档）
+        self.esubmit_screenshot_path: str = ""
+        # s05 成功页截图路径（提交成功后自动截图存档）
+        self.success_screenshot_path: str = ""
 
     def _reset_flow_flags(self) -> None:
         """关页重开前重置步骤内存标志，避免假成功。"""
@@ -258,6 +262,70 @@ class IcrisRegistrationBot:
 
     async def _log_page(self, page: "Page", label: str) -> None:
         logger.info("[%s] URL: %s", label, page.url)
+
+    async def _save_esubmit_screenshot(self, page: "Page") -> None:
+        """进入 s03a 后等待页面渲染完成再截图整个页面存档。"""
+        try:
+            from config.settings import PROJECT_ROOT
+            from datetime import datetime, timezone
+
+            # 1) 等待全页 loading 消失
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+            # 2) 等待条款文案与 checkbox 渲染就绪（Vue 挂载完成）
+            try:
+                await self._wait_step_ready(
+                    page,
+                    self._esubmit_terms_is_ready,
+                    timeout_ms=_STEP_READY_MS,
+                    label="s03a 截图前",
+                )
+            except Exception:
+                pass
+            # 3) 等待网络空闲，确保图片/异步资源加载完
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            # 4) DOM 稳定后再等一小段
+            await page.wait_for_timeout(800)
+
+            shot_dir = PROJECT_ROOT / "data" / "icris_esubmit"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            shot_file = shot_dir / f"job_esubmit_{stamp}.png"
+            if not page.is_closed():
+                await page.screenshot(path=str(shot_file), full_page=True)
+                self.esubmit_screenshot_path = str(shot_file)
+                logger.info("s03a 截图已保存: %s", self.esubmit_screenshot_path)
+        except Exception as shot_err:
+            logger.warning("保存 s03a 截图失败: %s", shot_err)
+
+    async def _save_success_screenshot(self, page: "Page") -> None:
+        """进入 s05 后等待页面加载完成再截图整页存档。"""
+        try:
+            from config.settings import PROJECT_ROOT
+            from datetime import datetime, timezone
+
+            # 1) 等全页 loading 消失
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+            # 2) 等 networkidle（图片/异步资源加载完）
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            # 3) DOM 稳定后再等一小段
+            await page.wait_for_timeout(1000)
+
+            shot_dir = PROJECT_ROOT / "data" / "icris_success"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            shot_file = shot_dir / f"job_success_{stamp}.png"
+            if not page.is_closed():
+                await page.screenshot(path=str(shot_file), full_page=True)
+                self.success_screenshot_path = str(shot_file)
+                logger.info("s05 成功截图已保存: %s", self.success_screenshot_path)
+        except Exception as shot_err:
+            logger.warning("保存 s05 成功截图失败: %s", shot_err)
 
     async def _is_spinning(self, page: "Page") -> bool:
         try:
@@ -3951,6 +4019,34 @@ class IcrisRegistrationBot:
             )
         )
 
+    def _is_success_page_url(self, url: str) -> bool:
+        return bool(re.search(r"registration/s05", (url or "").lower()))
+
+    async def _is_success_step(self, page: "Page") -> bool:
+        """s05：提交成功确认页。"""
+        if self._is_success_page_url(page.url):
+            return True
+        # URL 未变化时通过页面文案判断（中/繁/英）
+        try:
+            result = await page.evaluate(
+                """() => {
+                    const t = (document.body && document.body.innerText) || '';
+                    const has = /遞交成功|递交成功|提交成功|遞交完成|递交完成|已成功提交|registration.*complete|successfully submitted/i.test(t);
+                    const hasRef = /參考編號|参考编号|Reference Number|Submission Reference/i.test(t);
+                    const notTerms = !/電子提交服務的條款|电子提交服务的条款/.test(t);
+                    return { ok: (has || hasRef) && notTerms, sample: t.slice(0, 200) };
+                }"""
+            )
+            ok = bool((result or {}).get("ok"))
+            if ok and not self.success_screenshot_path:
+                logger.info(
+                    "s05 文案命中（非 URL）sample=%s",
+                    str((result or {}).get("sample", ""))[:120],
+                )
+            return ok
+        except Exception:
+            return False
+
     async def _esubmit_page_is_traditional(self, page: "Page") -> bool:
         """s03a 是否为繁体界面（用于优先匹配文案）。"""
         try:
@@ -4283,7 +4379,16 @@ class IcrisRegistrationBot:
             logger.error("s03a 提交前校验失败：勾选状态丢失")
             return False
 
-        submit_selectors = [
+        # s03a 的推进按钮是"继续"（不是"提交"）：优先匹配"继续/繼續/下一步"，fallback 到"提交/Submit"
+        advance_selectors = [
+            "button:has-text('继续')",
+            "button:has-text('繼續')",
+            "button:has-text('下一步')",
+            "button:has-text('Next')",
+            "input[type='submit'][value*='继续']",
+            "input[type='submit'][value*='繼續']",
+            "input[type='button'][value*='继续']",
+            "input[type='button'][value*='繼續']",
             "button:has-text('提交')",
             "button:has-text('提 交')",
             "input[type='submit'][value*='提交']",
@@ -4293,28 +4398,18 @@ class IcrisRegistrationBot:
             "form button[type='submit']",
             "form input[type='submit']",
         ]
-        for sel in submit_selectors:
+        for sel in advance_selectors:
             btn = page.locator(sel).first
             try:
                 if await btn.count() == 0 or not await btn.is_visible():
                     continue
-                tag = await btn.evaluate("el => el.tagName")
-                txt = (
-                    (await btn.inner_text()).strip()
-                    if tag == "BUTTON"
-                    else str(await btn.get_attribute("value") or "")
-                )
-                if re.search(r"继续|繼續|下一步|Next", txt, re.I) and not re.search(
-                    r"提交|Submit", txt, re.I
-                ):
-                    continue
-                logger.warning("s03a 即将点击提交: %s", sel)
+                logger.warning("s03a 即将点击继续/提交: %s", sel)
                 await btn.click(timeout=15000)
                 await self._wait_spin_clear(page, timeout_ms=45000)
-                await self._log_page(page, "s03a 提交后")
+                await self._log_page(page, "s03a 继续后")
                 return True
             except Exception:
-                logger.debug("s03a 提交按钮点击失败 sel=%s", sel, exc_info=True)
+                logger.debug("s03a 按钮 点击失败 sel=%s", sel, exc_info=True)
 
         try:
             clicked = await page.evaluate(
@@ -4324,22 +4419,23 @@ class IcrisRegistrationBot:
                     ));
                     for (const el of nodes) {
                         const t = ((el.innerText || el.value || '') + '').trim();
-                        if (!/提交|Submit/i.test(t)) continue;
-                        if (/继续|繼續|下一步/i.test(t) && !/提交/i.test(t)) continue;
-                        el.click();
-                        return true;
+                        if (/继续|繼續|下一步|Next/i.test(t)
+                            || /提交|Submit/i.test(t)) {
+                            el.click();
+                            return true;
+                        }
                     }
                     return false;
                 }"""
             )
             if clicked:
                 await self._wait_spin_clear(page, timeout_ms=45000)
-                logger.warning("s03a 已通过 JS 点击提交")
+                logger.warning("s03a 已通过 JS 点击继续/提交")
                 return True
         except Exception:
-            logger.debug("s03a JS 提交失败", exc_info=True)
+            logger.debug("s03a JS 点击失败", exc_info=True)
 
-        logger.warning("s03a 已勾选但未找到提交按钮")
+        logger.warning("s03a 已勾选但未找到继续/提交按钮")
         return False
 
     def _normalize_icris_id_type(self, raw: str, id_number: str = "") -> str:
@@ -4581,6 +4677,50 @@ class IcrisRegistrationBot:
 
         logger.warning("未找到可上传的文件控件")
         return 0
+
+    async def _wait_identity_upload_complete(
+        self, page: "Page", timeout_ms: int = 30000
+    ) -> bool:
+        """等待 s04 身份证明文件上传真正完成。
+
+        antd Upload 组件上传中会出现 `.ant-upload-list-item-uploading`，
+        完成后变为 `.ant-upload-list-item-done`。此处轮询直到无 uploading 项
+        且至少有一个 done 项（或超时回退到 spin 清除）。
+        """
+        if page.is_closed():
+            return False
+        deadline = time.time() + max(1.0, timeout_ms / 1000)
+        saw_list = False
+        while time.time() < deadline:
+            if page.is_closed():
+                return False
+            try:
+                uploading = await page.locator(
+                    ".ant-upload-list-item-uploading"
+                ).count()
+                done = await page.locator(
+                    ".ant-upload-list-item-done, .ant-upload-list-item"
+                ).count()
+                if done > 0:
+                    saw_list = True
+                if uploading == 0 and saw_list:
+                    # 上传列表存在且无上传中项 → 完成
+                    return True
+                if uploading == 0 and not await self._is_spinning(page) and saw_list:
+                    return True
+            except Exception:
+                if not await self._is_spinning(page):
+                    return True
+            await page.wait_for_timeout(800)
+        # 超时回退：只要 spin 清了就算完成
+        try:
+            await self._wait_spin_clear(page, timeout_ms=5000)
+        except Exception:
+            pass
+        logger.warning(
+            "身份证明上传等待超时 %dms（saw_list=%s）", timeout_ms, saw_list
+        )
+        return not await self._is_spinning(page)
 
     async def _click_radio_by_text(self, page: "Page", text_pattern: str) -> bool:
         """按可见文案点击 radio / ant-radio-wrapper"""
@@ -4867,6 +5007,8 @@ class IcrisRegistrationBot:
                 )
                 if n:
                     filled += n
+                    # 等待上传真正完成（antd upload list 无 uploading 项）再点继续
+                    await self._wait_identity_upload_complete(page, timeout_ms=30000)
                 else:
                     logger.warning("身份证明文件未上传成功")
 
@@ -5250,6 +5392,7 @@ class IcrisRegistrationBot:
                 await self._advance_from_identity_to_esubmit(page)
         if await self._is_esubmit_terms_step(page):
             logger.info("=== s03a 电子提交服务条款 ===")
+            await self._save_esubmit_screenshot(page)
             await self._accept_esubmit_terms(
                 page, submit=bool(self.allow_submit)
             )
@@ -5260,8 +5403,14 @@ class IcrisRegistrationBot:
             if self._is_home_or_portal(page.url):
                 logger.error("步骤 %d 检测到跳转首页，停止", step + 5)
                 break
+            # s05 成功页：直接退出循环，交由末尾截图逻辑处理（避免误点继续）
+            if await self._is_success_step(page):
+                logger.info("步骤 %d 检测到 s05 成功页，退出步骤循环", step + 5)
+                break
             if await self._is_esubmit_terms_step(page):
                 logger.info("=== s03a 电子提交服务条款（步骤循环）===")
+                if not self.esubmit_screenshot_path:
+                    await self._save_esubmit_screenshot(page)
                 await self._accept_esubmit_terms(
                     page, submit=bool(self.allow_submit)
                 )
@@ -5305,6 +5454,8 @@ class IcrisRegistrationBot:
         # 末尾再处理一次 s03a
         if await self._is_esubmit_terms_step(page):
             logger.info("=== s03a 电子提交服务条款（流程末尾）===")
+            if not self.esubmit_screenshot_path:
+                await self._save_esubmit_screenshot(page)
             await self._accept_esubmit_terms(
                 page, submit=bool(self.allow_submit)
             )
@@ -5326,6 +5477,11 @@ class IcrisRegistrationBot:
                         self.dry_run,
                         settings.icris_allow_submit,
                     )
+
+        # s05 成功页：等待页面加载完成并截图存档（不依赖 allow_submit）
+        if await self._is_success_step(page):
+            logger.info("=== s05 提交成功确认页 ===")
+            await self._save_success_screenshot(page)
 
         if self.allow_submit:
             logger.info("注册表单填写完成（已按开关尝试提交）")
