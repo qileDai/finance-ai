@@ -1369,6 +1369,39 @@ class ExternalGroupStore:
                 (path, now, job_id),
             )
 
+    def update_job_payload_account(
+        self, job_id: int, username: str, password: str
+    ) -> None:
+        """重跑时更新 payload_json 里的 icris_account，供前端展示新用户名。"""
+        import json as _json
+
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM registration_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return
+            raw = str(row["payload_json"] or "")
+            try:
+                data = _json.loads(raw) if raw else {}
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data.setdefault("icris_account", {})
+            if not isinstance(data["icris_account"], dict):
+                data["icris_account"] = {}
+            data["icris_account"]["username"] = username
+            data["icris_account"]["password"] = password
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET payload_json=?, updated_at=?
+                   WHERE id=?""",
+                (_json.dumps(data, ensure_ascii=False), now, job_id),
+            )
+
     def approve_job_submit(self, job_id: int) -> dict[str, Any] | None:
         """审核通过：设 review_status=approved（bot 轮询到后点继续）。"""
         now = _utc_now()

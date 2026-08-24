@@ -197,6 +197,17 @@ class IcrisJobWorker:
                         "ICRIS job 审核等待中异常退出 id=%s，标记 failed 不重跑",
                         job_id,
                     )
+            # 取消的任务：保持 cancelled，不覆盖为 failed
+            cur_status = self.store.get_job_status(job_id)
+            if cur_status == "cancelled":
+                logger.warning(
+                    "ICRIS job 已被取消 id=%s，保持 cancelled 不标记 failed",
+                    job_id,
+                )
+                stop_flush.set()
+                flush_thread.join(timeout=2.0)
+                capture.uninstall()
+                return
             ctx_fail = getattr(e, "ctx", None)
             if ctx_fail is not None:
                 capture.merge_ctx_messages(

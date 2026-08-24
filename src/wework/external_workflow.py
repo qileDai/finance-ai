@@ -74,6 +74,36 @@ class ExternalGroupWorkflow:
         )
         return ctx, package_dir
 
+    def _regen_credentials_for_retry(
+        self, job: dict, company_data: dict[str, Any]
+    ) -> None:
+        """重跑时重新生成 username/password 并更新 company_data + DB payload_json。
+
+        重跑（attempts>1）时前一次的用户名已在 ICRIS 被占用，
+        末尾加 2 位随机字符生成新用户名，同步写入 DB 供前端展示。
+        """
+        person_en = str(
+            (company_data.get("applicant") or {}).get("name_en") or ""
+        )
+        id_number = str(
+            (company_data.get("identity_proof") or {}).get("id_number") or ""
+        )
+        from src.materials.aggregator import _generate_icris_credentials
+
+        new_user, new_pwd = _generate_icris_credentials(
+            person_en, id_number, retry=True
+        )
+        company_data.setdefault("icris_account", {})["username"] = new_user
+        company_data["icris_account"]["password"] = new_pwd
+        self.store.update_job_payload_account(
+            int(job.get("id") or 0), new_user, new_pwd
+        )
+        logger.info(
+            "重跑(attempts=%s) 重新生成用户名: %s",
+            job.get("attempts"),
+            new_user,
+        )
+
     def run_icris_job(
         self,
         job: dict[str, Any],
@@ -88,6 +118,11 @@ class ExternalGroupWorkflow:
 
         snapshot = _company_data_from_job(job)
         package_dir_str = str(job.get("package_dir") or "").strip()
+        is_retry = int(job.get("attempts") or 0) > 1
+
+        # 重跑：重新生成 username/password（前一次已在 ICRIS 被占用）
+        if snapshot is not None and is_retry:
+            self._regen_credentials_for_retry(job, snapshot)
 
         if snapshot is not None:
             if package_dir_str and Path(package_dir_str).is_dir():
@@ -107,6 +142,8 @@ class ExternalGroupWorkflow:
         elif package_dir_str and Path(package_dir_str).is_dir():
             materials = self.store.get_materials(roomid)
             company_data = aggregate_company_data(materials)
+            if is_retry:
+                self._regen_credentials_for_retry(job, company_data)
             ctx = WorkflowContext(
                 chat_id=roomid,
                 customer_id=customer_id,
@@ -117,6 +154,8 @@ class ExternalGroupWorkflow:
         else:
             ctx, package_dir = self.prepare_package(roomid, customer_id=customer_id)
             package_dir_str = str(package_dir)
+            if is_retry:
+                self._regen_credentials_for_retry(job, ctx.company_data or {})
 
         self.store.upsert_group(
             roomid,

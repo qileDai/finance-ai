@@ -82,12 +82,15 @@ def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
     return paths
 
 
-def _generate_icris_credentials(person_en: str = "", id_number: str = "") -> tuple[str, str]:
+def _generate_icris_credentials(
+    person_en: str = "", id_number: str = "", *, retry: bool = False
+) -> tuple[str, str]:
     """生成 ICRIS 账号凭证。
 
-    用户名 = 姓名拼音首字母 + 证件号码后5位 + yt
-    密码 = 用户名 + @（多加一个 @ 字符）
-    缺字段时回退到旧规则（前缀+月日+随机）。
+    用户名 = 姓名拼音首字母（小写） + 证件号码后5位 + yt
+    密码 = 用户名 + @（icris_password_suffix 配置，默认 @）
+    retry=True（重跑）时用户名末尾加 2 位随机字符（小写字母+数字），
+    因前一次的用户名已在 ICRIS 被占用。
     """
     pw_suffix = getattr(settings, "icris_password_suffix", "@") or "@"
 
@@ -101,18 +104,12 @@ def _generate_icris_credentials(person_en: str = "", id_number: str = "") -> tup
     # 证件号码后5位（仅保留数字与字母）
     id_tail = re.sub(r"[^A-Za-z0-9]", "", id_number or "")[-5:]
 
-    if initials and id_tail:
-        username = f"{initials}{id_tail}yt"
-    else:
-        # 缺字段回退
-        prefix = getattr(settings, "icris_username_prefix", "Yingtai")
-        rand_len = int(getattr(settings, "icris_username_random_length", 0) or 0)
-        if rand_len <= 0:
-            rand_len = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
-        md = datetime.now().strftime("%m%d")
-        alphabet = string.ascii_lowercase + string.digits
-        rand = "".join(secrets.choice(alphabet) for _ in range(rand_len))
-        username = f"{prefix}{md}{rand}"
+    username = f"{initials}{id_tail}yt"
+    if retry:
+        rand2 = "".join(
+            secrets.choice(string.ascii_lowercase + string.digits) for _ in range(2)
+        )
+        username = f"{username}{rand2}"
     password = f"{username}{pw_suffix}"
     return username, password
 
