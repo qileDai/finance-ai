@@ -1,6 +1,17 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
+import { Menu } from "antd";
+import {
+  AppstoreOutlined,
+  BarChartOutlined,
+  FormOutlined,
+  IdcardOutlined,
+  MailOutlined,
+  ScheduleOutlined,
+  SendOutlined,
+  TeamOutlined,
+} from "@ant-design/icons";
 
 const TITLES: Record<string, string> = {
   "/": "概览",
@@ -9,8 +20,40 @@ const TITLES: Record<string, string> = {
   "/id-extract": "证件识别",
   "/wework-send": "外部群发消息",
   "/jobs": "注册任务",
+  "/email-config": "邮箱配置",
   "/quality": "回答质量",
 };
+
+type NavGroup = {
+  label: string;
+  items: { to: string; label: string; icon: React.ReactNode }[];
+};
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "运营",
+    items: [
+      { to: "/", label: "概览", icon: <AppstoreOutlined /> },
+      { to: "/sessions", label: "会话材料", icon: <TeamOutlined /> },
+      { to: "/jobs", label: "注册任务", icon: <ScheduleOutlined /> },
+      { to: "/quality", label: "回答质量", icon: <BarChartOutlined /> },
+    ],
+  },
+  {
+    label: "工具",
+    items: [
+      { to: "/id-extract", label: "证件识别", icon: <IdcardOutlined /> },
+      { to: "/register", label: "快速注册", icon: <FormOutlined /> },
+      { to: "/wework-send", label: "外部群发消息", icon: <SendOutlined /> },
+    ],
+  },
+  {
+    label: "系统",
+    items: [
+      { to: "/email-config", label: "邮箱配置", icon: <MailOutlined /> },
+    ],
+  },
+];
 
 type Props = {
   onRefresh: () => void;
@@ -51,15 +94,23 @@ export function Layout({ onRefresh, toast }: Props) {
           </div>
         </div>
         <nav className="nav">
-          <NavLink to="/" end>
-            概览
-          </NavLink>
-          <NavLink to="/sessions">会话材料</NavLink>
-          <NavLink to="/id-extract">证件识别</NavLink>
-          <NavLink to="/register">快速注册</NavLink>
-          <NavLink to="/wework-send">外部群发消息</NavLink>
-          <NavLink to="/jobs">注册任务</NavLink>
-          <NavLink to="/quality">回答质量</NavLink>
+          <Menu
+            mode="inline"
+            selectedKeys={[base]}
+            items={NAV_GROUPS.map((g) => ({
+              key: g.label,
+              label: g.label,
+              type: "group" as const,
+              children: g.items.map((it) => ({
+                key: it.to,
+                icon: it.icon,
+                label: it.label,
+              })),
+            }))}
+            onClick={({ key }) => nav(key)}
+            style={{ border: "none", background: "transparent", fontSize: 13 }}
+            theme="dark"
+          />
         </nav>
       </aside>
       <div className="main">

@@ -114,6 +114,19 @@ export type LowRun = {
 
 export type RunnerFile = { name: string; data_url: string };
 
+export type EmailAccount = {
+  id: number;
+  email_address: string;
+  imap_host: string;
+  imap_port: number;
+  username: string;
+  password: string;
+  label?: string;
+  enabled?: number | boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type WeworkSendModes = {
   configured: boolean;
   kf_configured: boolean;
@@ -242,6 +255,25 @@ export const api = {
       `/admin/api/jobs/${id}/reject`,
       { method: "POST" },
     ),
+  emailAccounts: {
+    list: () =>
+      request<ApiOk<{ items: EmailAccount[] }>>(`/admin/api/email-accounts`),
+    upsert: (data: Omit<EmailAccount, "id" | "created_at" | "updated_at">) =>
+      request<ApiOk<{ account: EmailAccount; message: string }>>(
+        `/admin/api/email-accounts`,
+        { method: "POST", body: JSON.stringify(data) },
+      ),
+    remove: (id: number) =>
+      request<ApiOk<{ message: string }>>(
+        `/admin/api/email-accounts/${id}`,
+        { method: "DELETE" },
+      ),
+    test: (id: number) =>
+      request<ApiOk<{ message: string }>>(
+        `/admin/api/email-accounts/${id}/test`,
+        { method: "POST" },
+      ),
+  },
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
   registerRunner: {

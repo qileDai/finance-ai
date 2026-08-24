@@ -26,6 +26,7 @@ class IcrisJobWorker:
     alive: bool = False
     last_job_id: int | None = None
     last_error: str = ""
+    _activation_worker: Any = None
 
     def start(self, *, blocking: bool = False) -> None:
         if not settings.icris_worker_enabled:
@@ -38,6 +39,11 @@ class IcrisJobWorker:
         recovered = self.store.reset_stale_running_jobs(older_than_minutes=0)
         if recovered:
             logger.warning("ICRIS Worker 回收 stale running 任务: %d", recovered)
+
+        # 启动激活检查 worker（每小时检查待激活任务的邮箱）
+        from src.wework.icris_activation_worker import IcrisActivationWorker
+        self._activation_worker = IcrisActivationWorker(self.store)
+        self._activation_worker.start()
 
         self._stop.clear()
 
@@ -73,6 +79,8 @@ class IcrisJobWorker:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._activation_worker:
+            self._activation_worker.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         self.alive = False
@@ -148,6 +156,8 @@ class IcrisJobWorker:
                     esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
                     success_screenshot_path=getattr(ctx, "success_screenshot_path", "") or "",
                 )
+                # 标记待激活：激活 worker 会每小时检查邮箱
+                self.store.mark_job_activation_pending(job_id)
                 self.store.set_group_status(roomid, "HANDOFF")
                 self.workflow.notify_job_result(
                     job, ok=True, package_dir=package_dir

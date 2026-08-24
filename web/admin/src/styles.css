@@ -110,27 +110,43 @@ select {
 }
 
 .nav {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex: 1;
+  overflow-y: auto;
 }
 
-.nav a {
+.nav .ant-menu {
+  background: transparent;
   color: var(--sidebar-ink);
-  text-decoration: none;
-  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.nav .ant-menu-inline .ant-menu-item {
+  color: var(--sidebar-ink);
+  margin: 2px 0;
   border-radius: var(--radius);
-  font-weight: 500;
 }
 
-.nav a:hover {
-  background: rgba(255, 255, 255, 0.06);
-  text-decoration: none;
+.nav .ant-menu-inline .ant-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #fff !important;
 }
 
-.nav a.active {
-  background: rgba(15, 138, 106, 0.28);
-  color: #fff;
+.nav .ant-menu-inline .ant-menu-item-selected {
+  background: rgba(15, 138, 106, 0.32) !important;
+  color: #fff !important;
+}
+
+.nav .ant-menu-item-group-title {
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 16px 4px;
+}
+
+.nav .ant-menu-inline .ant-menu-item .anticon {
+  font-size: 14px;
 }
 
 .main {

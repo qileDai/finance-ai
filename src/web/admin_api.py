@@ -105,6 +105,21 @@ def handle_admin_api(
             if job_id is None:
                 return _err("invalid job id", 400)
             return _handle_job_reject(store, job_id)
+        # 邮箱账号配置
+        if method == "GET" and rel == "email-accounts":
+            return _ok(items=store.list_email_accounts())
+        if method == "POST" and rel == "email-accounts":
+            return _handle_email_account_upsert(store, body or {})
+        if method == "POST" and rel.startswith("email-accounts/") and rel.endswith("/test"):
+            aid = _parse_account_id(rel, suffix="/test")
+            if aid is None:
+                return _err("invalid account id", 400)
+            return _handle_email_account_test(store, aid)
+        if method == "DELETE" and rel.startswith("email-accounts/"):
+            aid = _parse_account_id(rel, suffix="")
+            if aid is None:
+                return _err("invalid account id", 400)
+            return _handle_email_account_delete(store, aid)
         if method == "GET" and rel == "quality":
             try:
                 hours = float(query.get("hours", ["24"])[0])
@@ -351,6 +366,14 @@ def _handle_id_translate(body: dict | None) -> tuple[dict[str, Any], int]:
 
 def _parse_job_id(rel: str, *, suffix: str) -> int | None:
     mid = rel[len("jobs/") : -len(suffix)]
+    try:
+        return int(mid)
+    except ValueError:
+        return None
+
+
+def _parse_account_id(rel: str, *, suffix: str) -> int | None:
+    mid = rel[len("email-accounts/") : -len(suffix)] if suffix else rel[len("email-accounts/") :]
     try:
         return int(mid)
     except ValueError:
@@ -808,6 +831,59 @@ def _handle_job_reject(
             409,
         )
     return _ok(job=job, message=f"rejected #{job_id}")
+
+
+def _handle_email_account_upsert(
+    store: ExternalGroupStore, body: dict[str, Any]
+) -> tuple[dict[str, Any], int]:
+    email = str(body.get("email_address") or "").strip()
+    imap_host = str(body.get("imap_host") or "").strip()
+    imap_port = int(body.get("imap_port") or 993)
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "").strip()
+    label = str(body.get("label") or "").strip()
+    if not email or not imap_host or not username or not password:
+        return _err("email_address, imap_host, username, password 必填", 400)
+    account = store.upsert_email_account(
+        email, imap_host, imap_port, username, password, label
+    )
+    return _ok(account=account, message="saved")
+
+
+def _handle_email_account_delete(
+    store: ExternalGroupStore, account_id: int
+) -> tuple[dict[str, Any], int]:
+    ok = store.delete_email_account(account_id)
+    if not ok:
+        return _err("account not found", 404)
+    return _ok(message=f"deleted #{account_id}")
+
+
+def _handle_email_account_test(
+    store: ExternalGroupStore, account_id: int
+) -> tuple[dict[str, Any], int]:
+    accounts = store.list_email_accounts()
+    account = next((a for a in accounts if a["id"] == account_id), None)
+    if not account:
+        return _err("account not found", 404)
+    try:
+        import imaplib
+
+        mail = imaplib.IMAP4_SSL(
+            str(account["imap_host"]), int(account["imap_port"])
+        )
+        try:
+            mail.login(str(account["username"]), str(account["password"]))
+            mail.select("INBOX")
+            typ, _ = mail.search(None, "ALL")
+            ok = typ == "OK"
+        finally:
+            mail.logout()
+        if ok:
+            return _ok(message="连接成功")
+        return _err("登录失败", 400)
+    except Exception as e:
+        return _err(f"连接失败: {e}", 400)
 
 
 def _handle_quality(

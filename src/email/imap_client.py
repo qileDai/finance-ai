@@ -7,6 +7,7 @@ import imaplib
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from email.header import decode_header
 
 from config.settings import settings
@@ -113,3 +114,78 @@ class EmailClient:
             return account
         finally:
             mail.logout()
+
+    def fetch_activation_link(
+        self, account: dict, since_date: datetime | None = None
+    ) -> str | None:
+        """登录指定 IMAP 邮箱，搜索 ICRIS 确认邮件，提取激活链接。
+
+        account: {email_address, imap_host, imap_port, username, password}
+        since_date: 只搜索此日期之后的邮件（默认 7 天前）
+        返回: 激活 URL 或 None
+        """
+        host = str(account.get("imap_host") or "")
+        port = int(account.get("imap_port") or 993)
+        username = str(account.get("username") or "")
+        password = str(account.get("password") or "")
+        if not host or not username or not password:
+            logger.warning("邮箱账号配置不完整，跳过")
+            return None
+
+        since = since_date or (datetime.now() - timedelta(days=7))
+        since_str = since.strftime("%d-%b-%Y")
+
+        mail = imaplib.IMAP4_SSL(host, port)
+        try:
+            mail.login(username, password)
+            mail.select("INBOX")
+            # 搜索 ICRIS 相关邮件
+            search_criteria = (
+                f'(SINCE {since_str} '
+                f'SUBJECT "ICRIS" OR SUBJECT "activate" '
+                f'OR SUBJECT "confirm" OR SUBJECT "verification")'
+            )
+            _, message_numbers = mail.search(None, search_criteria)
+            ids = message_numbers[0].split()
+            if not ids:
+                logger.info("未找到 ICRIS 激活邮件: %s", username)
+                return None
+
+            # 从最新邮件开始查找激活链接
+            for mid in reversed(ids):
+                _, msg_data = mail.fetch(mid, "(RFC822)")
+                raw = msg_data[0][1]
+                msg = email.message_from_bytes(raw)
+                body = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        ct = part.get_content_type()
+                        if ct in ("text/plain", "text/html"):
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                body += payload.decode("utf-8", errors="replace")
+                else:
+                    payload = msg.get_payload(decode=True)
+                    if payload:
+                        body = payload.decode("utf-8", errors="replace")
+
+                # 提取激活链接：URL 含 activate/confirm/verify 关键词
+                url_pattern = r'https?://[^\s<>"\']+'
+                for match in re.finditer(url_pattern, body):
+                    url = match.group(0).rstrip(".,;)")
+                    url_lower = url.lower()
+                    if any(k in url_lower for k in (
+                        "activate", "confirm", "verify", "activation",
+                    )):
+                        logger.info("找到激活链接: %s", url[:80])
+                        return url
+            logger.info("邮件中未找到激活链接: %s", username)
+            return None
+        except Exception as e:
+            logger.error("读取激活邮件失败 %s: %s", username, e)
+            return None
+        finally:
+            try:
+                mail.logout()
+            except Exception:
+                pass

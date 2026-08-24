@@ -216,6 +216,21 @@ class ExternalGroupStore:
                 CREATE INDEX IF NOT EXISTS idx_send_fail_log_time
                     ON send_fail_log(created_at);
 
+                CREATE TABLE IF NOT EXISTS email_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email_address TEXT NOT NULL UNIQUE,
+                    imap_host TEXT NOT NULL,
+                    imap_port INTEGER NOT NULL DEFAULT 993,
+                    username TEXT NOT NULL,
+                    password TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_email_accounts_address
+                    ON email_accounts(email_address);
+
                 CREATE TABLE IF NOT EXISTS intent_routes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     roomid TEXT NOT NULL DEFAULT '',
@@ -281,6 +296,18 @@ class ExternalGroupStore:
         if "result_messages" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN result_messages TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_status" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_status TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_checked_at" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_checked_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_activated_at" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_activated_at TEXT NOT NULL DEFAULT ''"
             )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
@@ -1448,6 +1475,122 @@ class ExternalGroupStore:
                 "SELECT status FROM registration_jobs WHERE id=?", (job_id,)
             ).fetchone()
         return str(row["status"] if row else "")
+
+    # ---- 邮箱账号配置 ----
+
+    def list_email_accounts(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM email_accounts ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_email_account_by_address(self, email: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM email_accounts WHERE email_address=? AND enabled=1",
+                (email,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_email_account(
+        self,
+        email: str,
+        imap_host: str,
+        imap_port: int,
+        username: str,
+        password: str,
+        label: str = "",
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM email_accounts WHERE email_address=?", (email,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE email_accounts
+                       SET imap_host=?, imap_port=?, username=?, password=?,
+                           label=?, updated_at=?
+                       WHERE id=?""",
+                    (imap_host, imap_port, username, password, label, now, existing["id"]),
+                )
+                aid = existing["id"]
+            else:
+                cur = conn.execute(
+                    """INSERT INTO email_accounts
+                       (email_address, imap_host, imap_port, username, password,
+                        label, enabled, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,1,?,?)""",
+                    (email, imap_host, imap_port, username, password, label, now, now),
+                )
+                aid = cur.lastrowid
+            row = conn.execute(
+                "SELECT * FROM email_accounts WHERE id=?", (aid,)
+            ).fetchone()
+        return dict(row)
+
+    def delete_email_account(self, account_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM email_accounts WHERE id=?", (account_id,)
+            )
+            return cur.rowcount > 0
+
+    # ---- 账号激活状态 ----
+
+    def mark_job_activation_pending(self, job_id: int) -> None:
+        """注册成功后标记待激活。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='pending', activation_checked_at='',
+                       activation_activated_at='', updated_at=?
+                   WHERE id=?""",
+                (now, job_id),
+            )
+
+    def get_jobs_pending_activation(self) -> list[dict[str, Any]]:
+        """查所有 activation_status='pending' 的任务。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM registration_jobs
+                   WHERE activation_status='pending'
+                   ORDER BY id"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_job_activation_checked(self, job_id: int) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_checked_at=?, updated_at=?
+                   WHERE id=?""",
+                (now, now, job_id),
+            )
+
+    def mark_job_activated(self, job_id: int) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='activated', activation_activated_at=?,
+                       updated_at=?
+                   WHERE id=?""",
+                (now, now, job_id),
+            )
+
+    def mark_job_activation_failed(self, job_id: int, error: str) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='failed', last_error=?, updated_at=?
+                   WHERE id=?""",
+                (error[:500], now, job_id),
+            )
 
     def update_job_result_messages(
         self, job_id: int, result_messages: list[Any] | None
