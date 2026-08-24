@@ -126,6 +126,7 @@ class RegistrationWorkflow:
         dry_run: bool | None = None,
         allow_submit: bool | None = None,
         force_isolated_browser: bool = False,
+        job_id: int = 0,
     ) -> WorkflowContext:
         """④ ICRIS 账号注册（浏览器填写；仅开关允许时提交）"""
         from config.settings import settings
@@ -148,6 +149,16 @@ class RegistrationWorkflow:
         bot = IcrisRegistrationBot(self.llm)
         bot.dry_run = use_dry
         bot.allow_submit = use_submit
+        bot.job_id = job_id
+        # 注入审核通知回调：发到内部企微群
+        if job_id:
+            def _notify_review(jid: int, msg: str) -> None:
+                chat_id = (settings.icris_review_notify_chat_id or "").strip()
+                if chat_id:
+                    self.wework.send_group_text(chat_id, msg)
+                else:
+                    logger.info("审核通知未配置群 chat_id，跳过: %s", msg)
+            bot.on_review_needed = _notify_review
         asyncio.run(
             bot.run(
                 ctx.company_data,

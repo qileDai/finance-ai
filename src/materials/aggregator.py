@@ -82,18 +82,37 @@ def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
     return paths
 
 
-def _generate_icris_credentials() -> tuple[str, str]:
-    """生成 ICRIS 账号凭证：用户名=前缀+月日(MMDD)+N位随机字符，密码=用户名+后缀。"""
-    prefix = getattr(settings, "icris_username_prefix", "Yingtai")
-    rand_len = int(getattr(settings, "icris_username_random_length", 0) or 0)
-    if rand_len <= 0:
-        # 兼容旧配置名 icris_username_timestamp_digits
-        rand_len = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
-    pw_suffix = getattr(settings, "icris_password_suffix", "@")
-    md = datetime.now().strftime("%m%d")
-    alphabet = string.ascii_lowercase + string.digits
-    rand = "".join(secrets.choice(alphabet) for _ in range(rand_len))
-    username = f"{prefix}{md}{rand}"
+def _generate_icris_credentials(person_en: str = "", id_number: str = "") -> tuple[str, str]:
+    """生成 ICRIS 账号凭证。
+
+    用户名 = 姓名拼音首字母 + 证件号码后5位 + yt
+    密码 = 用户名 + @（多加一个 @ 字符）
+    缺字段时回退到旧规则（前缀+月日+随机）。
+    """
+    pw_suffix = getattr(settings, "icris_password_suffix", "@") or "@"
+
+    # 姓名拼音首字母：按空格/连字符分词取每段首字母，统一转小写
+    initials = ""
+    name = (person_en or "").strip()
+    if name:
+        parts = re.split(r"[\s\-·•、]+", name)
+        initials = "".join(p[0] for p in parts if p).lower()
+
+    # 证件号码后5位（仅保留数字与字母）
+    id_tail = re.sub(r"[^A-Za-z0-9]", "", id_number or "")[-5:]
+
+    if initials and id_tail:
+        username = f"{initials}{id_tail}yt"
+    else:
+        # 缺字段回退
+        prefix = getattr(settings, "icris_username_prefix", "Yingtai")
+        rand_len = int(getattr(settings, "icris_username_random_length", 0) or 0)
+        if rand_len <= 0:
+            rand_len = int(getattr(settings, "icris_username_timestamp_digits", 4) or 4)
+        md = datetime.now().strftime("%m%d")
+        alphabet = string.ascii_lowercase + string.digits
+        rand = "".join(secrets.choice(alphabet) for _ in range(rand_len))
+        username = f"{prefix}{md}{rand}"
     password = f"{username}{pw_suffix}"
     return username, password
 
@@ -167,7 +186,9 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
     doc_files = _get_files(materials)
 
     if getattr(settings, "icris_credential_mode", "yingtai") == "yingtai":
-        icris_username, icris_password = _generate_icris_credentials()
+        icris_username, icris_password = _generate_icris_credentials(
+            person_en=person_en, id_number=_get_val(materials, "id_number")
+        )
     else:
         icris_username = ""
         icris_password = ""

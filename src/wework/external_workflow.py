@@ -132,6 +132,7 @@ class ExternalGroupWorkflow:
             dry_run=dry_run,
             allow_submit=allow_submit,
             force_isolated_browser=force_isolated_browser,
+            job_id=int(job.get("id") or 0),
         )
         return ctx
 

@@ -4,9 +4,16 @@ from __future__ import annotations
 
 
 class IcrisFlowError(RuntimeError):
-    def __init__(self, message: str, *, screenshot_path: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        screenshot_path: str = "",
+        no_requeue: bool = False,
+    ) -> None:
         super().__init__(message)
         self.screenshot_path = screenshot_path or ""
+        self.no_requeue = no_requeue
 
 
 class IcrisStepLoadError(RuntimeError):

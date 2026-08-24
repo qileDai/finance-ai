@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     # True 且 dry_run=False 时才允许点击 ICRIS 最终提交（生产默认仍关闭）
     icris_allow_submit: bool = False
     notify_colleague_open_id: str = ""
+    # s03a 人工审核：发到内部企微群的 chat_id（空则不发通知，仅网页等待）
+    icris_review_notify_chat_id: str = ""
+    # 审核超时秒数（默认 1800 = 30 分钟）
+    icris_review_timeout_seconds: int = 1800
     # L2 注册任务队列 Worker（与 wework-external-bot 同进程）
     icris_worker_enabled: bool = True
     icris_worker_poll_seconds: float = 3.0

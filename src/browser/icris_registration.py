@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 from config.settings import settings
 from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
-from src.browser.icris_errors import IcrisStepLoadError
+from src.browser.icris_errors import IcrisFlowError, IcrisStepLoadError
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 
@@ -253,6 +253,9 @@ class IcrisRegistrationBot:
         self.esubmit_screenshot_path: str = ""
         # s05 成功页截图路径（提交成功后自动截图存档）
         self.success_screenshot_path: str = ""
+        # 人工审核：job_id 和通知回调（allow_submit=True 时 s03a 等待审核）
+        self.job_id: int = 0
+        self.on_review_needed: Any = None  # Callable[[int, str], None] | None
 
     def _reset_flow_flags(self) -> None:
         """关页重开前重置步骤内存标志，避免假成功。"""
@@ -297,6 +300,16 @@ class IcrisRegistrationBot:
                 await page.screenshot(path=str(shot_file), full_page=True)
                 self.esubmit_screenshot_path = str(shot_file)
                 logger.info("s03a 截图已保存: %s", self.esubmit_screenshot_path)
+                # 截图后立即写入 DB，供后台在审核期间展示核对图
+                if self.job_id:
+                    try:
+                        from src.storage.db import ExternalGroupStore
+
+                        ExternalGroupStore().update_job_esubmit_screenshot(
+                            self.job_id, self.esubmit_screenshot_path
+                        )
+                    except Exception as db_err:
+                        logger.warning("写入 esubmit_screenshot_path 到 DB 失败: %s", db_err)
         except Exception as shot_err:
             logger.warning("保存 s03a 截图失败: %s", shot_err)
 
@@ -326,6 +339,82 @@ class IcrisRegistrationBot:
                 logger.info("s05 成功截图已保存: %s", self.success_screenshot_path)
         except Exception as shot_err:
             logger.warning("保存 s05 成功截图失败: %s", shot_err)
+
+    async def _wait_for_review_approval(self, page: "Page") -> bool:
+        """s03a 截图后等待人工审核确认（allow_submit=True 时调用）。
+
+        1. 标记 job 为 awaiting_review
+        2. 通过回调通知审核人
+        3. 轮询 DB review_status（每 5s，超时 30 分钟）
+        Returns: True=已批准, False=拒绝/超时
+        """
+        if not self.job_id:
+            logger.warning("s03a 无 job_id，跳过审核等待直接提交")
+            return True
+
+        from src.storage.db import ExternalGroupStore
+
+        store = ExternalGroupStore()
+
+        # 1) 标记 awaiting_review
+        store.mark_job_awaiting_review(self.job_id)
+        logger.info(
+            "s03a job #%s 已标记 awaiting_review，等待人工确认",
+            self.job_id,
+        )
+
+        # 2) 通知审核人
+        if self.on_review_needed:
+            try:
+                msg = (
+                    f"【ICRIS 注册审核】job #{self.job_id} 已到 s03a 核对页，"
+                    f"请到管理后台确认提交"
+                )
+                self.on_review_needed(self.job_id, msg)
+            except Exception as e:
+                logger.warning("s03a 审核通知发送失败: %s", e)
+
+        # 3) 轮询等待
+        timeout_s = max(60, int(settings.icris_review_timeout_seconds or 1800))
+        poll_interval = 5.0
+        elapsed = 0.0
+        while elapsed < timeout_s:
+            await page.wait_for_timeout(int(poll_interval * 1000))
+            elapsed += poll_interval
+            # 优先检查任务是否被取消
+            job_status = store.get_job_status(self.job_id)
+            if job_status == "cancelled":
+                logger.warning("s03a 任务被取消 job #%s", self.job_id)
+                raise IcrisFlowError(
+                    "任务已被取消",
+                    screenshot_path=self.esubmit_screenshot_path or "",
+                    no_requeue=True,
+                )
+            status = store.get_job_review_status(self.job_id)
+            if status == "approved":
+                logger.info(
+                    "s03a 审核已通过 job #%s（等待 %.0fs）",
+                    self.job_id,
+                    elapsed,
+                )
+                return True
+            if status == "rejected":
+                logger.warning("s03a 审核已拒绝 job #%s", self.job_id)
+                return False
+            if int(elapsed) % 60 == 0:
+                logger.info(
+                    "s03a 仍在等待审核 job #%s（%.0f/%ds）",
+                    self.job_id,
+                    elapsed,
+                    timeout_s,
+                )
+
+        logger.error(
+            "s03a 审核超时 job #%s（%ds）",
+            self.job_id,
+            timeout_s,
+        )
+        return False
 
     async def _is_spinning(self, page: "Page") -> bool:
         try:
@@ -5393,9 +5482,11 @@ class IcrisRegistrationBot:
         if await self._is_esubmit_terms_step(page):
             logger.info("=== s03a 电子提交服务条款 ===")
             await self._save_esubmit_screenshot(page)
-            await self._accept_esubmit_terms(
-                page, submit=bool(self.allow_submit)
-            )
+            # allow_submit=True 时由后续循环统一处理审核等待 + 提交
+            if not (self.allow_submit and self.job_id):
+                await self._accept_esubmit_terms(
+                    page, submit=bool(self.allow_submit)
+                )
 
         # Step 5+: 其余多步表单
         max_steps = 6
@@ -5411,6 +5502,16 @@ class IcrisRegistrationBot:
                 logger.info("=== s03a 电子提交服务条款（步骤循环）===")
                 if not self.esubmit_screenshot_path:
                     await self._save_esubmit_screenshot(page)
+                # allow_submit=True 时等待人工审核确认
+                if self.allow_submit and self.job_id:
+                    approved = await self._wait_for_review_approval(page)
+                    if not approved:
+                        logger.warning("s03a 审核未通过/超时，停止流程")
+                        raise IcrisFlowError(
+                            "s03a 审核未通过或超时",
+                            screenshot_path=self.esubmit_screenshot_path or "",
+                            no_requeue=True,
+                        )
                 await self._accept_esubmit_terms(
                     page, submit=bool(self.allow_submit)
                 )
@@ -5456,9 +5557,23 @@ class IcrisRegistrationBot:
             logger.info("=== s03a 电子提交服务条款（流程末尾）===")
             if not self.esubmit_screenshot_path:
                 await self._save_esubmit_screenshot(page)
-            await self._accept_esubmit_terms(
-                page, submit=bool(self.allow_submit)
-            )
+            # allow_submit=True 时等待人工审核确认
+            if self.allow_submit and self.job_id:
+                approved = await self._wait_for_review_approval(page)
+                if not approved:
+                    logger.warning("s03a 审核未通过/超时，停止流程")
+                    raise IcrisFlowError(
+                        "s03a 审核未通过或超时",
+                        screenshot_path=self.esubmit_screenshot_path or "",
+                        no_requeue=True,
+                    )
+                await self._accept_esubmit_terms(
+                    page, submit=bool(self.allow_submit)
+                )
+            else:
+                await self._accept_esubmit_terms(
+                    page, submit=bool(self.allow_submit)
+                )
         else:
             submit_btns = page.locator(
                 "form input[type='submit'], form button[type='submit']"
@@ -5562,11 +5677,16 @@ class IcrisRegistrationBot:
                     run_error = IcrisFlowError(str(e), screenshot_path=screenshot_path)
                     run_error.__cause__ = e
             finally:
-                logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
-                try:
-                    await page.wait_for_timeout(keep_open * 1000)
-                except Exception:
-                    pass
+                # 审核拒绝/超时：立即关闭浏览器，不再保持
+                skip_keep_open = isinstance(run_error, IcrisFlowError) and run_error.no_requeue
+                if skip_keep_open:
+                    logger.info("审核拒绝/超时，立即关闭浏览器")
+                else:
+                    logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
+                    try:
+                        await page.wait_for_timeout(keep_open * 1000)
+                    except Exception:
+                        pass
                 await close_browser_session(browser, external_cdp=via_cdp)
 
             if run_error:

@@ -95,6 +95,16 @@ def handle_admin_api(
             if job_id is None:
                 return _err("invalid job id", 400)
             return _handle_job_requeue(store, job_id)
+        if method == "POST" and rel.startswith("jobs/") and rel.endswith("/approve"):
+            job_id = _parse_job_id(rel, suffix="/approve")
+            if job_id is None:
+                return _err("invalid job id", 400)
+            return _handle_job_approve(store, job_id)
+        if method == "POST" and rel.startswith("jobs/") and rel.endswith("/reject"):
+            job_id = _parse_job_id(rel, suffix="/reject")
+            if job_id is None:
+                return _err("invalid job id", 400)
+            return _handle_job_reject(store, job_id)
         if method == "GET" and rel == "quality":
             try:
                 hours = float(query.get("hours", ["24"])[0])
@@ -745,7 +755,7 @@ def _handle_job_cancel(
         return _err("job not found", 404)
     if job.get("status") != "cancelled":
         return _err(
-            f"cannot cancel (status={job.get('status')}; pending only)",
+            f"cannot cancel (status={job.get('status')}; pending/running only)",
             409,
         )
     rid = str(job.get("roomid") or "")
@@ -770,6 +780,34 @@ def _handle_job_requeue(
     if rid:
         store.set_group_status(rid, "QUEUED")
     return _ok(job=job, message=f"requeued #{job_id}")
+
+
+def _handle_job_approve(
+    store: ExternalGroupStore, job_id: int
+) -> tuple[dict[str, Any], int]:
+    job = store.approve_job_submit(job_id)
+    if not job:
+        return _err("job not found", 404)
+    if job.get("review_status") != "approved":
+        return _err(
+            f"cannot approve (status={job.get('status')}; need awaiting_review)",
+            409,
+        )
+    return _ok(job=job, message=f"approved #{job_id}")
+
+
+def _handle_job_reject(
+    store: ExternalGroupStore, job_id: int
+) -> tuple[dict[str, Any], int]:
+    job = store.reject_job_submit(job_id)
+    if not job:
+        return _err("job not found", 404)
+    if job.get("review_status") != "rejected":
+        return _err(
+            f"cannot reject (status={job.get('status')}; need awaiting_review)",
+            409,
+        )
+    return _ok(job=job, message=f"rejected #{job_id}")
 
 
 def _handle_quality(

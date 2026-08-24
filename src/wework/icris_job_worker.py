@@ -133,17 +133,25 @@ class IcrisJobWorker:
             package_dir = str(ctx.package_dir or package_dir)
             capture.merge_ctx_messages(list(getattr(ctx, "messages", None) or []))
             msgs = capture.snapshot()
-            self.store.mark_job_succeeded(
-                job_id,
-                package_dir=package_dir,
-                result_messages=msgs,
-                esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
-                success_screenshot_path=getattr(ctx, "success_screenshot_path", "") or "",
-            )
-            self.store.set_group_status(roomid, "HANDOFF")
-            self.workflow.notify_job_result(
-                job, ok=True, package_dir=package_dir
-            )
+            # 任务被取消则不覆盖为 succeeded
+            cur_status = self.store.get_job_status(job_id)
+            if cur_status == "cancelled":
+                logger.warning(
+                    "ICRIS job 已被取消（取消后完成）id=%s，保持 cancelled",
+                    job_id,
+                )
+            else:
+                self.store.mark_job_succeeded(
+                    job_id,
+                    package_dir=package_dir,
+                    result_messages=msgs,
+                    esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
+                    success_screenshot_path=getattr(ctx, "success_screenshot_path", "") or "",
+                )
+                self.store.set_group_status(roomid, "HANDOFF")
+                self.workflow.notify_job_result(
+                    job, ok=True, package_dir=package_dir
+                )
             elapsed = time.monotonic() - t0
             logger.info(
                 "ICRIS job ok id=%s roomid=%s duration=%.1fs package=%s",
@@ -172,6 +180,23 @@ class IcrisJobWorker:
 
             if isinstance(e, IcrisFlowError):
                 screenshot_path = e.screenshot_path or ""
+                # 审核拒绝/超时：不重跑，直接关闭任务
+                if getattr(e, "no_requeue", False):
+                    requeue = False
+                    available_at = ""
+                    logger.warning(
+                        "ICRIS job 审核拒绝/超时不重跑 id=%s", job_id
+                    )
+            # 审核等待中 bot 异常退出（如浏览器崩溃）：不重跑，标记 failed
+            if requeue:
+                cur_status = self.store.get_job_status(job_id)
+                if cur_status == "awaiting_review":
+                    requeue = False
+                    available_at = ""
+                    logger.warning(
+                        "ICRIS job 审核等待中异常退出 id=%s，标记 failed 不重跑",
+                        job_id,
+                    )
             ctx_fail = getattr(e, "ctx", None)
             if ctx_fail is not None:
                 capture.merge_ctx_messages(

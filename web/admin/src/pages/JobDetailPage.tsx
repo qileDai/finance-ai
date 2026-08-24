@@ -93,7 +93,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
         <Link to="/jobs" className="btn btn-sm btn-ghost">
           ← 返回列表
         </Link>
-        {job?.status === "pending" ? (
+        {job?.status === "pending" || job?.status === "running" ? (
           <button
             type="button"
             className="btn btn-sm btn-danger"
@@ -177,6 +177,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         width={100}
                         height={100}
                         style={{ objectFit: "cover" }}
+                        preview={{ zoom: 0.8 }}
                       />
                     ) : (
                       "-"
@@ -192,6 +193,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         width={100}
                         height={100}
                         style={{ objectFit: "cover" }}
+                        preview={{ zoom: 0.8 }}
                       />
                     ) : (
                       "-"

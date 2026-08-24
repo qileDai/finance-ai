@@ -232,6 +232,16 @@ export const api = {
       `/admin/api/jobs/${id}/requeue`,
       { method: "POST" },
     ),
+  approveJob: (id: number) =>
+    request<ApiOk<{ job: JobRow; message: string }>>(
+      `/admin/api/jobs/${id}/approve`,
+      { method: "POST" },
+    ),
+  rejectJob: (id: number) =>
+    request<ApiOk<{ job: JobRow; message: string }>>(
+      `/admin/api/jobs/${id}/reject`,
+      { method: "POST" },
+    ),
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
   registerRunner: {

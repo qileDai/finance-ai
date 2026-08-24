@@ -180,6 +180,7 @@ class ExternalGroupStore:
                     screenshot_path TEXT NOT NULL DEFAULT '',
                     esubmit_screenshot_path TEXT NOT NULL DEFAULT '',
                     success_screenshot_path TEXT NOT NULL DEFAULT '',
+                    review_status TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
                     company_name TEXT NOT NULL DEFAULT '',
@@ -260,6 +261,10 @@ class ExternalGroupStore:
         if "success_screenshot_path" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN success_screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "review_status" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN review_status TEXT NOT NULL DEFAULT ''"
             )
         if "payload_json" not in cols:
             conn.execute(
@@ -1339,6 +1344,78 @@ class ExternalGroupStore:
                 ),
             )
 
+    def mark_job_awaiting_review(self, job_id: int) -> None:
+        """标记 job 进入待审核状态（bot 在 s03a 等待人工确认）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET status='awaiting_review', review_status='awaiting_review',
+                       updated_at=?
+                   WHERE id=?""",
+                (now, job_id),
+            )
+
+    def update_job_esubmit_screenshot(self, job_id: int, path: str) -> None:
+        """s03a 截图后立即写入 DB，供后台在审核期间展示核对图。"""
+        if not path:
+            return
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET esubmit_screenshot_path=?, updated_at=?
+                   WHERE id=?""",
+                (path, now, job_id),
+            )
+
+    def approve_job_submit(self, job_id: int) -> dict[str, Any] | None:
+        """审核通过：设 review_status=approved（bot 轮询到后点继续）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET review_status='approved', updated_at=?
+                   WHERE id=? AND status='awaiting_review'""",
+                (now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def reject_job_submit(self, job_id: int) -> dict[str, Any] | None:
+        """审核拒绝：设 review_status=rejected, status=failed。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET review_status='rejected', status='failed',
+                       finished_at=?, updated_at=?
+                   WHERE id=? AND status='awaiting_review'""",
+                (now, now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_job_review_status(self, job_id: int) -> str:
+        """获取当前 review_status（awaiting_review / approved / rejected / 空）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT review_status FROM registration_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return str(row["review_status"] if row else "")
+
+    def get_job_status(self, job_id: int) -> str:
+        """获取任务当前 status（用于 bot 轮询是否被取消）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM registration_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return str(row["status"] if row else "")
+
     def update_job_result_messages(
         self, job_id: int, result_messages: list[Any] | None
     ) -> None:
@@ -1418,7 +1495,7 @@ class ExternalGroupStore:
             )
 
     def cancel_registration_job(self, job_id: int) -> dict[str, Any] | None:
-        """取消 pending 任务（running 不可取消）。"""
+        """取消 pending/running 任务。running 任务由 worker/bot 轮询感知后终止。"""
         now = _utc_now()
         with self._conn() as conn:
             row = conn.execute(
@@ -1427,14 +1504,15 @@ class ExternalGroupStore:
             ).fetchone()
             if not row:
                 return None
-            if str(row["status"]) != "pending":
+            cur_status = str(row["status"])
+            if cur_status not in ("pending", "running"):
                 return dict(row)
             conn.execute(
                 """
                 UPDATE registration_jobs
                 SET status = 'cancelled', finished_at = ?, updated_at = ?,
                     last_error = CASE WHEN last_error = '' THEN 'cancelled by admin' ELSE last_error END
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND status IN ('pending', 'running')
                 """,
                 (now, now, job_id),
             )

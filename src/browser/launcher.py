@@ -99,6 +99,7 @@ def _try_launch_cdp_chrome() -> bool:
     launch_args = [
         str(chrome),
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=0.0.0.0",
         f"--user-data-dir={profile}",
         "--no-first-run",
         "--no-default-browser-check",

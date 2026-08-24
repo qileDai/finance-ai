@@ -28,6 +28,7 @@ const STATUS_OPTIONS = [
   { value: "", label: "全部" },
   { value: "pending", label: "待处理" },
   { value: "running", label: "进行中" },
+  { value: "awaiting_review", label: "待审核" },
   { value: "succeeded", label: "已成功" },
   { value: "failed", label: "已失败" },
   { value: "cancelled", label: "已取消" },
@@ -36,6 +37,7 @@ const STATUS_OPTIONS = [
 const STATUS_TAG_COLOR: Record<string, string> = {
   pending: "default",
   running: "processing",
+  awaiting_review: "warning",
   succeeded: "success",
   failed: "error",
   cancelled: "warning",
@@ -44,6 +46,7 @@ const STATUS_TAG_COLOR: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   pending: "待处理",
   running: "进行中",
+  awaiting_review: "待审核",
   succeeded: "已成功",
   failed: "已失败",
   cancelled: "已取消",
@@ -124,14 +127,26 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     setIdNumber("");
   }
 
-  async function act(id: number, kind: "cancel" | "requeue") {
-    const label = kind === "cancel" ? "取消" : "重跑";
+  async function act(
+    id: number,
+    kind: "cancel" | "requeue" | "approve" | "reject",
+  ) {
+    const labelMap: Record<typeof kind, string> = {
+      cancel: "取消",
+      requeue: "重跑",
+      approve: "提交审核",
+      reject: "拒绝审核",
+    };
+    const label = labelMap[kind];
     if (!window.confirm(`确认${label}任务 #${id}？`)) return;
     setBusyId(id);
     try {
-      const res =
-        kind === "cancel" ? await api.cancelJob(id) : await api.requeueJob(id);
-      onToast(res.message || `${label}成功`);
+      let res: { message?: string } | null = null;
+      if (kind === "cancel") res = await api.cancelJob(id);
+      else if (kind === "requeue") res = await api.requeueJob(id);
+      else if (kind === "approve") res = await api.approveJob(id);
+      else if (kind === "reject") res = await api.rejectJob(id);
+      onToast(res?.message || `${label}成功`);
       onRefresh();
     } catch (e) {
       onToast((e as Error).message || `${label}失败`);
@@ -219,7 +234,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             height={50}
             style={{ objectFit: "cover", cursor: "pointer" }}
             onClick={(e) => e.stopPropagation()}
-            preview={{ mask: false }}
+            preview={{ mask: false, zoom: 0.8 }}
           />
         ) : (
           "-"
@@ -237,7 +252,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             height={50}
             style={{ objectFit: "cover", cursor: "pointer" }}
             onClick={(e) => e.stopPropagation()}
-            preview={{ mask: false }}
+            preview={{ mask: false, zoom: 0.8 }}
           />
         ) : (
           "-"
@@ -295,13 +310,13 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     {
       title: "操作",
       key: "action",
-      width: 100,
+      width: 180,
       fixed: "right" as const,
       render: (_: unknown, r: JobRow) => (
         <Space
           onClick={(e) => e.stopPropagation()}
         >
-          {r.status === "pending" ? (
+          {r.status === "pending" || r.status === "running" ? (
             <Button
               size="small"
               danger
@@ -321,9 +336,31 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
               重跑
             </Button>
           ) : null}
+          {r.status === "awaiting_review" ? (
+            <>
+              <Button
+                size="small"
+                type="primary"
+                disabled={busyId === r.id}
+                onClick={() => act(r.id, "approve")}
+              >
+                提交
+              </Button>
+              <Button
+                size="small"
+                danger
+                disabled={busyId === r.id}
+                onClick={() => act(r.id, "reject")}
+              >
+                拒绝
+              </Button>
+            </>
+          ) : null}
           {r.status !== "pending" &&
+          r.status !== "running" &&
           r.status !== "failed" &&
-          r.status !== "cancelled"
+          r.status !== "cancelled" &&
+          r.status !== "awaiting_review"
             ? "-"
             : null}
         </Space>
