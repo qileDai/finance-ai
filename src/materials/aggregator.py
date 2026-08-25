@@ -13,6 +13,7 @@ from typing import Any
 
 from config.settings import settings
 from src.materials.checklist import MATERIAL_FIELDS, FILE_FIELD_KEYS, progress_summary
+from src.storage.db import ExternalGroupStore
 
 
 def _get_val(materials: dict[str, dict[str, Any]], key: str, default: str = "") -> str:
@@ -61,6 +62,38 @@ def _office_en(materials: dict[str, dict[str, Any]]) -> str:
     return _get_val(materials, "registered_office_en") or _get_val(
         materials, "registered_office"
     )
+
+
+def _get_default_office() -> dict[str, str]:
+    """从 DB 读取默认注册办事处地址（NNC1 表格用）。"""
+    import json
+    try:
+        store = ExternalGroupStore()
+        raw = store.get_system_setting("icris_default_office") or ""
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return {"flat_floor": "ROOM 18 2/F", "building": "Tuspark",
+            "street": "118 Wai Yip Street", "district": "Kwun Tong"}
+
+
+def apply_default_office(data: dict) -> None:
+    """将后台配置的默认办事处地址合并到 data 的 registered_office。
+
+    空则补默认，已有值不覆盖（用户填了用用户的）。
+    """
+    default = _get_default_office()
+    office = data.setdefault("registered_office", {})
+    for key in ("flat_floor", "building", "district"):
+        if not str(office.get(key) or "").strip():
+            office[key] = default.get(key, "")
+    if not str(office.get("street_en") or "").strip():
+        office["street_en"] = default.get("street", "")
+    if not str(office.get("street") or "").strip():
+        office["street"] = default.get("street", "")
+    if not office.get("region"):
+        office["region"] = "Hong Kong"
 
 
 def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
@@ -163,6 +196,17 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         split_cn, split_en = _split_cjk_latin_name(person)
         person_cn = person_cn or split_cn
         person_en = person_en or split_en
+    # 纯中文名 → 转拼音式英文名（用于生成用户名首字母）
+    if not person_en and person_cn:
+        try:
+            from pypinyin import lazy_pinyin
+            pinyins = lazy_pinyin(person_cn)
+            if pinyins:
+                family = pinyins[0].capitalize()
+                given = "".join(pinyins[1:]).capitalize() if len(pinyins) > 1 else ""
+                person_en = f"{family} {given}".strip()
+        except Exception:
+            pass
     applicant_name_raw = _get_val(materials, "applicant_name")
     if applicant_name_raw:
         am_cn, am_en = _split_cjk_latin_name(applicant_name_raw)
@@ -190,17 +234,23 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         icris_username = ""
         icris_password = ""
 
+    default_office = _get_default_office()
+    office_flat = (_get_val(materials, "office_flat_floor") or default_office.get("flat_floor", "")).strip()
+    office_building = (_get_val(materials, "office_building") or default_office.get("building", "")).strip()
+    office_street = (_get_val(materials, "office_street") or default_office.get("street", "")).strip()
+    office_district = (_get_val(materials, "office_district") or default_office.get("district", "")).strip()
+
     data: dict[str, Any] = {
         "company_name_en": _get_val(materials, "company_name_en"),
         "company_name_cn": _get_val(materials, "company_name_cn"),
         "company_type": "private_limited_by_shares",
         "registered_office": {
-            "flat_floor": "",
-            "building": "",
-            "street": office_en or office_cn,
+            "flat_floor": office_flat,
+            "building": office_building,
+            "street": office_street,
             "street_cn": office_cn,
-            "street_en": office_en,
-            "district": "",
+            "street_en": office_street,
+            "district": office_district,
             "region": "Hong Kong",
         },
         "contact": {
