@@ -58,38 +58,99 @@ def append_random_username_suffix(username: str, length: int = 2) -> str:
     return f"{base}{suffix}"
 
 
-def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
-    """从 company_data 生成 ICRIS 用户名与符合规则的密码（同一次流程用户名保持一致）。
+def _person_en_and_id_from_data(data: dict[str, Any]) -> tuple[str, str]:
+    """从 company_data 提取英文名与证件号（申请人 / 身份证明 / 董事 / 创办成员）。"""
+    applicant = data.get("applicant") or {}
+    identity = data.get("identity_proof") or {}
+    directors = data.get("directors") or []
+    founders = data.get("founder_members") or []
+    director0 = directors[0] if directors and isinstance(directors[0], dict) else {}
+    founder0 = founders[0] if founders and isinstance(founders[0], dict) else {}
 
-    若 aggregator 已预生成 icris_account.username + password（yingtai 模式），
-    直接使用，不追加随机后缀、不重新派生密码。
+    person_en = (
+        str(applicant.get("name_en") or "").strip()
+        or str(director0.get("name_en") or "").strip()
+        or str(founder0.get("name_en") or "").strip()
+    )
+    id_number = (
+        str(identity.get("id_number") or "").strip()
+        or str(applicant.get("id_number") or "").strip()
+        or str(director0.get("id_number") or "").strip()
+        or str(founder0.get("id_number") or "").strip()
+    )
+    return person_en, id_number
+
+
+def _is_legacy_yingtai_username(username: str) -> bool:
+    """旧规则用户名：Yingtai + 月日/随机（非 initials+证件+yt）。"""
+    u = (username or "").strip()
+    if not u:
+        return False
+    prefix = (getattr(settings, "icris_username_prefix", "Yingtai") or "Yingtai").strip()
+    if not prefix:
+        return False
+    return u.startswith(prefix) or u.lower().startswith(prefix.lower())
+
+
+def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
+    """从 company_data 生成 ICRIS 用户名与密码（同一次流程保持一致）。
+
+    yingtai 模式：英文名首字母 + 证件后5位 + yt，密码 = 用户名 + @。
+    旧 Yingtai 前缀预生成凭证会按新规则重算；其它预生成（非 Yingtai）原样使用。
     """
     session = data.setdefault("_icris_session", {})
     if session.get("username") and session.get("password"):
         return session["username"], session["password"]
 
-    acct = data.get("icris_account", {})
-    applicant = data.get("applicant", {})
+    acct = data.get("icris_account") or {}
+    if not isinstance(acct, dict):
+        acct = {}
+        data["icris_account"] = acct
+    applicant = data.get("applicant") or {}
+    if not isinstance(applicant, dict):
+        applicant = {}
 
     username = (acct.get("username") or "").strip()
     password_raw = (acct.get("password") or "").strip()
+    person_en, id_number = _person_en_and_id_from_data(data)
+    mode = getattr(settings, "icris_credential_mode", "yingtai")
 
-    # 预生成凭证（yingtai 模式）：username + password 均非空 → 原样使用
+    # yingtai：按 initials+id+yt 生成（含重算旧 Yingtai 前缀）
+    if mode == "yingtai":
+        from src.materials.aggregator import _generate_icris_credentials
+
+        need_regen = (not username) or (
+            _is_legacy_yingtai_username(username) and bool(person_en or id_number)
+        )
+        if need_regen:
+            username, password = _generate_icris_credentials(
+                person_en=person_en, id_number=id_number
+            )
+            acct["username"] = username
+            acct["password"] = password
+            session["username"] = username
+            session["password"] = password
+            logger.info(
+                "ICRIS 凭证已生成 (initials+id+yt): user=%s person=%s id_tail=%s",
+                username,
+                person_en[:40],
+                re.sub(r"[^A-Za-z0-9]", "", id_number)[-5:],
+            )
+            return username, password
+
+        # 已有正确预生成（如 aggregator 写入的 initials+yt）→ 原样使用
+        if username and password_raw:
+            session["username"] = username
+            session["password"] = password_raw
+            return username, password_raw
+
+    # 预生成 username+password（非 yingtai 或未触发重算）→ 原样使用
     if username and password_raw:
         session["username"] = username
         session["password"] = password_raw
         return username, password_raw
 
-    # yingtai：无预生成时现场生成 Yingtai + 月日 + 随机
-    if getattr(settings, "icris_credential_mode", "yingtai") == "yingtai" and not username:
-        from src.materials.aggregator import _generate_icris_credentials
-
-        username, password = _generate_icris_credentials()
-        session["username"] = username
-        session["password"] = password
-        return username, password
-
-    # 旧逻辑：邮箱用户名 + 随机后缀 + 姓名派生密码
+    # legacy：邮箱用户名 + 随机后缀 + 姓名派生密码
     if not username:
         email = applicant.get("email", "")
         if "@" in email:
@@ -2316,7 +2377,7 @@ class IcrisRegistrationBot:
     async def _fill_account_profile_native(self, page: "Page", data: dict[str, Any]) -> int:
         """按 s02 页面真实 DOM：原生 select/checkbox/radio/input"""
         username, password = derive_icris_credentials(data)
-        logger.info("注册用户名(含随机后缀): %s", username)
+        logger.info("注册用户名 (initials+id+yt): %s", username)
         filled = 0
 
         if await self._select_native_user_type_individual(page):
@@ -3815,12 +3876,12 @@ class IcrisRegistrationBot:
             )
         await _inc(ok, "联络电话")
 
-        # 通讯语言 → English
+        # 通讯语言 → 繁體中文
         await _inc(
             await self._select_ant_select_by_keywords(
-                page, ["通訊語言", "通讯语言"], "English"
+                page, ["通訊語言", "通讯语言"], "繁體中文"
             ),
-            "通讯语言=English",
+            "通讯语言=繁體中文",
         )
 
         # 按常见 id/name 再填一次（Vue 表单兜底）

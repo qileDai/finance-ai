@@ -130,7 +130,7 @@ def parse_icris_form(text: str) -> ParseResult:
     username = fields.get("用户名", "").strip()
     district = fields.get("区市省", "香港仔").strip() or "香港仔"
     country = fields.get("国家", "中国").strip() or "中国"
-    lang = fields.get("通讯语言", "English").strip() or "English"
+    lang = fields.get("通讯语言", "繁體中文").strip() or "繁體中文"
     room = fields.get("室楼座", "").strip() or "8楼A室"
     building = fields.get("大厦", "").strip() or "快乐大厦"
     street = fields.get("街道", "").strip() or "中关村大街1号"
