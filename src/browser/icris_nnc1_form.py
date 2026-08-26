@@ -1317,6 +1317,79 @@ class IcrisNnc1FormBot:
         logger.warning("未找到字段: %s", labels[0])
         return False
 
+    async def _fill_step3_name_field(self, page, label_re: str, value: str) -> bool:
+        """步骤3 姓名字段（textarea），按标签精确匹配。"""
+        if not value:
+            return False
+        hit = await page.evaluate(
+            """({ labelRe, value }) => {
+                const re = new RegExp(labelRe, 'i');
+                const norm = s => (s || '').replace(/\\s+/g, '').trim();
+                for (const el of document.querySelectorAll(
+                    'label, .rowTitle, span, div, td, th'
+                )) {
+                    const t = norm(el.innerText || '');
+                    if (!t || t.length > 30) continue;
+                    if (!re.test(t)) continue;
+                    if (/前用姓名|別名|别名/.test(t)) continue;
+                    let inp = el.querySelector('textarea, input:not([type=hidden]):not([type=checkbox])');
+                    if (!inp) {
+                        const row = el.closest('tr,.ant-row,.ant-form-item,fieldset,div')
+                            || el.parentElement;
+                        inp = row?.querySelector(
+                            'textarea, input:not([type=hidden]):not([type=checkbox])'
+                        );
+                    }
+                    if (!inp || inp.disabled) continue;
+                    const r = inp.getBoundingClientRect();
+                    if (r.width <= 0 && r.height <= 0) continue;
+                    inp.focus();
+                    inp.value = value;
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    inp.dispatchEvent(new Event('change', { bubbles: true }));
+                    return t;
+                }
+                return '';
+            }""",
+            {"labelRe": label_re, "value": value},
+        )
+        if hit:
+            logger.info("已填写姓名 [%s]: %s", label_re, value[:60])
+            return True
+        # Playwright 兜底
+        pat = re.compile(label_re, re.I)
+        labels = page.locator("label, .rowTitle, span, div").filter(has_text=pat)
+        for i in range(await labels.count()):
+            lab = labels.nth(i)
+            txt = re.sub(r"\s+", "", (await lab.inner_text() or ""))
+            if len(txt) > 30 or re.search(r"前用姓名|別名|别名", txt):
+                continue
+            if not pat.search(txt):
+                continue
+            inp = lab.locator(
+                "xpath=ancestor-or-self::*[1]//textarea | following::textarea[1]"
+            ).first
+            if await inp.count() > 0:
+                await inp.fill(value)
+                logger.info("已填写姓名(Playwright) [%s]: %s", label_re, value[:60])
+                return True
+        logger.warning("未找到姓名字段: %s", label_re)
+        return False
+
+    async def _fill_step3_person_names(
+        self, page, name_cn: str, name_en: str
+    ) -> None:
+        """有中文姓名只填中文；无中文则填英文姓氏+英文名字。"""
+        surname, given = self._split_english_name(name_en)
+        if name_cn:
+            await self._fill_step3_name_field(page, r"^中文姓名$|^中文名稱$", name_cn)
+            logger.info("已有中文姓名，跳过英文姓氏/英文名字")
+            return
+        if surname:
+            await self._fill_step3_name_field(page, r"^英文姓氏$|^英文姓$", surname)
+        if given:
+            await self._fill_step3_name_field(page, r"^英文名字$|^英文名$", given)
+
     def _resolve_share_capital(self, data: dict[str, Any]) -> dict[str, Any]:
         """从 share_capital 或 registered_capital 解析股本数额（注册资本）。"""
         from src.materials.aggregator import _parse_share_capital
@@ -1860,6 +1933,2264 @@ class IcrisNnc1FormBot:
         else:
             logger.warning("股本第一行填写失败")
 
+    def _split_english_name(self, name_en: str) -> tuple[str, str]:
+        """英文姓名 → (英文姓氏, 英文名字)，如 YAO Xiaojia → (YAO, Xiaojia)。"""
+        parts = [p for p in (name_en or "").split() if p]
+        if not parts:
+            return "", ""
+        if len(parts) == 1:
+            return parts[0], parts[0]
+        return parts[0], " ".join(parts[1:])
+
+    def _resolve_step3_person(self, data: dict[str, Any]) -> dict[str, Any]:
+        """步骤3 人员：优先 founder_members，其次 directors，最后 applicant。"""
+        founders = list(data.get("founder_members") or [])
+        directors = list(data.get("directors") or [])
+        applicant = dict(data.get("applicant") or {})
+        if founders:
+            return dict(founders[0])
+        if directors:
+            return dict(directors[0])
+        return applicant
+
+    async def _ensure_checkbox_by_patterns(
+        self, page, patterns: list[str], *, scope_pat: str = ""
+    ) -> bool:
+        """按文案勾选 checkbox（可限定在身分等区域）。"""
+        hit = await page.evaluate(
+            """({ patterns, scopePat }) => {
+                const pats = patterns.map(p => (p || '').replace(/\\s+/g, ''));
+                const scopeRe = scopePat ? new RegExp(scopePat, 'i') : null;
+                let roots = [document];
+                if (scopeRe) {
+                    roots = [];
+                    for (const el of document.querySelectorAll(
+                        'legend, label, span, div, th, .rowTitle, h3, h4'
+                    )) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+                        if (!scopeRe.test(t)) continue;
+                        const root = el.closest('fieldset, section, form, .ant-form, div')
+                            || el.parentElement?.parentElement;
+                        if (root) roots.push(root);
+                    }
+                    if (!roots.length) roots = [document];
+                }
+                const tryCheck = (cb) => {
+                    if (!cb || cb.type !== 'checkbox') return false;
+                    const r = cb.getBoundingClientRect();
+                    if (r.width <= 0 && r.height <= 0) return false;
+                    if (!cb.checked) cb.click();
+                    return cb.checked;
+                };
+                const labelMatch = (t) => {
+                    for (const p of pats) {
+                        if (!p || !t.includes(p)) continue;
+                        // 公司秘書：只接受短标签，避免点到「董事」帮助文案
+                        if (/公司秘書|公司秘书/.test(p)) {
+                            if (t.length > 24) continue;
+                            if (/^董事/.test(t)) continue;
+                            if (!(t === p || t.startsWith(p))) continue;
+                            return true;
+                        }
+                        // 董事：短标签优先，跳过内含公司秘書的长说明
+                        if (p === '董事') {
+                            if (t.length > 12) continue;
+                            if (/公司秘書|公司秘书/.test(t)) continue;
+                            if (!(t === p || t.startsWith(p))) continue;
+                            return true;
+                        }
+                        // 其他：短文案或以前缀匹配
+                        if (t.length <= 40 && (t === p || t.startsWith(p) || t.includes(p))) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                for (const root of roots) {
+                    for (const label of root.querySelectorAll(
+                        '.ant-checkbox-wrapper, label'
+                    )) {
+                        const t = (label.innerText || '').replace(/\\s+/g, '');
+                        if (!labelMatch(t)) continue;
+                        const inp = label.querySelector('input[type=checkbox]');
+                        if (inp && tryCheck(inp)) return t.slice(0, 60);
+                        label.click();
+                        return t.slice(0, 60);
+                    }
+                    for (const cb of root.querySelectorAll('input[type=checkbox]')) {
+                        const ctx = (
+                            cb.closest('label, .ant-checkbox-wrapper')?.innerText
+                            || cb.closest('tr, div, li, fieldset, span')?.innerText
+                            || ''
+                        ).replace(/\\s+/g, '');
+                        if (!labelMatch(ctx)) continue;
+                        if (tryCheck(cb)) return ctx.slice(0, 60);
+                    }
+                }
+                return '';
+            }""",
+            {"patterns": patterns, "scopePat": scope_pat},
+        )
+        if hit:
+            logger.info("已勾选: %s → %s", patterns[0], hit)
+            await page.wait_for_timeout(400)
+            return True
+        logger.warning("未勾选: %s", patterns[0])
+        # Playwright 兜底
+        pat = re.compile(patterns[0], re.I)
+        wrappers = page.locator(".ant-checkbox-wrapper, label.ant-checkbox-wrapper")
+        count = await wrappers.count()
+        for i in range(count):
+            item = wrappers.nth(i)
+            if not await item.is_visible():
+                continue
+            txt = re.sub(r"\s+", "", (await item.inner_text() or ""))
+            if len(txt) > 40 or not pat.search(txt):
+                continue
+            if patterns[0] in ("董事",) and "公司秘書" in txt:
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                cls = await item.get_attribute("class") or ""
+                if "ant-checkbox-wrapper-checked" in cls:
+                    logger.info("已勾选(Playwright): %s", patterns[0])
+                    return True
+                await item.click(force=True, timeout=5000)
+                await page.wait_for_timeout(400)
+                inp = item.locator("input[type=checkbox]").first
+                if await inp.count() > 0:
+                    await inp.check(force=True)
+                logger.info("已勾选(Playwright): %s", patterns[0])
+                return True
+            except Exception:
+                pass
+        return False
+
+    async def _wait_step3_shell_ready(self, page) -> None:
+        """等待步骤3：类型/身分区块渲染完成。"""
+        logger.info("等待 NNC1 步骤3 页面加载: %s", page.url[:120])
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=45000)
+        except Exception:
+            logger.debug("步骤3 networkidle 超时，继续等待 DOM")
+
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) return false;
+                    if (!/步驟\\s*3|步骤\\s*3|輸入創辦成員|输入创办成员/.test(body)) {
+                        return false;
+                    }
+                    let natural = false;
+                    for (const r of document.querySelectorAll('input[type=radio]')) {
+                        const ctx = (r.closest('.ant-radio-wrapper, label')?.innerText || '')
+                            .replace(/\\s+/g, '');
+                        if (!ctx.includes('自然人') || ctx.length > 35) continue;
+                        const box = r.getBoundingClientRect();
+                        if (box.width > 0 && box.height > 0) natural = true;
+                    }
+                    let founder = false;
+                    for (const w of document.querySelectorAll('.ant-checkbox-wrapper, label')) {
+                        const t = (w.innerText || '').replace(/\\s+/g, '');
+                        if (t.length > 40) continue;
+                        if (!t.includes('創辦成員') && !t.includes('创办成员')) continue;
+                        const r = w.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) founder = true;
+                    }
+                    return natural && founder;
+                }""",
+                timeout=120000,
+            )
+            logger.info("NNC1 步骤3 身分区块已就绪")
+        except Exception as e:
+            await self._maybe_screenshot(page, "step3_wait_shell_fail")
+            raise RuntimeError(f"步骤3 页面加载超时: {e}")
+
+    async def _wait_step3_form_expanded(self, page) -> None:
+        """勾选身分后等待姓名/股本等详情表单展开。"""
+        logger.info("等待 NNC1 步骤3 人员详情表单")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const nameRe = /中文姓名|英文姓氏|中文名稱|英文名字/;
+                    for (const el of document.querySelectorAll(
+                        'label, .rowTitle, span, div, th, td'
+                    )) {
+                        const t = (el.innerText || '').trim();
+                        if (!nameRe.test(t) || t.length > 50) continue;
+                        const row = el.closest('tr,.ant-row,.ant-form-item,fieldset,div')
+                            || el.parentElement;
+                        const inp = row?.querySelector(
+                            'textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio])'
+                        );
+                        if (!inp) continue;
+                        const r = inp.getBoundingClientRect();
+                        if (r.width > 30 && r.height > 10) return true;
+                    }
+                    for (const tb of document.querySelectorAll('table')) {
+                        const head = (tb.innerText || '').slice(0, 300);
+                        if (/認購的股本|认购的股本|建議向該成員|建议向该成员/.test(head)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                timeout=120000,
+            )
+            logger.info("NNC1 步骤3 人员详情已展开")
+        except Exception as e:
+            await self._maybe_screenshot(page, "step3_wait_expand_fail")
+            raise RuntimeError(f"步骤3 人员表单展开超时: {e}")
+        await page.wait_for_timeout(1000)
+
+    def _capacity_row_js_helpers(self) -> str:
+        """身分行定位与短标签分类的共用 JS 片段。"""
+        return r"""
+                const norm = s => (s || '').replace(/\s+/g, '').trim();
+                const findCapacityRoot = () => {
+                    for (const el of document.querySelectorAll(
+                        'th, td, label, span, div, .rowTitle, legend'
+                    )) {
+                        const t = norm(el.innerText || '');
+                        if (t !== '身分' && t !== '身份') continue;
+                        const row = el.closest('tr')
+                            || el.closest('.ant-row, .ant-form-item, fieldset')
+                            || el.parentElement;
+                        if (row) return row;
+                    }
+                    for (const el of document.querySelectorAll('tr, .ant-row, div, fieldset')) {
+                        const t = norm(el.innerText || '');
+                        if (t.length > 200) continue;
+                        if (/創辦成員|创办成员/.test(t)
+                            && /董事/.test(t)
+                            && /公司秘書|公司秘书/.test(t)) {
+                            return el;
+                        }
+                    }
+                    return document.body;
+                };
+                const labelOf = (wrap) => {
+                    const stripHelp = (s) => (s || '')
+                        .replace(/[\u200b-\u200d\ufeff]/g, '')
+                        .replace(/了解更多[\s\S]*$/i, '')
+                        .replace(/Learn\s*more[\s\S]*$/i, '');
+                    const parts = [];
+                    for (const child of wrap.childNodes) {
+                        if (child.nodeType === 3) {
+                            parts.push(child.textContent || '');
+                            continue;
+                        }
+                        if (child.nodeType !== 1) continue;
+                        if (child.matches?.('.ant-checkbox, input')
+                            || child.querySelector?.('input[type=checkbox]')) {
+                            continue;
+                        }
+                        const tx = (child.innerText || '').trim();
+                        if (/了解更多|Learn\s*more/i.test(tx)) {
+                            // 同一节点里可能是「董事了解更多…」：只保留帮助文案前的短标签
+                            const before = stripHelp(tx);
+                            if (before) parts.push(before);
+                            continue;
+                        }
+                        if (child.matches?.('.anticon, a, button, [role=tooltip]')) continue;
+                        parts.push(tx);
+                    }
+                    let t = stripHelp(norm(parts.join('')));
+                    if (t) return t;
+                    const clone = wrap.cloneNode(true);
+                    clone.querySelectorAll(
+                        '.ant-checkbox, input, .anticon, a, button, [role=tooltip],'
+                        + ' .ant-tooltip, .ant-popover'
+                    ).forEach(n => n.remove());
+                    t = stripHelp(norm(clone.innerText || ''));
+                    if (t) return t;
+                    return stripHelp(norm(wrap.innerText || '')).slice(0, 24);
+                };
+                const classify = (t) => {
+                    // 短标签（已剥「了解更多」）；董事帮助文案含「公司秘書」不可再匹配全文
+                    const clean = (t || '').replace(/[\u200b-\u200d\ufeff]/g, '');
+                    if (clean === '公司秘書' || clean === '公司秘书') return 'secretary';
+                    if (clean === '創辦成員' || clean === '创办成员') return 'founder';
+                    if (clean === '董事') return 'director';
+                    if (/^(公司秘書|公司秘书)/.test(clean) && clean.length <= 12) {
+                        return 'secretary';
+                    }
+                    if (/^(創辦成員|创办成员)/.test(clean) && clean.length <= 12) {
+                        return 'founder';
+                    }
+                    if (/^董事/.test(clean) && clean.length <= 8) return 'director';
+                    return '';
+                };
+                const collectRoles = (root) => {
+                    const wraps = [...root.querySelectorAll(
+                        '.ant-checkbox-wrapper, label'
+                    )].filter(w => w.querySelector('input[type=checkbox]'));
+                    const byRole = { secretary: null, director: null, founder: null };
+                    for (const w of wraps) {
+                        const role = classify(labelOf(w));
+                        if (role && !byRole[role]) byRole[role] = w;
+                    }
+                    return { wraps, byRole, labels: wraps.map(labelOf).slice(0, 10) };
+                };
+                const setChecked = (wrap, want) => {
+                    if (!wrap) return !want;
+                    const inp = wrap.querySelector('input[type=checkbox]');
+                    if (!inp) return false;
+                    if (!!inp.checked === want) return true;
+                    wrap.click();
+                    if (!!inp.checked === want) return true;
+                    inp.click();
+                    return !!inp.checked === want;
+                };
+                const readState = (byRole) => ({
+                    secretary: !!(byRole.secretary?.querySelector('input')?.checked),
+                    director: !!(byRole.director?.querySelector('input')?.checked),
+                    founder: !!(byRole.founder?.querySelector('input')?.checked),
+                });
+        """
+
+    async def _set_capacity_role(self, page, role: str, want: bool) -> dict:
+        """在身分行内设置单个角色勾选状态（founder/director/secretary）。"""
+        helpers = self._capacity_row_js_helpers()
+        return await page.evaluate(
+            f"""({{ role, want }}) => {{
+                {helpers}
+                const root = findCapacityRoot();
+                const {{ byRole, labels }} = collectRoles(root);
+                const wrap = byRole[role];
+                if (!wrap) {{
+                    return {{ ok: false, reason: 'missing_' + role, labels }};
+                }}
+                const ok = setChecked(wrap, want);
+                return {{ ok, labels, state: readState(byRole) }};
+            }}""",
+            {"role": role, "want": want},
+        )
+
+    async def _click_capacity_role_playwright(
+        self, page, texts: tuple[str, ...], *, want_checked: bool
+    ) -> bool:
+        """Playwright 在身分行内按短文案勾/取消。"""
+        capacity = page.locator("tr, .ant-row, fieldset, div").filter(
+            has_text=re.compile(r"身分|身份")
+        ).filter(
+            has_text=re.compile(r"創辦成員|创办成员|公司秘書|公司秘书")
+        ).first
+        if await capacity.count() == 0:
+            return False
+        for text in texts:
+            loc = capacity.get_by_text(text, exact=True)
+            if await loc.count() == 0:
+                continue
+            wrap = loc.first.locator(
+                "xpath=ancestor::*[contains(@class,'ant-checkbox-wrapper')][1]"
+            ).first
+            target = wrap if await wrap.count() > 0 else loc.first
+            await target.scroll_into_view_if_needed()
+            cls = ""
+            if await wrap.count() > 0:
+                cls = await wrap.get_attribute("class") or ""
+            is_checked = "checked" in cls
+            if is_checked == want_checked:
+                return True
+            await target.click(force=True, timeout=8000)
+            return True
+        return False
+
+    async def _read_capacity_state(self, page) -> dict:
+        helpers = self._capacity_row_js_helpers()
+        return await page.evaluate(
+            f"""() => {{
+                {helpers}
+                const root = findCapacityRoot();
+                const {{ byRole, labels }} = collectRoles(root);
+                return {{ ...readState(byRole), labels }};
+            }}"""
+        )
+
+    async def _check_founder_and_director_only(self, page) -> None:
+        """阶段A身分：勾「创办成员+董事」，确保公司秘书未勾。
+
+        创办成员勾选会触发表单展开/载入，必须等 spin 后再勾董事。
+        """
+        # 1) 创办成员
+        r1 = await self._set_capacity_role(page, "founder", True)
+        if not r1 or not r1.get("ok"):
+            if not await self._click_capacity_role_playwright(
+                page, ("創辦成員", "创办成员"), want_checked=True
+            ):
+                await self._maybe_screenshot(page, "step3_founder_director_check_fail")
+                raise RuntimeError(
+                    f"未能勾选创办成员: {(r1 or {}).get('reason')} labels={(r1 or {}).get('labels')}"
+                )
+        await wait_spin_clear(page, timeout_ms=60000)
+        await page.wait_for_timeout(400)
+
+        # 2) 董事（表单展开后身分行仍在）
+        r2 = await self._set_capacity_role(page, "director", True)
+        if not r2 or not r2.get("ok"):
+            if not await self._click_capacity_role_playwright(
+                page, ("董事",), want_checked=True
+            ):
+                await self._maybe_screenshot(page, "step3_founder_director_check_fail")
+                raise RuntimeError(
+                    f"未能勾选董事: {(r2 or {}).get('reason')} labels={(r2 or {}).get('labels')}"
+                )
+        await wait_spin_clear(page, timeout_ms=60000)
+        await page.wait_for_timeout(300)
+
+        # 3) 确保公司秘书未勾
+        r3 = await self._set_capacity_role(page, "secretary", False)
+        if r3 and not r3.get("ok") and r3.get("reason") != "missing_secretary":
+            await self._click_capacity_role_playwright(
+                page, ("公司秘書", "公司秘书"), want_checked=False
+            )
+        await wait_spin_clear(page, timeout_ms=30000)
+
+        state = await self._read_capacity_state(page)
+        if not state.get("founder") or not state.get("director"):
+            await self._maybe_screenshot(page, "step3_founder_director_check_fail")
+            raise RuntimeError(
+                f"阶段A身分校验失败：创办成员={state.get('founder')} "
+                f"董事={state.get('director')} labels={state.get('labels')}"
+            )
+        if state.get("secretary"):
+            await self._maybe_screenshot(page, "step3_founder_director_check_fail")
+            raise RuntimeError("阶段A身分校验失败：公司秘书不应勾选")
+        logger.info("阶段A身分校验通过: 创办成员+董事, 公司秘书未勾")
+        await page.wait_for_timeout(400)
+
+    async def _ensure_step3_identity_checkboxes(self, page) -> None:
+        """阶段A：勾选创办成员 + 董事（精确身分行，带重试）。"""
+        last_err: Exception | None = None
+        for _ in range(3):
+            try:
+                await self._check_founder_and_director_only(page)
+                await wait_spin_clear(page, timeout_ms=60000)
+                await page.wait_for_timeout(500)
+                return
+            except Exception as e:
+                last_err = e
+                logger.warning("阶段A身分勾选重试: %s", e)
+                await wait_spin_clear(page, timeout_ms=30000)
+                await page.wait_for_timeout(800)
+        await self._maybe_screenshot(page, "step3_founder_director_check_fail")
+        raise RuntimeError(f"未能勾选身分创办成员+董事: {last_err}")
+
+    async def _select_natural_person(self, page) -> bool:
+        """选择類型：自然人。"""
+        for attempt in range(3):
+            if await self._select_radio_by_patterns(page, ["自然人"]):
+                return True
+            await wait_spin_clear(page, timeout_ms=30000)
+            await page.wait_for_timeout(800)
+        loc = page.locator(".ant-radio-wrapper, label").filter(
+            has_text=re.compile(r"自然人")
+        )
+        count = await loc.count()
+        for i in range(count):
+            item = loc.nth(i)
+            txt = re.sub(r"\s+", "", (await item.inner_text() or ""))
+            if len(txt) > 25 or "法人" in txt:
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                await item.click(force=True, timeout=5000)
+                logger.info("已选择自然人 (Playwright)")
+                return True
+            except Exception:
+                pass
+        return False
+
+    async def _select_first_option_in_cell(self, page, cell_loc) -> bool:
+        """单元格内下拉框选第一项（股份的類別）。"""
+        if await cell_loc.count() == 0:
+            return False
+        sel = cell_loc.locator("select").first
+        if await sel.count() > 0:
+            opts = sel.locator("option")
+            count = await opts.count()
+            for i in range(count):
+                val = (await opts.nth(i).get_attribute("value") or "").strip()
+                text = (await opts.nth(i).inner_text() or "").strip()
+                if val or text:
+                    try:
+                        await sel.select_option(index=i)
+                        logger.info("已选下拉第一项: %s", text[:40])
+                        await page.wait_for_timeout(300)
+                        return True
+                    except Exception:
+                        pass
+            return False
+        ant = cell_loc.locator(".ant-select").first
+        if await ant.count() > 0:
+            trigger = ant.locator(".ant-select-selector").first
+            await trigger.click(timeout=5000)
+            opt = page.locator(".ant-select-item-option").first
+            if await opt.count() > 0:
+                label = (await opt.inner_text() or "").strip()
+                await opt.click(timeout=5000)
+                logger.info("已选 ant 下拉第一项: %s", label[:40])
+                await page.wait_for_timeout(300)
+                return True
+            await page.keyboard.press("Escape")
+        return False
+
+    async def _fill_member_subscribed_capital(self, page, sc: dict[str, Any]) -> None:
+        """步骤3：認購的股本 — 类别选第一项，總數/總款額填注册资本。"""
+        await self._scroll_to_section(
+            page,
+            ["認購的股本", "认购的股本", "建議向該成員發行的股份數目"],
+        )
+        await page.wait_for_timeout(400)
+
+        amount = str(sc.get("subscribed") or sc.get("paid_up") or "")
+        shares = str(sc.get("total_shares") or amount)
+        currency = str(sc.get("currency") or "HKD").strip() or "HKD"
+        if not shares and not amount:
+            logger.warning("认购股本数据为空，跳过")
+            return
+
+        table = page.locator("table").filter(
+            has_text=re.compile(r"建議向該成員發行的股份數目|建议向该成员发行的股份数目")
+        ).first
+        if await table.count() == 0:
+            table = page.locator("table").filter(
+                has_text=re.compile(r"認購的股本|认购的股本|股份的類別")
+            ).first
+        if await table.count() == 0:
+            logger.warning("未找到认购股本表")
+            return
+
+        await table.scroll_into_view_if_needed()
+        header_row = table.locator("tr").filter(has=page.locator("th")).first
+        if await header_row.count() == 0:
+            header_row = table.locator("tr").first
+        header_texts = await header_row.locator("th, td").all_inner_texts()
+
+        col_map: dict[str, int] = {}
+        for idx, raw in enumerate(header_texts):
+            h = re.sub(r"\s+", "", (raw or "").strip())
+            if not h:
+                continue
+            if re.search(r"股份的類別|股份的类别", h):
+                col_map["class"] = idx
+            elif h in ("總數", "总数"):
+                col_map["total"] = idx
+            elif re.search(r"貨幣單位|货币单位", h):
+                col_map["currency"] = idx
+            elif re.search(r"總款額|总款额", h):
+                col_map["amount"] = idx
+
+        data_row = table.locator("tr").filter(
+            has=page.locator(
+                "td input:not([type=hidden]), td textarea, td select, td .ant-select"
+            )
+        ).first
+        if await data_row.count() == 0:
+            logger.warning("认购股本表无数据行")
+            return
+
+        filled: list[str] = []
+
+        class_idx = col_map.get("class", 0)
+        class_cell = data_row.locator("td").nth(class_idx)
+        if await self._select_first_option_in_cell(page, class_cell):
+            filled.append("class")
+
+        total_idx = col_map.get("total", 1)
+        total_cell = data_row.locator("td").nth(total_idx)
+        total_inp = total_cell.locator(
+            "input:not([type=hidden]):not([type=checkbox]), textarea"
+        ).last
+        if shares and await total_inp.count() > 0:
+            if await self._fill_share_table_input(page, total_inp, shares):
+                filled.append("total")
+
+        cur_idx = col_map.get("currency", 2)
+        cur_cell = data_row.locator("td").nth(cur_idx)
+        sel = cur_cell.locator("select").first
+        if await sel.count() > 0:
+            try:
+                await sel.select_option(label=re.compile(re.escape(currency), re.I))
+                filled.append("currency")
+            except Exception:
+                try:
+                    await sel.select_option(value=currency)
+                    filled.append("currency")
+                except Exception as e:
+                    logger.debug("认购股本货币 select 失败: %s", e)
+        elif await cur_cell.locator(".ant-select").count() > 0:
+            trigger = cur_cell.locator(".ant-select-selector").first
+            await trigger.click(timeout=5000)
+            opt = page.locator(".ant-select-item-option").filter(
+                has_text=re.compile(re.escape(currency), re.I)
+            ).first
+            if await opt.count() > 0:
+                await opt.click(timeout=5000)
+                filled.append("currency")
+            else:
+                await page.keyboard.press("Escape")
+
+        amt_idx = col_map.get("amount", 3)
+        amt_cell = data_row.locator("td").nth(amt_idx)
+        amt_inp = amt_cell.locator(
+            "input:not([type=hidden]):not([type=checkbox]), textarea"
+        ).last
+        if amount and await amt_inp.count() > 0:
+            if await self._fill_share_table_input(page, amt_inp, amount):
+                filled.append("amount")
+
+        if filled:
+            logger.info(
+                "已填写认购股本: shares=%s amount=%s currency=%s detail=%s",
+                shares,
+                amount,
+                currency,
+                filled,
+            )
+        else:
+            logger.warning("认购股本填写失败")
+
+    def _normalize_id_type(self, raw: str, id_number: str = "") -> str:
+        """证件类型：HKID / PRC_ID / PASSPORT。"""
+        key = re.sub(r"[\s_\-]+", "", (raw or "").upper())
+        mapping = {
+            "HKID": "HKID",
+            "HK": "HKID",
+            "HONGKONG": "HKID",
+            "PRCID": "PRC_ID",
+            "PRC": "PRC_ID",
+            "CNID": "PRC_ID",
+            "CHINAID": "PRC_ID",
+            "PASSPORT": "PASSPORT",
+            "PPT": "PASSPORT",
+        }
+        if key in mapping:
+            return mapping[key]
+        num = (id_number or "").strip()
+        if re.match(r"^[A-Z]{1,2}\d", num):
+            return "HKID"
+        if re.match(r"^[A-Z0-9]{6,}$", num) and not re.match(r"^\d{18}$", num):
+            return "PASSPORT"
+        return "PRC_ID"
+
+    def _split_non_hk_address_en(self, address_en: str) -> dict[str, str]:
+        """英文非香港地址拆分（室/街道/区省市）。"""
+        parts = [p.strip() for p in re.split(r",\s*", (address_en or "").strip()) if p.strip()]
+        if not parts:
+            return {"flat": "", "building": "", "street": "", "region": "", "country": "China"}
+        if len(parts) >= 2:
+            region = ", ".join(parts[-2:])
+            body = parts[:-2]
+        else:
+            region = ""
+            body = parts
+        flat = ""
+        street_parts = list(body)
+        if street_parts and re.match(r"^(room|unit|flat|室)", street_parts[0], re.I):
+            flat = street_parts[0]
+            street_parts = street_parts[1:]
+        street = ", ".join(street_parts) if street_parts else ""
+        if len(parts) == 1:
+            street = parts[0]
+            region = ""
+        # 室／樓／座、大廈不单独填写，房间号并入街道行
+        if flat and street:
+            street = f"{flat}, {street}"
+        elif flat and not street:
+            street = flat
+        return {
+            "flat": "",
+            "building": "",
+            "street": street,
+            "region": region,
+            "country": "China",
+        }
+
+    def _resolve_person_address(self, person: dict[str, Any], data: dict[str, Any]) -> dict[str, str]:
+        address_en = (
+            (person.get("address_en") or person.get("address") or "").strip()
+        )
+        if not address_en:
+            applicant = data.get("applicant") or {}
+            address_en = (applicant.get("address_en") or applicant.get("address") or "").strip()
+        return self._split_non_hk_address_en(address_en)
+
+    def _resolve_person_id(self, person: dict[str, Any], data: dict[str, Any]) -> tuple[str, str]:
+        identity = dict(data.get("identity_proof") or {})
+        id_number = (person.get("id_number") or identity.get("id_number") or "").strip()
+        id_type = str(person.get("id_type") or identity.get("id_type") or "")
+        return id_number, self._normalize_id_type(id_type, id_number)
+
+    async def _locate_address_block(
+        self,
+        page,
+        heading_re: str,
+        *,
+        exclude_re: str = "",
+        block_key: str = "addr",
+    ):
+        """定位地址区块根节点（含 radio + textarea），并打标 data-nnc1-addr-block。"""
+        key = await page.evaluate(
+            """({ headingRe, excludeRe, blockKey }) => {
+                document.querySelectorAll('[data-nnc1-addr-block]').forEach(el => {
+                    el.removeAttribute('data-nnc1-addr-block');
+                });
+                const re = new RegExp(headingRe, 'i');
+                const ex = excludeRe ? new RegExp(excludeRe, 'i') : null;
+                const candidates = [...document.querySelectorAll(
+                    'legend,.rowTitle,label,span,div,th,h3,h4,p,td'
+                )];
+                for (const el of candidates) {
+                    const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                    if (!t || t.length > 120) continue;
+                    if (!re.test(t)) continue;
+                    if (ex && ex.test(t)) continue;
+                    let node = el;
+                    for (let d = 0; d < 25 && node; d++) {
+                        const radios = node.querySelectorAll('input[type=radio]');
+                        const fields = [...node.querySelectorAll(
+                            'textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio])'
+                        )].filter(inp => {
+                            const r = inp.getBoundingClientRect();
+                            return r.width > 20 && r.height > 10;
+                        });
+                        if (radios.length >= 1 && fields.length >= 2) {
+                            node.setAttribute('data-nnc1-addr-block', blockKey);
+                            node.scrollIntoView({ block: 'center' });
+                            return blockKey;
+                        }
+                        node = node.parentElement;
+                    }
+                }
+                return '';
+            }""",
+            {
+                "headingRe": heading_re,
+                "excludeRe": exclude_re,
+                "blockKey": block_key,
+            },
+        )
+        if not key:
+            return None
+        loc = page.locator(f"[data-nnc1-addr-block='{block_key}']").first
+        if await loc.count() > 0:
+            return loc
+        return None
+
+    async def _select_non_hk_in_block(self, block) -> bool:
+        candidates = block.locator("label, .ant-radio-wrapper, span.ant-radio + span")
+        count = await candidates.count()
+        for i in range(count):
+            item = candidates.nth(i)
+            if not await item.is_visible():
+                continue
+            text = re.sub(r"\s+", "", (await item.inner_text() or ""))
+            if len(text) > 40:
+                continue
+            if "非香港" not in text and "非本地" not in text:
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                await item.click(timeout=5000)
+                logger.info("已选非香港地址: %s", text[:30])
+                await block.page.wait_for_timeout(300)
+                return True
+            except Exception:
+                inp = item.locator("input[type=radio]").first
+                if await inp.count() > 0:
+                    await inp.check(force=True)
+                    logger.info("已 force 选非香港地址: %s", text[:30])
+                    return True
+        hit = await block.evaluate(
+            """(root) => {
+                for (const w of root.querySelectorAll('.ant-radio-wrapper, label')) {
+                    const t = (w.innerText || '').replace(/\\s+/g, '');
+                    if (t.length > 40) continue;
+                    if (!t.includes('非香港') && !t.includes('非本地')) continue;
+                    w.click();
+                    const inp = w.querySelector('input[type=radio]');
+                    if (inp) {
+                        inp.checked = true;
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    return t.slice(0, 30);
+                }
+                return '';
+            }"""
+        )
+        if hit:
+            logger.info("已选非香港地址 (JS): %s", hit)
+            return True
+        return False
+
+    async def _fill_textarea_in_block(
+        self, block, label_re: str, value: str
+    ) -> bool:
+        if not value:
+            return False
+        pat = re.compile(label_re, re.I)
+        labels = block.locator("label, th, .rowTitle, span, div, td")
+        count = await labels.count()
+        for i in range(count):
+            lab = labels.nth(i)
+            if not await lab.is_visible():
+                continue
+            txt = ((await lab.inner_text()) or "").strip()
+            if len(txt) > 90 or not pat.search(txt):
+                continue
+            inp = lab.locator(
+                "xpath=ancestor-or-self::*[1]//textarea[1] | following::textarea[1] | "
+                "ancestor-or-self::*[1]//input[not(@type='hidden') and not(@type='checkbox')"
+                " and not(@type='radio')][1] | "
+                "following::input[not(@type='hidden') and not(@type='checkbox')"
+                " and not(@type='radio')][1]"
+            ).first
+            if await inp.count() > 0 and await inp.is_visible():
+                await inp.scroll_into_view_if_needed()
+                await inp.fill(value)
+                logger.info("已填写地址 [%s]: %s", label_re, value[:60])
+                return True
+        return False
+
+    async def _fill_address_fields_by_order(
+        self, block, addr: dict[str, str]
+    ) -> int:
+        """兜底：只填街道(第3项)、区省市(第4项)，跳过室/楼/座与大廈。"""
+        textareas = block.locator("textarea")
+        n = await textareas.count()
+        targets = [
+            (2, addr.get("street", "")),
+            (3, addr.get("region", "")),
+        ]
+        filled = 0
+        for idx, val in targets:
+            if not val or idx >= n:
+                continue
+            ta = textareas.nth(idx)
+            if not await ta.is_visible():
+                continue
+            cur = (await ta.input_value() or "").strip()
+            if cur and cur == val:
+                filled += 1
+                continue
+            if not cur:
+                await ta.scroll_into_view_if_needed()
+                await ta.fill(val)
+                logger.info("已填写地址(顺序 #%d): %s", idx + 1, val[:60])
+                filled += 1
+        return filled
+
+    async def _select_country_in_block(self, page, block) -> bool:
+        hit = await block.evaluate(
+            """(root) => {
+                const opts = ['中国', '中國', 'China', '中華人民共和國'];
+                const isCountry = (t) => /國家|国家/.test((t || '').replace(/\\s+/g, ''));
+                for (const el of root.querySelectorAll(
+                    'label, th, .rowTitle, span, div, td'
+                )) {
+                    const t = (el.innerText || '').trim();
+                    if (!isCountry(t) || t.length > 40) continue;
+                    const row = el.closest('tr,.ant-row,.ant-form-item,fieldset,div') || el.parentElement;
+                    const sel = row?.querySelector('select');
+                    if (sel) {
+                        for (const o of sel.options) {
+                            const tx = (o.textContent || '') + ' ' + (o.value || '');
+                            if (opts.some(x => tx.includes(x))) {
+                                sel.value = o.value;
+                                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                                return (o.textContent || '').trim().slice(0, 20);
+                            }
+                        }
+                    }
+                    const ant = row?.querySelector('.ant-select');
+                    if (ant) {
+                        (ant.querySelector('.ant-select-selector') || ant).click();
+                        return '__ant__';
+                    }
+                }
+                const sel = root.querySelector('select');
+                if (sel) {
+                    for (const o of sel.options) {
+                        const tx = (o.textContent || '') + ' ' + (o.value || '');
+                        if (opts.some(x => tx.includes(x))) {
+                            sel.value = o.value;
+                            sel.dispatchEvent(new Event('change', { bubbles: true }));
+                            return (o.textContent || '').trim().slice(0, 20);
+                        }
+                    }
+                }
+                return '';
+            }"""
+        )
+        if hit == "__ant__":
+            for opt_text in ("中国", "中國", "China"):
+                opt = page.locator(".ant-select-item-option").filter(
+                    has_text=re.compile(re.escape(opt_text), re.I)
+                ).first
+                if await opt.count() > 0:
+                    await opt.click(timeout=5000)
+                    logger.info("已选国家/地区 (ant): %s", opt_text)
+                    return True
+            await page.keyboard.press("Escape")
+        elif hit:
+            logger.info("已选国家/地区: %s", hit)
+            return True
+        return False
+
+    async def _fill_non_hk_address_section(
+        self,
+        page,
+        heading_re: str,
+        addr: dict[str, str],
+        *,
+        exclude_re: str = "",
+        block_key: str = "addr",
+        scroll_keywords: list[str] | None = None,
+    ) -> bool:
+        """在指定标题的地址区块：非香港 + 英文地址字段。"""
+        if scroll_keywords:
+            await self._scroll_to_section(page, scroll_keywords)
+        await page.wait_for_timeout(300)
+        block = await self._locate_address_block(
+            page,
+            heading_re,
+            exclude_re=exclude_re,
+            block_key=block_key,
+        )
+        if block is None:
+            logger.warning("未找到地址区块: %s", heading_re)
+            return False
+        if not await self._select_non_hk_in_block(block):
+            logger.warning("地址区块未选非香港: %s", heading_re)
+        await page.wait_for_timeout(600)
+        filled = 0
+        # 不填室／樓／座等、大廈
+        if await self._fill_textarea_in_block(
+            block, r"街道.*屋苑|街道.*地段|街道.*村", addr.get("street", "")
+        ):
+            filled += 1
+        if await self._fill_textarea_in_block(
+            block, r"區.*市.*省|郵遞區號|州", addr.get("region", "")
+        ):
+            filled += 1
+        order_filled = await self._fill_address_fields_by_order(block, addr)
+        filled += order_filled
+        if await self._select_country_in_block(page, block):
+            filled += 1
+        logger.info(
+            "地址区块 [%s] 填写完成 filled=%s street=%s region=%s",
+            block_key,
+            filled,
+            (addr.get("street") or "")[:50],
+            (addr.get("region") or "")[:40],
+        )
+        return filled > 0
+
+    async def _click_copy_founder_address(self, page) -> bool:
+        """通常住址：在区块内点击「複製創辦成員的地址」。"""
+        await self._scroll_to_section(
+            page, ["通常住址", "通常住址將不會供公眾查閱"]
+        )
+        block = await self._locate_address_block(
+            page,
+            r"通常住址.*董事|通常住址.*适用|通常住址",
+            block_key="usual",
+        )
+        scope = block if block is not None else page
+        btn = scope.locator("button, a, input[type=button], [role=button]").filter(
+            has_text=re.compile(
+                r"複製創辦成員的地址|复制创办成员的地址|複製通訊|复制通讯", re.I
+            )
+        ).first
+        if await btn.count() > 0:
+            await btn.scroll_into_view_if_needed()
+            await btn.click(timeout=10000)
+            logger.info("已点击「複製創辦成員的地址」")
+            await page.wait_for_timeout(1000)
+            return True
+        clicked = await page.evaluate(
+            """() => {
+                const pat = /複製創辦成員的地址|复制创办成员的地址/i;
+                for (const el of document.querySelectorAll(
+                    'button, a, input[type=button], [role=button], .btn'
+                )) {
+                    const t = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                    if (!pat.test(t)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    return t.slice(0, 40);
+                }
+                return '';
+            }"""
+        )
+        if clicked:
+            logger.info("已点击: %s", clicked)
+            await page.wait_for_timeout(1000)
+            return True
+        logger.warning("未找到「複製創辦成員的地址」按钮")
+        return False
+
+    async def _fill_hkid_number(self, page, id_number: str) -> bool:
+        """填写完整香港身分證號碼（含括号校验位）。"""
+        if not id_number:
+            return False
+        main = id_number.strip()
+        check = ""
+        m = re.match(r"^([A-Z]{1,2}\d{6})([A0-9])$", main, re.I)
+        if m:
+            main, check = m.group(1), m.group(2)
+        ok = await self._fill_field_by_label(
+            page,
+            ["完整香港身分證號碼", "完整香港身份证号码"],
+            main,
+        )
+        if check:
+            bracket = page.locator(
+                "xpath=//*[contains(.,'完整香港身分證') or contains(.,'完整香港身份证')]"
+                "//following::input[not(@type='hidden')][2]"
+            ).first
+            if await bracket.count() > 0:
+                await bracket.fill(check)
+        return ok
+
+    async def _fill_step3_identity(
+        self, page, person: dict[str, Any], data: dict[str, Any]
+    ) -> None:
+        """身分識別：HKID 填無或实号；护照/身份证填证件号 + 签发国。"""
+        id_number, id_type = self._resolve_person_id(person, data)
+        await self._scroll_to_section(page, ["身分識別", "身份识别", "Identification"])
+
+        if id_type == "HKID" and id_number:
+            await self._fill_hkid_number(page, id_number)
+        else:
+            await self._fill_field_by_label(
+                page,
+                ["完整香港身分證號碼", "完整香港身份证号码"],
+                "無",
+            )
+            if id_number:
+                await self._fill_field_by_label(
+                    page,
+                    ["完整護照號碼", "完整护照号码", "Passport"],
+                    id_number,
+                )
+            if id_type in ("PRC_ID", "PASSPORT"):
+                for country in ("中国", "中國", "China", "中華人民共和國"):
+                    if await self._select_option_by_label(
+                        page,
+                        [
+                            "護照簽發國家",
+                            "护照签发国家",
+                            "護照簽發國家／地區",
+                            "護照簽發國家/地區",
+                        ],
+                        country,
+                    ):
+                        break
+
+    async def _click_add_to_officer_list(self, page) -> None:
+        """点击「加入至創辦成員/高級人員列表」。"""
+        await self._scroll_form_to_bottom(page)
+        await page.wait_for_timeout(300)
+        pat = re.compile(
+            r"加入至創辦成員.*高級人員列表|加入至创办成员.*高级人员列表",
+            re.I,
+        )
+        btn = page.locator("button, a, input[type=button], [role=button]").filter(
+            has_text=pat
+        ).first
+        if await btn.count() > 0:
+            await btn.scroll_into_view_if_needed()
+            await btn.click(timeout=15000)
+            logger.info("已点击「加入至創辦成員/高級人員列表」")
+            await wait_spin_clear(page, timeout_ms=90000)
+            await page.wait_for_timeout(1500)
+            return
+        clicked = await page.evaluate(
+            """() => {
+                const pat = /加入至創辦成員.*高級人員列表|加入至创办成员.*高级人员列表/i;
+                for (const el of document.querySelectorAll(
+                    'button, a, input[type=button], [role=button], .btn'
+                )) {
+                    const t = (el.innerText || el.value || '').trim();
+                    if (!pat.test(t.replace(/\\s+/g, ''))) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    return t.slice(0, 50);
+                }
+                return '';
+            }"""
+        )
+        if clicked:
+            logger.info("已点击「%s」(JS)", clicked)
+            await wait_spin_clear(page, timeout_ms=90000)
+            await page.wait_for_timeout(1500)
+            return
+        await self._maybe_screenshot(page, "add_officer_fail")
+        raise RuntimeError("未找到「加入至創辦成員/高級人員列表」按钮")
+
+    async def _wait_director_consent_signatory_page(self, page) -> None:
+        """等待「出任董事職位同意書」簽署人选择页加载完成。"""
+        logger.info("等待董事同意书簽署人页面")
+        await wait_spin_clear(page, timeout_ms=60000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+
+        def _signatory_ready_js() -> str:
+            return """() => {
+                const body = document.body?.innerText || '';
+                if (/載入中|加载中|Loading/i.test(body) && body.length < 500) return '';
+                const hasHeading = /請選擇出任董事職位同意書的簽署人|选择出任董事职位同意书的签署人|出任董事職位同意書.*簽署人/i.test(body);
+                const hasLabel = /簽署人|签署人/.test(body);
+                if (!hasHeading && !hasLabel) return '';
+                let hasConfirm = false;
+                for (const el of document.querySelectorAll('button,a,[role=button],input[type=button]')) {
+                    const t = (el.innerText || el.value || '').trim();
+                    if (/^確認$|^确认$|^Confirm$/i.test(t)) {
+                        hasConfirm = true;
+                        break;
+                    }
+                }
+                const hasSelect = document.querySelector('.ant-select, select');
+                if ((hasHeading || hasLabel) && (hasConfirm || hasSelect)) return 'ready';
+                return '';
+            }"""
+
+        try:
+            await page.wait_for_function(_signatory_ready_js(), timeout=120000)
+            logger.info("董事同意书簽署人页面已就绪")
+        except Exception as e:
+            # spinner 未消失但表单已可见时继续
+            ok = await page.evaluate(_signatory_ready_js())
+            if ok:
+                logger.warning("簽署人页面 spinner 未清，但表单已可见，继续")
+            else:
+                await self._maybe_screenshot(page, "step3_signatory_wait_fail")
+                raise RuntimeError(f"簽署人页面加载超时: {e}")
+        await page.wait_for_timeout(800)
+        # 等待簽署人下拉选项加载
+        try:
+            await page.wait_for_function(
+                """() => {
+                    for (const el of document.querySelectorAll(
+                        'label, .rowTitle, span, div, th, p'
+                    )) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '');
+                        if (!t.includes('簽署人') && !t.includes('签署人')) continue;
+                        if (t.length > 60) continue;
+                        const row = el.closest('tr,.ant-row,.ant-form-item,fieldset,div')
+                            || el.parentElement?.parentElement;
+                        if (!row) continue;
+                        const sel = row.querySelector('select');
+                        if (sel && sel.options.length > 1) return true;
+                        const ant = row.querySelector('.ant-select');
+                        if (ant) return true;
+                    }
+                    return document.querySelector('.ant-select') !== null;
+                }""",
+                timeout=30000,
+            )
+        except Exception:
+            logger.debug("簽署人下拉 DOM 等待超时，继续尝试选择")
+
+    async def _mark_signatory_select(self, page) -> bool:
+        return bool(
+            await page.evaluate(
+                """() => {
+                    document.querySelectorAll('[data-nnc1-signatory-select]').forEach(el => {
+                        el.removeAttribute('data-nnc1-signatory-select');
+                    });
+                    const mark = (ant) => {
+                        if (!ant) return false;
+                        ant.setAttribute('data-nnc1-signatory-select', '1');
+                        return true;
+                    };
+                    const norm = s => (s || '').replace(/\\s+/g, '').trim();
+
+                    for (const el of document.querySelectorAll(
+                        'label, span, td, th, div, p'
+                    )) {
+                        const t = norm(el.innerText || '');
+                        if (t !== '簽署人' && t !== '签署人') continue;
+                        const row = el.closest('tr')
+                            || el.closest('.ant-row,.ant-form-item,fieldset');
+                        if (row) {
+                            const ant = row.querySelector('.ant-select');
+                            const sel = row.querySelector('select');
+                            if (mark(ant)) return true;
+                            if (sel) {
+                                sel.setAttribute('data-nnc1-signatory-select', '1');
+                                return true;
+                            }
+                        }
+                        const parent = el.parentElement;
+                        const siblingAnt = parent?.querySelector('.ant-select')
+                            || parent?.nextElementSibling?.querySelector('.ant-select');
+                        if (mark(siblingAnt)) return true;
+                        const siblingSel = parent?.querySelector('select')
+                            || parent?.nextElementSibling?.querySelector('select');
+                        if (siblingSel) {
+                            siblingSel.setAttribute('data-nnc1-signatory-select', '1');
+                            return true;
+                        }
+                    }
+
+                    for (const el of document.querySelectorAll(
+                        'legend, label, span, div, th, p, td'
+                    )) {
+                        const raw = (el.innerText || '').trim();
+                        if (!/請選擇出任董事職位同意書的簽署人|选择出任董事职位同意书的签署人/i.test(raw)) {
+                            continue;
+                        }
+                        const walk = (start) => {
+                            const seen = new Set();
+                            const queue = [start];
+                            while (queue.length) {
+                                const node = queue.shift();
+                                if (!node || seen.has(node)) continue;
+                                seen.add(node);
+                                if (node.classList?.contains('ant-select')) return mark(node);
+                                if (node.tagName === 'SELECT') {
+                                    node.setAttribute('data-nnc1-signatory-select', '1');
+                                    return true;
+                                }
+                                for (const child of node.children || []) queue.push(child);
+                                if (node.nextElementSibling) queue.push(node.nextElementSibling);
+                            }
+                            return false;
+                        };
+                        if (walk(el)) return true;
+                        if (el.parentElement && walk(el.parentElement)) return true;
+                    }
+                    return false;
+                }"""
+            )
+        )
+
+    async def _get_signatory_display_text(self, page) -> str:
+        if not await self._mark_signatory_select(page):
+            return ""
+        return (
+            await page.evaluate(
+                """() => {
+                    const root = document.querySelector('[data-nnc1-signatory-select]');
+                    if (!root) return '';
+                    if (root.tagName === 'SELECT') {
+                        const opt = root.options[root.selectedIndex];
+                        return ((opt?.textContent || opt?.value || '')).trim();
+                    }
+                    const sel = root.querySelector('.ant-select-selector') || root;
+                    const item = root.querySelector('.ant-select-selection-item');
+                    const placeholder = root.querySelector('.ant-select-selection-placeholder');
+                    const parts = [
+                        item?.innerText,
+                        sel?.innerText,
+                        root.getAttribute('title'),
+                    ].map(t => (t || '').trim()).filter(Boolean);
+                    for (const p of parts) {
+                        if (!/請選擇|请选择|^Select$/i.test(p)) return p;
+                    }
+                    return (placeholder?.innerText || parts[0] || '').trim();
+                }"""
+            )
+            or ""
+        ).strip()
+
+    async def _select_first_signatory(self, page) -> bool:
+        """簽署人下拉选第一项（跳过請選擇）。"""
+        await self._mark_signatory_select(page)
+        cur = await self._get_signatory_display_text(page)
+        if cur and not re.search(r"請選擇|请选择|^Select$", cur, re.I):
+            logger.info("簽署人已选中: %s", cur[:50])
+            return True
+
+        # native select：选第一项非 placeholder
+        picked_native = await page.evaluate(
+            """() => {
+                const sel = document.querySelector('[data-nnc1-signatory-select]');
+                if (!sel || sel.tagName !== 'SELECT') return '';
+                for (let i = 0; i < sel.options.length; i++) {
+                    const t = (sel.options[i].textContent || '').trim();
+                    if (!t || /請選擇|请选择|^Select$/i.test(t)) continue;
+                    sel.selectedIndex = i;
+                    sel.dispatchEvent(new Event('input', { bubbles: true }));
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return t.slice(0, 50);
+                }
+                return '';
+            }"""
+        )
+        if picked_native:
+            logger.info("已选簽署人(select/JS): %s", picked_native)
+            await page.wait_for_timeout(500)
+            return True
+
+        sel_loc = page.locator("[data-nnc1-signatory-select]").first
+        if await sel_loc.count() > 0 and await sel_loc.evaluate("el => el.tagName === 'SELECT'"):
+            opts = sel_loc.locator("option")
+            count = await opts.count()
+            for i in range(count):
+                text = (await opts.nth(i).inner_text() or "").strip()
+                if not text or re.search(r"請選擇|请选择|Select", text, re.I):
+                    continue
+                try:
+                    await sel_loc.select_option(index=i)
+                    logger.info("已选簽署人(select): %s", text[:50])
+                    await page.wait_for_timeout(500)
+                    return True
+                except Exception:
+                    pass
+
+        trigger = page.locator(
+            "[data-nnc1-signatory-select] .ant-select-selector"
+        ).first
+        if await trigger.count() == 0:
+            trigger = page.locator("[data-nnc1-signatory-select]").first
+        if await trigger.count() > 0:
+            await trigger.scroll_into_view_if_needed()
+            try:
+                await trigger.click(timeout=10000)
+            except Exception:
+                await page.evaluate(
+                    """() => {
+                        const t = document.querySelector(
+                            '[data-nnc1-signatory-select] .ant-select-selector,'
+                            + '[data-nnc1-signatory-select]'
+                        );
+                        if (t) t.click();
+                    }"""
+                )
+            try:
+                await page.wait_for_selector(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                    ".ant-select-item-option",
+                    timeout=15000,
+                )
+            except Exception:
+                await page.wait_for_timeout(800)
+            opts = page.locator(
+                ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                ".ant-select-item-option"
+            )
+            if await opts.count() == 0:
+                opts = page.locator(".ant-select-item-option")
+            count = await opts.count()
+            for i in range(count):
+                text = (await opts.nth(i).inner_text() or "").strip()
+                if not text or re.search(r"請選擇|请选择|^Select$", text, re.I):
+                    continue
+                try:
+                    await opts.nth(i).click(timeout=8000)
+                    await page.wait_for_timeout(500)
+                    new_val = await self._get_signatory_display_text(page)
+                    logger.info("已选簽署人(ant): %s", (new_val or text)[:50])
+                    return True
+                except Exception:
+                    pass
+            await page.keyboard.press("Escape")
+
+        # 键盘兜底：打开下拉 → 下箭头 → 回车
+        trigger = page.locator(
+            "[data-nnc1-signatory-select] .ant-select-selector"
+        ).first
+        if await trigger.count() > 0:
+            try:
+                await trigger.click(timeout=5000)
+                await page.wait_for_timeout(400)
+                await page.keyboard.press("ArrowDown")
+                await page.wait_for_timeout(300)
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(500)
+                final_kb = await self._get_signatory_display_text(page)
+                if final_kb and not re.search(r"請選擇|请选择", final_kb, re.I):
+                    logger.info("已选簽署人(键盘): %s", final_kb[:50])
+                    return True
+            except Exception as e:
+                logger.debug("簽署人键盘选择失败: %s", e)
+
+        # JS 兜底：先点开再点第一项
+        hit = await page.evaluate(
+            """() => {
+                const skip = t => !t || /請選擇|请选择|^Select$/i.test(t.trim());
+                const root = document.querySelector('[data-nnc1-signatory-select]');
+                if (!root) return '';
+                const trigger = root.querySelector('.ant-select-selector') || root;
+                if (trigger) trigger.click();
+                const opts = [...document.querySelectorAll(
+                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option,'
+                    + '.ant-select-item-option'
+                )];
+                for (const opt of opts) {
+                    const tx = (opt.innerText || '').trim();
+                    if (skip(tx)) continue;
+                    opt.click();
+                    return tx.slice(0, 50);
+                }
+                return '';
+            }"""
+        )
+        if hit:
+            logger.info("已选簽署人(JS): %s", hit)
+            await page.wait_for_timeout(500)
+            return True
+
+        final = await self._get_signatory_display_text(page)
+        if final and not re.search(r"請選擇|请选择", final, re.I):
+            logger.info("簽署人已选中(校验): %s", final[:50])
+            return True
+        logger.warning("未选到簽署人，当前显示: %s", final[:40] if final else "空")
+        return False
+
+    async def _wait_signatory_confirm_ready(self, page) -> None:
+        """选择簽署人后等待页面加载完成（spinner 消失后再点確認）。"""
+        logger.info("等待簽署人选择后页面就绪")
+        await wait_spin_clear(page, timeout_ms=90000)
+        await page.wait_for_timeout(1500)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        await wait_spin_clear(page, timeout_ms=60000)
+        # 不再强依赖 body 文案含「確認」（按钮可能是 value/css/特殊节点）
+        await page.wait_for_timeout(800)
+        logger.info("簽署人选择后加载等待结束，准备点击確認")
+
+    async def _dump_signatory_click_candidates(self, page) -> None:
+        """失败时输出簽署人页可点击候选，便于排查。"""
+        try:
+            info = await page.evaluate(
+                """() => {
+                    const items = [];
+                    for (const el of document.querySelectorAll(
+                        'button, a, input, [role=button], .btn, .ant-btn, [onclick]'
+                    )) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        const cs = getComputedStyle(el);
+                        items.push({
+                            tag: el.tagName,
+                            type: el.getAttribute('type') || '',
+                            cls: (el.className || '').toString().slice(0, 80),
+                            text: ((el.innerText || el.value || el.getAttribute('aria-label') || '')
+                                .trim()).slice(0, 40),
+                            value: (el.value || '').slice(0, 40),
+                            bg: cs.backgroundColor,
+                            color: cs.color,
+                            x: Math.round(r.x), y: Math.round(r.y),
+                            w: Math.round(r.width), h: Math.round(r.height),
+                        });
+                    }
+                    return {
+                        url: location.href,
+                        bodyHasConfirm: /確認|确认|Confirm/.test(document.body?.innerText || ''),
+                        bodyHasCancel: /取消|Cancel/.test(document.body?.innerText || ''),
+                        iframeCount: document.querySelectorAll('iframe').length,
+                        items: items.slice(0, 80),
+                    };
+                }"""
+            )
+            out = (
+                Path(PROJECT_ROOT)
+                / "data"
+                / "icris_form_screenshots"
+                / f"signatory_click_debug_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+            )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("簽署人点击候选已写入: %s", out)
+            logger.info(
+                "bodyHasConfirm=%s bodyHasCancel=%s iframes=%s candidates=%s",
+                info.get("bodyHasConfirm"),
+                info.get("bodyHasCancel"),
+                info.get("iframeCount"),
+                len(info.get("items") or []),
+            )
+        except Exception as e:
+            logger.debug("dump signatory candidates failed: %s", e)
+
+    async def _find_confirm_button(self, page):
+        """查找董事同意书页「確認」按钮（文案 / 结构 / 红色按钮）。"""
+        for text in ("確認", "确认", "Confirm"):
+            loc = page.get_by_text(text, exact=True)
+            n = await loc.count()
+            for i in range(n):
+                el = loc.nth(i)
+                try:
+                    if not await el.is_visible():
+                        continue
+                except Exception:
+                    continue
+                handle = await el.evaluate_handle(
+                    """el => {
+                        const ok = n => n && (
+                            n.tagName === 'BUTTON' || n.tagName === 'A' ||
+                            n.tagName === 'INPUT' || n.getAttribute('role') === 'button' ||
+                            (n.className && /btn|button/i.test(String(n.className)))
+                        );
+                        let cur = el;
+                        for (let i = 0; i < 6 && cur; i++) {
+                            if (ok(cur)) return cur;
+                            cur = cur.parentElement;
+                        }
+                        return el;
+                    }"""
+                )
+                btn = handle.as_element()
+                if btn is None:
+                    continue
+                disabled = await btn.evaluate(
+                    """el => !!(el.disabled || el.getAttribute('aria-disabled') === 'true'
+                        || el.classList?.contains('ant-btn-disabled')
+                        || el.classList?.contains('disabled'))"""
+                )
+                if not disabled:
+                    return btn
+
+        handle = await page.evaluate_handle(
+            """() => {
+                const compact = s => (s || '').replace(/\\s+/g, '');
+                const isConfirm = t => /^(確認|确认|Confirm)$/i.test(compact(t));
+                const isCancel = t => /^(取消|Cancel)$/i.test(compact(t));
+                const labelOf = el => compact(
+                    el.innerText || el.value || el.getAttribute('aria-label')
+                    || el.getAttribute('title') || ''
+                );
+                const actionable = el => {
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return null;
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+                    if (el.classList?.contains('ant-btn-disabled')) return null;
+                    return el;
+                };
+                const isRedish = el => {
+                    const bg = getComputedStyle(el).backgroundColor || '';
+                    const m = bg.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+                    if (!m) return false;
+                    const r = +m[1], g = +m[2], b = +m[3];
+                    return r > 150 && g < 100 && b < 100;
+                };
+                const all = [...document.querySelectorAll(
+                    'button, a, input[type=button], input[type=submit], input[type=image], '
+                    + '[role=button], .btn, .ant-btn, [onclick]'
+                )];
+
+                for (const el of all) {
+                    if (!isConfirm(labelOf(el))) continue;
+                    const hit = actionable(el);
+                    if (hit) return hit;
+                }
+                for (const el of all) {
+                    if (!isCancel(labelOf(el))) continue;
+                    const parent = el.parentElement;
+                    if (!parent) continue;
+                    const kids = [...parent.children].filter(c => {
+                        const r = c.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+                    const idx = kids.indexOf(el);
+                    if (idx > 0) {
+                        const prev = kids[idx - 1];
+                        const hit = actionable(prev)
+                            || actionable(prev.querySelector('button,a,input,.btn,.ant-btn'));
+                        if (hit) return hit;
+                    }
+                    for (const sib of kids) {
+                        if (sib === el) continue;
+                        if (isRedish(sib)) {
+                            const hit = actionable(sib);
+                            if (hit) return hit;
+                        }
+                    }
+                }
+                let scope = null;
+                for (const el of document.querySelectorAll('div, section, form, fieldset, table')) {
+                    const t = el.innerText || '';
+                    if (/請選擇出任董事職位同意書的簽署人|签署人|簽署人/.test(t)
+                        && /取消|Cancel/.test(t)) {
+                        scope = el;
+                        break;
+                    }
+                }
+                const pool = scope ? [...scope.querySelectorAll(
+                    'button, a, input[type=button], input[type=submit], .btn, .ant-btn, [role=button]'
+                )] : all;
+                const reds = pool.filter(el => actionable(el) && isRedish(el));
+                if (reds.length) {
+                    reds.sort((a, b) => {
+                        const ra = a.getBoundingClientRect();
+                        const rb = b.getBoundingClientRect();
+                        return (rb.y - ra.y) || (ra.x - rb.x);
+                    });
+                    return reds[0];
+                }
+                return null;
+            }"""
+        )
+        el = handle.as_element() if handle else None
+        if el is not None:
+            return el
+        return None
+
+    async def _click_confirm_button(self, page) -> bool:
+        """点击「確認」按钮（董事同意书页）；选完簽署人并加载后再点。"""
+        await self._scroll_form_to_bottom(page)
+        btn = await self._find_confirm_button(page)
+        if btn is not None:
+            await btn.scroll_into_view_if_needed()
+            try:
+                await btn.click(timeout=15000)
+            except Exception:
+                await btn.click(timeout=15000, force=True)
+            logger.info("已点击「確認」")
+            await wait_spin_clear(page, timeout_ms=90000)
+            await page.wait_for_timeout(1000)
+            return True
+
+        clicked = await page.evaluate(
+            """() => {
+                const compact = s => (s || '').replace(/\\s+/g, '');
+                const labelOf = el => compact(
+                    el.innerText || el.value || el.getAttribute('aria-label')
+                    || el.getAttribute('title') || ''
+                );
+                const isConfirm = t => /^(確認|确认|Confirm)$/i.test(t);
+                const isCancel = t => /^(取消|Cancel)$/i.test(t);
+                const isRedish = el => {
+                    const bg = getComputedStyle(el).backgroundColor || '';
+                    const m = bg.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+                    if (!m) return false;
+                    const r = +m[1], g = +m[2], b = +m[3];
+                    return r > 150 && g < 100 && b < 100;
+                };
+                const tryClick = (el) => {
+                    if (!el) return '';
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return '';
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return '';
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    return labelOf(el) || (el.tagName + ':' + Math.round(r.x) + ',' + Math.round(r.y));
+                };
+                const all = [...document.querySelectorAll(
+                    'button, a, input[type=button], input[type=submit], input[type=image], '
+                    + '[role=button], .btn, .ant-btn, [onclick]'
+                )];
+                for (const el of all) {
+                    if (isConfirm(labelOf(el))) {
+                        const hit = tryClick(el);
+                        if (hit) return hit;
+                    }
+                }
+                for (const el of all) {
+                    if (!isCancel(labelOf(el))) continue;
+                    const parent = el.parentElement;
+                    if (!parent) continue;
+                    const kids = [...parent.children];
+                    const idx = kids.indexOf(el);
+                    if (idx > 0) {
+                        const hit = tryClick(kids[idx - 1]);
+                        if (hit) return hit;
+                    }
+                    for (const sib of kids) {
+                        if (sib === el) continue;
+                        if (isRedish(sib)) {
+                            const hit = tryClick(sib);
+                            if (hit) return hit;
+                        }
+                    }
+                }
+                const reds = all.filter(isRedish);
+                reds.sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y);
+                if (reds[0]) {
+                    const hit = tryClick(reds[0]);
+                    if (hit) return hit;
+                }
+                return '';
+            }"""
+        )
+        if clicked:
+            logger.info("已点击「確認」(JS): %s", str(clicked)[:50])
+            await wait_spin_clear(page, timeout_ms=90000)
+            await page.wait_for_timeout(1000)
+            return True
+        return False
+
+    async def _confirm_director_consent_signatory(self, page) -> None:
+        """簽署人选第一项 → 等待加载 → 確認。"""
+        await self._wait_director_consent_signatory_page(page)
+        await self._maybe_screenshot(page, "step3_signatory_before")
+        if not await self._select_first_signatory(page):
+            await page.wait_for_timeout(1500)
+            if not await self._select_first_signatory(page):
+                await self._maybe_screenshot(page, "step3_signatory_select_fail")
+                raise RuntimeError("未能选择簽署人第一项")
+        await self._maybe_screenshot(page, "step3_signatory_selected")
+        await self._wait_signatory_confirm_ready(page)
+        if not await self._click_confirm_button(page):
+            await page.wait_for_timeout(2000)
+            await wait_spin_clear(page, timeout_ms=30000)
+            if not await self._click_confirm_button(page):
+                await self._dump_signatory_click_candidates(page)
+                await self._maybe_screenshot(page, "step3_confirm_fail")
+                raise RuntimeError("未找到董事同意书「確認」按钮")
+
+    async def _wait_step3_officer_list_page(self, page) -> None:
+        """等待創辦成員/高級人員列表页（含儲存及繼續）。"""
+        logger.info("等待創辦成員/高級人員列表页")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) return false;
+                    if (!/創辦成員.*高級人員列表|创办成员.*高级人员列表|創辦成員\\/高級人員/.test(body)) {
+                        return false;
+                    }
+                    if (!/(儲存|储存|存储)及(繼續|继续)/.test(body)) return false;
+                    if (/修改|刪除|删除/.test(body)) return true;
+                    const tables = document.querySelectorAll('table');
+                    for (const tb of tables) {
+                        if (/中文名稱|中文名称|英文名稱/.test(tb.innerText || '')) return true;
+                    }
+                    return false;
+                }""",
+                timeout=120000,
+            )
+            logger.info("創辦成員/高級人員列表页已就绪")
+        except Exception as e:
+            await self._maybe_screenshot(page, "step3_list_wait_fail")
+            raise RuntimeError(f"創辦成員列表页加载超时: {e}")
+        await page.wait_for_timeout(800)
+
+    async def _fill_step3_member_info(self, page, data: dict[str, Any]) -> None:
+        """步骤3：創辦成員/董事 — 类型/身分、姓名、认购股本、地址、证件、加入列表。"""
+        logger.info("NNC1 步骤3: 輸入創辦成員/董事/公司秘書資料")
+        await self._wait_step3_shell_ready(page)
+        await self._maybe_screenshot(page, "step3_before")
+
+        if not await self._select_natural_person(page):
+            logger.warning("未能选择自然人，继续尝试填表")
+        await page.wait_for_timeout(600)
+
+        await self._ensure_step3_identity_checkboxes(page)
+        await self._wait_step3_form_expanded(page)
+
+        person = self._resolve_step3_person(data)
+        name_cn = (person.get("name_cn") or "").strip()
+        name_en = (person.get("name_en") or "").strip()
+        await self._fill_step3_person_names(page, name_cn, name_en)
+
+        sc = self._resolve_share_capital(data)
+        await self._scroll_form_to_bottom(page)
+        await self._fill_member_subscribed_capital(page, sc)
+
+        addr = self._resolve_person_address(person, data)
+
+        await self._fill_non_hk_address_section(
+            page,
+            r"地址.*適用於創辦成員|地址.*适用于创办成员|地址.*創辦成員",
+            addr,
+            exclude_re=r"通訊|通讯|通常",
+            block_key="founder",
+            scroll_keywords=["地址", "創辦成員", "创办成员"],
+        )
+        await self._fill_non_hk_address_section(
+            page,
+            r"通訊地址.*適用於董事|通讯地址.*适用于董事|通訊地址.*董事",
+            addr,
+            block_key="corr",
+            scroll_keywords=["通訊地址", "通讯地址", "董事"],
+        )
+
+        await self._click_copy_founder_address(page)
+
+        await self._fill_step3_identity(page, person, data)
+
+        await self._ensure_checkbox_by_patterns(
+            page,
+            ["出任董事職位同意書", "出任董事职位同意书", "董事將會簽署"],
+        )
+
+        await self._maybe_screenshot(page, "step3_filled")
+        await self._click_add_to_officer_list(page)
+        await self._confirm_director_consent_signatory(page)
+        await self._wait_step3_officer_list_page(page)
+        await self._maybe_screenshot(page, "step3_list")
+        await self._fill_step3_corporate_secretary(page, data)
+        await self._wait_step3_officer_list_page(page)
+        await self._maybe_screenshot(page, "step3_secretary_added")
+        await self._click_save_and_continue(page)
+        await self._maybe_screenshot(page, "step3_after")
+
+    def _resolve_company_secretary(self, data: dict[str, Any]) -> dict[str, Any]:
+        """解析公司秘书法人团体信息：个案优先，缺省读注册配置。"""
+        from src.materials.aggregator import apply_default_office, _get_default_office
+
+        apply_default_office(data)
+        sec = dict(data.get("company_secretary") or {})
+        default = _get_default_office()
+        if not str(sec.get("br_number") or "").strip():
+            sec["br_number"] = default.get("secretary_br_no", "")
+        if not str(sec.get("license_number") or "").strip():
+            sec["license_number"] = default.get("secretary_license_no", "")
+        if not str(sec.get("company_number") or "").strip():
+            sec["company_number"] = default.get("secretary_company_no", "")
+        sec.setdefault("type", "body_corporate")
+        if sec.get("hk_registered") is None:
+            sec["hk_registered"] = True
+        return sec
+
+    async def _select_body_corporate(self, page) -> bool:
+        """选择類型：法人團體。"""
+        for attempt in range(3):
+            if await self._select_radio_by_patterns(
+                page, ["法人團體", "法人团体", "Body Corporate"]
+            ):
+                return True
+            await wait_spin_clear(page, timeout_ms=30000)
+            await page.wait_for_timeout(800)
+        loc = page.locator(".ant-radio-wrapper, label").filter(
+            has_text=re.compile(r"法人團體|法人团体")
+        )
+        count = await loc.count()
+        for i in range(count):
+            item = loc.nth(i)
+            txt = re.sub(r"\s+", "", (await item.inner_text() or ""))
+            if len(txt) > 30:
+                continue
+            try:
+                await item.scroll_into_view_if_needed()
+                await item.click(force=True, timeout=5000)
+                logger.info("已选择单选(Playwright): 法人團體")
+                await page.wait_for_timeout(400)
+                return True
+            except Exception:
+                pass
+        return False
+
+    async def _wait_step3_secretary_form_expanded(self, page) -> None:
+        """勾选公司秘书后等待法人团体详情展开。"""
+        logger.info("等待 NNC1 步骤3 公司秘书表单")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    return /是否為在香港註冊的法人團體|是否为在香港注册的法人团体|商業登記號碼|商业登记号码/.test(body);
+                }""",
+                timeout=120000,
+            )
+            logger.info("NNC1 步骤3 公司秘书表单已展开")
+        except Exception as e:
+            await self._maybe_screenshot(page, "step3_secretary_wait_fail")
+            raise RuntimeError(f"步骤3 公司秘书表单展开超时: {e}")
+        await page.wait_for_timeout(800)
+
+    async def _select_hk_registered_corporate_yes(self, page) -> bool:
+        """是否為在香港註冊的法人團體？ → 是。"""
+        hit = await page.evaluate(
+            """() => {
+                const qRe = /是否為在香港註冊的法人團體|是否为在香港注册的法人团体/;
+                let scope = null;
+                for (const el of document.querySelectorAll(
+                    'div, section, fieldset, tr, td, label, span'
+                )) {
+                    const t = (el.innerText || '').trim();
+                    if (!qRe.test(t) || t.length > 80) continue;
+                    scope = el.closest('tr, .ant-row, .ant-form-item, fieldset, div')
+                        || el.parentElement;
+                    break;
+                }
+                const roots = scope ? [scope, scope.parentElement, document] : [document];
+                for (const root of roots) {
+                    if (!root) continue;
+                    for (const label of root.querySelectorAll(
+                        'label, .ant-radio-wrapper, span'
+                    )) {
+                        const t = (label.innerText || '').replace(/\\s+/g, '').trim();
+                        if (t !== '是' && t !== 'Yes') continue;
+                        const input = label.querySelector('input[type=radio]')
+                            || label.closest('label')?.querySelector('input[type=radio]');
+                        if (input) {
+                            if (!input.checked) input.click();
+                            return '是';
+                        }
+                        label.click();
+                        return '是';
+                    }
+                    for (const input of root.querySelectorAll('input[type=radio]')) {
+                        const ctx = (
+                            input.closest('label, span, div')?.innerText || ''
+                        ).replace(/\\s+/g, '').trim();
+                        if (ctx !== '是' && ctx !== 'Yes') continue;
+                        if (!input.checked) input.click();
+                        return '是';
+                    }
+                }
+                return '';
+            }"""
+        )
+        if hit:
+            logger.info("已选择香港注册法人团体: %s", hit)
+            await page.wait_for_timeout(500)
+            return True
+        return await self._select_radio_by_patterns(page, ["^是$", "是"])
+
+    async def _check_company_secretary_only(self, page) -> None:
+        """阶段B身分：只勾「公司秘書」，明确取消创办成员/董事。
+
+        限定在「身分」行内操作，避免点到董事帮助文案里的「公司秘書」。
+        """
+        r_sec = await self._set_capacity_role(page, "secretary", True)
+        if not r_sec or not r_sec.get("ok"):
+            if not await self._click_capacity_role_playwright(
+                page, ("公司秘書", "公司秘书"), want_checked=True
+            ):
+                logger.warning(
+                    "公司秘書勾选失败: %s labels=%s",
+                    (r_sec or {}).get("reason"),
+                    (r_sec or {}).get("labels"),
+                )
+                await self._maybe_screenshot(page, "step3_secretary_check_fail")
+                raise RuntimeError("未能勾选「公司秘書」（勿误勾董事）")
+        await wait_spin_clear(page, timeout_ms=60000)
+        await page.wait_for_timeout(300)
+
+        for role, texts in (
+            ("director", ("董事",)),
+            ("founder", ("創辦成員", "创办成员")),
+        ):
+            r = await self._set_capacity_role(page, role, False)
+            if r and not r.get("ok") and not str(r.get("reason") or "").startswith("missing_"):
+                await self._click_capacity_role_playwright(
+                    page, texts, want_checked=False
+                )
+        await wait_spin_clear(page, timeout_ms=30000)
+
+        state = await self._read_capacity_state(page)
+        if not state.get("secretary"):
+            await self._maybe_screenshot(page, "step3_secretary_check_fail")
+            raise RuntimeError(
+                f"公司秘書勾选校验失败：未勾选 labels={state.get('labels')}"
+            )
+        if state.get("director"):
+            await self._maybe_screenshot(page, "step3_secretary_check_fail")
+            raise RuntimeError("公司秘書勾选校验失败：董事仍被勾选")
+        if state.get("founder"):
+            await self._maybe_screenshot(page, "step3_secretary_check_fail")
+            raise RuntimeError("公司秘書勾选校验失败：创办成员仍被勾选")
+        logger.info("阶段B身分校验通过: 仅公司秘書")
+        await page.wait_for_timeout(400)
+
+    async def _click_br_search_button(self, page) -> bool:
+        """点击商業登記號碼旁的「檢索」按钮。"""
+        # 优先：商業登記號碼同一行/容器内的檢索
+        clicked = await page.evaluate(
+            """() => {
+                const compact = s => (s || '').replace(/\\s+/g, '').trim();
+                const isSearch = t => /^(檢索|检索|Search)$/i.test(compact(t));
+                const tryClick = (el) => {
+                    if (!el) return '';
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return '';
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return '';
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    // 再派鼠标事件兜底
+                    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+                        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                    }
+                    return compact(el.innerText || el.value || '檢索');
+                };
+                let scope = null;
+                for (const el of document.querySelectorAll(
+                    'label, .rowTitle, span, div, th, td, p'
+                )) {
+                    const t = compact(el.innerText || '');
+                    if (!/^(商業登記號碼|商业登记号码)$/.test(t)
+                        && !(/^商業登記號碼|^商业登记号码/.test(t) && t.length <= 20)) {
+                        continue;
+                    }
+                    scope = el.closest('tr, .ant-row, .ant-form-item, fieldset, div')
+                        || el.parentElement;
+                    break;
+                }
+                if (!scope) {
+                    for (const inp of document.querySelectorAll('input, textarea')) {
+                        const val = (inp.value || '').trim();
+                        if (!/^\\d{7,8}$/.test(val)) continue;
+                        scope = inp.closest('tr, .ant-row, .ant-form-item, fieldset, div')
+                            || inp.parentElement;
+                        break;
+                    }
+                }
+                const pools = [];
+                if (scope) {
+                    pools.push(scope);
+                    if (scope.parentElement) pools.push(scope.parentElement);
+                    if (scope.parentElement?.parentElement) {
+                        pools.push(scope.parentElement.parentElement);
+                    }
+                }
+                for (const root of pools) {
+                    if (!root) continue;
+                    for (const el of root.querySelectorAll(
+                        'button, a, input[type=button], input[type=submit], '
+                        + '[role=button], .btn, .ant-btn'
+                    )) {
+                        if (!isSearch(el.innerText || el.value || '')) continue;
+                        const hit = tryClick(el);
+                        if (hit) return hit;
+                    }
+                    // 灰色小按钮可能是 span.ant-btn 内层
+                    for (const el of root.querySelectorAll('span, div')) {
+                        const t = compact(el.innerText || '');
+                        if (!isSearch(t)) continue;
+                        if (t.length > 4) continue;
+                        const clickable = el.closest('button, a, .ant-btn, [role=button]') || el;
+                        const hit = tryClick(clickable);
+                        if (hit) return hit;
+                    }
+                }
+                // 全局兜底
+                for (const el of document.querySelectorAll(
+                    'button, a, input[type=button], .ant-btn, [role=button]'
+                )) {
+                    if (!isSearch(el.innerText || el.value || '')) continue;
+                    const hit = tryClick(el);
+                    if (hit) return hit;
+                }
+                return '';
+            }"""
+        )
+        if clicked:
+            logger.info("已点击「檢索」(near BR): %s", clicked)
+            await wait_spin_clear(page, timeout_ms=90000)
+            await page.wait_for_timeout(1500)
+            return True
+
+        # Playwright：先定位商業登記號碼行再点檢索
+        br_row = page.locator("tr, .ant-row, .ant-form-item, div").filter(
+            has_text=re.compile(r"商業登記號碼|商业登记号码")
+        ).first
+        if await br_row.count() > 0:
+            for text in ("檢索", "检索", "Search"):
+                btn = br_row.get_by_role("button", name=text).first
+                if await btn.count() == 0:
+                    btn = br_row.locator(
+                        f"button:has-text('{text}'), .ant-btn:has-text('{text}'), "
+                        f"a:has-text('{text}'), input[value*='{text}']"
+                    ).first
+                if await btn.count() > 0:
+                    await btn.scroll_into_view_if_needed()
+                    try:
+                        await btn.click(timeout=10000)
+                    except Exception:
+                        await btn.click(timeout=10000, force=True)
+                    logger.info("已点击「檢索」(Playwright row): %s", text)
+                    await wait_spin_clear(page, timeout_ms=90000)
+                    await page.wait_for_timeout(1500)
+                    return True
+
+        for text in ("檢索", "检索", "Search"):
+            btn = page.get_by_role("button", name=text).first
+            if await btn.count() == 0:
+                btn = page.locator(
+                    f"button:has-text('{text}'), a:has-text('{text}'), "
+                    f"input[type='button'][value*='{text}'], .ant-btn:has-text('{text}')"
+                ).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.scroll_into_view_if_needed()
+                try:
+                    await btn.click(timeout=10000)
+                except Exception:
+                    await btn.click(timeout=10000, force=True)
+                logger.info("已点击「檢索」(Playwright): %s", text)
+                await wait_spin_clear(page, timeout_ms=90000)
+                await page.wait_for_timeout(1500)
+                return True
+        return False
+
+    async def _fill_secretary_hk_address(self, page, office: dict[str, Any]) -> None:
+        """公司秘书香港地址：室/楼/座、大厦、街道、区。"""
+        await self._select_radio_by_patterns(
+            page, ["香港地址", "本港地址", "Hong Kong Address"]
+        )
+        flat = (office.get("flat_floor") or "").strip()
+        building = (office.get("building") or "").strip()
+        street = (office.get("street_en") or office.get("street") or "").strip()
+        district = (office.get("district") or "").strip()
+
+        if flat:
+            await self._fill_field_by_label(
+                page,
+                ["室／樓／座", "室／樓", "室/楼/座", "室/楼", "Flat / Floor"],
+                flat,
+            )
+        if building:
+            await self._fill_field_by_label(page, ["大廈", "大厦", "Building"], building)
+        if street:
+            await self._fill_field_by_label(
+                page,
+                ["街道／屋苑／地段／村", "街道", "Street", "Estate"],
+                street,
+            )
+        if district:
+            await self._select_option_by_label(
+                page, ["區", "区", "District"], district
+            )
+
+    async def _fill_step3_corporate_secretary(self, page, data: dict[str, Any]) -> None:
+        """步骤3：在列表页追加法人团体公司秘书，再交给储存及继续。"""
+        logger.info("NNC1 步骤3: 填写法人团体公司秘书")
+        sec = self._resolve_company_secretary(data)
+        office = dict(data.get("registered_office") or {})
+        email = str((data.get("contact") or {}).get("email") or "").strip()
+        br_no = str(sec.get("br_number") or "").strip()
+        license_no = str(sec.get("license_number") or "").strip()
+        company_no = str(sec.get("company_number") or "").strip()
+
+        if not await self._select_body_corporate(page):
+            raise RuntimeError("未能选择「法人團體」")
+        await page.wait_for_timeout(600)
+
+        await self._check_company_secretary_only(page)
+        await self._wait_step3_secretary_form_expanded(page)
+
+        # 表单展开后再次确保身分只剩公司秘書
+        await self._check_company_secretary_only(page)
+
+        if not await self._select_hk_registered_corporate_yes(page):
+            logger.warning("未能选择「是否為在香港註冊的法人團體？是」，继续尝试填表")
+        await wait_spin_clear(page, timeout_ms=60000)
+        await page.wait_for_timeout(500)
+
+        if br_no:
+            await self._fill_field_by_label(
+                page,
+                ["商業登記號碼", "商业登记号码", "Business Registration"],
+                br_no,
+            )
+            await page.wait_for_timeout(400)
+            if not await self._click_br_search_button(page):
+                await self._maybe_screenshot(page, "step3_br_search_fail")
+                raise RuntimeError("未找到或未能点击「檢索」按钮")
+            # 等待名称自动带出；超时告警继续
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        for (const el of document.querySelectorAll(
+                            'label, .rowTitle, span, div, th, td'
+                        )) {
+                            const t = (el.innerText || '').replace(/\\s+/g, '');
+                            if (!/^(中文名稱|英文名稱|中文名称|英文名称)$/.test(t)) continue;
+                            const row = el.closest('tr,.ant-row,.ant-form-item,div')
+                                || el.parentElement;
+                            const inp = row?.querySelector(
+                                'textarea, input:not([type=hidden]):not([type=checkbox])'
+                            );
+                            if (inp && (inp.value || '').trim().length > 1) return true;
+                        }
+                        return false;
+                    }""",
+                    timeout=45000,
+                )
+                logger.info("商業登記號碼检索后公司名称已带出")
+            except Exception:
+                logger.warning("檢索后公司名称未自动带出，继续填写其余字段")
+
+        await self._fill_secretary_hk_address(page, office)
+
+        if email:
+            await self._fill_field_by_label(
+                page, ["電郵地址", "电邮地址", "Email"], email
+            )
+
+        if license_no:
+            await self._scroll_to_section(
+                page, ["牌照編號", "牌照编号", "信託或公司服務", "信托或公司服务"]
+            )
+            await page.wait_for_timeout(400)
+            ok_lic = await self._fill_field_by_label(
+                page,
+                [
+                    "牌照編號",
+                    "牌照编号",
+                    "Licence No",
+                    "License No",
+                    "牌照",
+                ],
+                license_no,
+            )
+            if not ok_lic:
+                # 精确填入「牌照編號」旁的 textarea
+                filled = await page.evaluate(
+                    """(value) => {
+                        const re = /牌照編號|牌照编号/;
+                        for (const el of document.querySelectorAll(
+                            'label, .rowTitle, span, div, th, td, p'
+                        )) {
+                            const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+                            if (!re.test(t) || t.length > 20) continue;
+                            const row = el.closest('tr, .ant-row, .ant-form-item, fieldset, div')
+                                || el.parentElement;
+                            const inp = row?.querySelector(
+                                'textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio])'
+                            );
+                            if (!inp || inp.disabled) continue;
+                            inp.focus();
+                            inp.value = value;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                        return false;
+                    }""",
+                    license_no,
+                )
+                if filled:
+                    logger.info("已填写牌照編號(JS): %s", license_no)
+                else:
+                    logger.warning("未找到字段: 牌照編號")
+            await page.wait_for_timeout(300)
+
+        if company_no:
+            # 表单未必有此栏；有则填
+            await self._fill_field_by_label(
+                page,
+                ["公司號碼", "公司号码", "Company No", "Company Number"],
+                company_no,
+            )
+
+        await self._maybe_screenshot(page, "step3_secretary_filled")
+        await self._click_add_to_officer_list(page)
+        await wait_spin_clear(page, timeout_ms=90000)
+        await page.wait_for_timeout(1000)
+
     async def _fill_step1_basic_info(self, page, data: dict[str, Any]) -> None:
         """步骤1：输入基本资料 — 勾选法团印章 → 存储及继续。"""
         logger.info("NNC1 步骤1: 输入基本资料")
@@ -2060,8 +4391,9 @@ class IcrisNnc1FormBot:
 
                 await self._fill_step1_basic_info(page, data)
                 await self._fill_step2_company_info(page, data)
+                await self._fill_step3_member_info(page, data)
 
-                logger.info("IcrisNnc1FormBot: NNC1 步骤1-2 填表完成")
+                logger.info("IcrisNnc1FormBot: NNC1 步骤1-3 填表完成")
                 return True, screenshot_path or ""
             except Exception as e:
                 logger.exception("IcrisNnc1FormBot 失败")

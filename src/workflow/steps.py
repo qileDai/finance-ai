@@ -203,6 +203,9 @@ class RegistrationWorkflow:
         if not ctx.company_data:
             ctx.company_data = load_mock_data()
             ctx.log("未提供资料，使用 mock 数据")
+        from src.materials.aggregator import apply_default_office
+
+        apply_default_office(ctx.company_data)
 
         if not ctx.icris_account:
             acct = (ctx.company_data or {}).get("icris_account") or {}

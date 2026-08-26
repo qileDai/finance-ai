@@ -927,6 +927,9 @@ def _handle_default_office_get(
         "building": data.get("building", ""),
         "street": data.get("street", ""),
         "district": data.get("district", ""),
+        "secretary_br_no": data.get("secretary_br_no", ""),
+        "secretary_license_no": data.get("secretary_license_no", ""),
+        "secretary_company_no": data.get("secretary_company_no", ""),
     }
     return _ok(**result)
 
@@ -936,16 +939,33 @@ def _handle_default_office_put(
 ) -> tuple[dict[str, Any], int]:
     import json
 
-    data = {
-        "flat_floor": str(body.get("flat_floor") or "").strip(),
-        "building": str(body.get("building") or "").strip(),
-        "street": str(body.get("street") or "").strip(),
-        "district": str(body.get("district") or "").strip(),
-    }
+    # 合并已有配置，避免 PUT 只传部分字段时抹掉秘书公司信息
+    raw = store.get_system_setting("icris_default_office") or ""
+    try:
+        existing = json.loads(raw) if raw else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    keys = (
+        "flat_floor",
+        "building",
+        "street",
+        "district",
+        "secretary_br_no",
+        "secretary_license_no",
+        "secretary_company_no",
+    )
+    data = dict(existing)
+    for key in keys:
+        if key in body:
+            data[key] = str(body.get(key) or "").strip()
     store.set_system_setting(
         "icris_default_office", json.dumps(data, ensure_ascii=False)
     )
-    return _ok(**data, message="已更新")
+    result = {k: str(data.get(k) or "") for k in keys}
+    return _ok(**result, message="已更新")
 
 
 def _handle_quality(

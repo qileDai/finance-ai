@@ -267,18 +267,49 @@ class ExternalGroupStore:
             self._migrate_registration_jobs(conn)
             self._migrate_intent_routes(conn)
 
-            # 默认注册办事处地址
-            if not conn.execute(
+            # 默认注册办事处地址 + 公司秘书法人团体信息
+            _default_office_json = (
+                '{"flat_floor":"ROOM 18 2/F","building":"Tuspark",'
+                '"street":"118 Wai Yip Street","district":"Kwun Tong",'
+                '"secretary_br_no":"78090873","secretary_license_no":"TC010510",'
+                '"secretary_company_no":"0852-52667282"}'
+            )
+            row = conn.execute(
                 "SELECT value FROM system_settings WHERE key='icris_default_office'"
-            ).fetchone():
+            ).fetchone()
+            if not row:
                 conn.execute(
                     "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
-                    (
-                        "icris_default_office",
-                        '{"flat_floor":"ROOM 18 2/F","building":"Tuspark","street":"118 Wai Yip Street","district":"Kwun Tong"}',
-                        _utc_now(),
-                    ),
+                    ("icris_default_office", _default_office_json, _utc_now()),
                 )
+            else:
+                # 已有配置补齐秘书字段（不覆盖已有值）
+                try:
+                    import json as _json
+
+                    cur = _json.loads(row[0] or "{}")
+                    if not isinstance(cur, dict):
+                        cur = {}
+                    changed = False
+                    for k, v in (
+                        ("secretary_br_no", "78090873"),
+                        ("secretary_license_no", "TC010510"),
+                        ("secretary_company_no", "0852-52667282"),
+                    ):
+                        if not str(cur.get(k) or "").strip():
+                            cur[k] = v
+                            changed = True
+                    if changed:
+                        conn.execute(
+                            "UPDATE system_settings SET value=?, updated_at=? WHERE key=?",
+                            (
+                                _json.dumps(cur, ensure_ascii=False),
+                                _utc_now(),
+                                "icris_default_office",
+                            ),
+                        )
+                except Exception:
+                    pass
 
     def _migrate_registration_jobs(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(registration_jobs)")}

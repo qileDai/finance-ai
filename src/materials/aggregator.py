@@ -65,23 +65,36 @@ def _office_en(materials: dict[str, dict[str, Any]]) -> str:
 
 
 def _get_default_office() -> dict[str, str]:
-    """从 DB 读取默认注册办事处地址（NNC1 表格用）。"""
+    """从 DB 读取默认注册办事处地址 + 公司秘书法人团体信息（NNC1 表格用）。"""
     import json
+    defaults = {
+        "flat_floor": "ROOM 18 2/F",
+        "building": "Tuspark",
+        "street": "118 Wai Yip Street",
+        "district": "Kwun Tong",
+        "secretary_br_no": "78090873",
+        "secretary_license_no": "TC010510",
+        "secretary_company_no": "0852-52667282",
+    }
     try:
         store = ExternalGroupStore()
         raw = store.get_system_setting("icris_default_office") or ""
         if raw:
-            return json.loads(raw)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if str(v or "").strip():
+                        defaults[k] = str(v).strip()
     except Exception:
         pass
-    return {"flat_floor": "ROOM 18 2/F", "building": "Tuspark",
-            "street": "118 Wai Yip Street", "district": "Kwun Tong"}
+    return defaults
 
 
 def apply_default_office(data: dict) -> None:
     """将后台配置的默认办事处地址合并到 data 的 registered_office。
 
     空则补默认，已有值不覆盖（用户填了用用户的）。
+    同时补齐 company_secretary 的商业登记证/牌照号/公司号码。
     """
     default = _get_default_office()
     office = data.setdefault("registered_office", {})
@@ -94,6 +107,21 @@ def apply_default_office(data: dict) -> None:
         office["street"] = default.get("street", "")
     if not office.get("region"):
         office["region"] = "Hong Kong"
+
+    sec = data.setdefault("company_secretary", {})
+    if not isinstance(sec, dict):
+        sec = {}
+        data["company_secretary"] = sec
+    if not str(sec.get("type") or "").strip():
+        sec["type"] = "body_corporate"
+    if sec.get("hk_registered") is None:
+        sec["hk_registered"] = True
+    if not str(sec.get("br_number") or "").strip():
+        sec["br_number"] = default.get("secretary_br_no", "")
+    if not str(sec.get("license_number") or "").strip():
+        sec["license_number"] = default.get("secretary_license_no", "")
+    if not str(sec.get("company_number") or "").strip():
+        sec["company_number"] = default.get("secretary_company_no", "")
 
 
 def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
@@ -285,7 +313,16 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             if person or person_cn or person_en
             else []
         ),
-        "company_secretary": {"name_en": secretary, "raw": True} if secretary else {},
+        "company_secretary": {
+            "type": "body_corporate",
+            "hk_registered": True,
+            "br_number": default_office.get("secretary_br_no", ""),
+            "license_number": default_office.get("secretary_license_no", ""),
+            "company_number": default_office.get("secretary_company_no", ""),
+            "name_en": secretary if secretary else "",
+            "name_cn": "",
+            "raw": True,
+        },
         "business_nature_desc": _get_val(materials, "business_desc"),
         "br_certificate_years": br_int,
         "applicant": {

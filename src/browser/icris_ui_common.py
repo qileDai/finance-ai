@@ -202,7 +202,10 @@ async def dismiss_portal_modals(page: "Page") -> None:
             ".modal button:has-text('是'), [role='dialog'] button:has-text('是')"
         ).first
         if await yes_btn.count() > 0 and await yes_btn.is_visible():
-            await yes_btn.click()
+            try:
+                await yes_btn.click(force=True, timeout=10000)
+            except Exception:
+                await yes_btn.evaluate("el => el.click()")
             await page.wait_for_timeout(1200)
             logger.info("已确认重新登入")
 

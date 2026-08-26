@@ -145,6 +145,9 @@ export type DefaultOffice = {
   building: string;
   street: string;
   district: string;
+  secretary_br_no?: string;
+  secretary_license_no?: string;
+  secretary_company_no?: string;
 };
 
 export type WeworkSendResponse = ApiOk<{
