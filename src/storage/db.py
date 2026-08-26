@@ -231,6 +231,12 @@ class ExternalGroupStore:
                 CREATE INDEX IF NOT EXISTS idx_email_accounts_address
                     ON email_accounts(email_address);
 
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE TABLE IF NOT EXISTS intent_routes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     roomid TEXT NOT NULL DEFAULT '',
@@ -260,6 +266,19 @@ class ExternalGroupStore:
             self._migrate_kf_cursor(conn)
             self._migrate_registration_jobs(conn)
             self._migrate_intent_routes(conn)
+
+            # 默认注册办事处地址
+            if not conn.execute(
+                "SELECT value FROM system_settings WHERE key='icris_default_office'"
+            ).fetchone():
+                conn.execute(
+                    "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+                    (
+                        "icris_default_office",
+                        '{"flat_floor":"ROOM 18 2/F","building":"Tuspark","street":"118 Wai Yip Street","district":"Kwun Tong"}',
+                        _utc_now(),
+                    ),
+                )
 
     def _migrate_registration_jobs(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(registration_jobs)")}
@@ -308,6 +327,18 @@ class ExternalGroupStore:
         if "activation_activated_at" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN activation_activated_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "form_status" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN form_status TEXT NOT NULL DEFAULT ''"
+            )
+        if "form_filled_at" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN form_filled_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "form_screenshot_path" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN form_screenshot_path TEXT NOT NULL DEFAULT ''"
             )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
@@ -1537,6 +1568,25 @@ class ExternalGroupStore:
             )
             return cur.rowcount > 0
 
+    def get_system_setting(self, key: str) -> str:
+        """查单个系统配置值。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM system_settings WHERE key=?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row else ""
+
+    def set_system_setting(self, key: str, value: str) -> None:
+        """写入/更新系统配置。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO system_settings(key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, value, now),
+            )
+
     # ---- 账号激活状态 ----
 
     def mark_job_activation_pending(self, job_id: int) -> None:
@@ -1577,7 +1627,7 @@ class ExternalGroupStore:
             conn.execute(
                 """UPDATE registration_jobs
                    SET activation_status='activated', activation_activated_at=?,
-                       updated_at=?
+                       form_status='pending', updated_at=?
                    WHERE id=?""",
                 (now, now, job_id),
             )
@@ -1591,6 +1641,72 @@ class ExternalGroupStore:
                    WHERE id=?""",
                 (error[:500], now, job_id),
             )
+
+    def mark_job_form_pending(self, job_id: int) -> None:
+        """激活成功后标记待填表。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET form_status='pending', updated_at=?
+                   WHERE id=?""",
+                (now, job_id),
+            )
+
+    def get_jobs_pending_form(self) -> list[dict[str, Any]]:
+        """查所有 activation_status='activated' AND form_status='pending' 的任务。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM registration_jobs
+                   WHERE activation_status='activated' AND form_status='pending'
+                   ORDER BY id"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_job_form_filled(self, job_id: int, screenshot_path: str = "") -> None:
+        """填表成功。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET form_status='filled', form_filled_at=?,
+                       form_screenshot_path=?, updated_at=?
+                   WHERE id=?""",
+                (now, screenshot_path, now, job_id),
+            )
+
+    def mark_job_form_failed(self, job_id: int, error: str) -> None:
+        """填表失败。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET form_status='failed', last_error=?, updated_at=?
+                   WHERE id=?""",
+                (error[:500], now, job_id),
+            )
+
+    def reset_job_form_retry(self, job_id: int) -> dict[str, Any] | None:
+        """重跑填表：仅允许 form_status='failed' 的任务，重置为 pending。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if str(row["form_status"]) != "failed":
+                return dict(row)
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET form_status='pending', last_error='', updated_at=?
+                   WHERE id = ?""",
+                (now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def update_job_result_messages(
         self, job_id: int, result_messages: list[Any] | None

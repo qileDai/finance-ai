@@ -23,6 +23,10 @@ const TEXT_FIELDS: TextField[] = [
   { key: "business_desc", label: "经营范围" },
   { key: "registered_office_cn", label: "注册地址（中文）" },
   { key: "registered_office_en", label: "注册地址（英文）" },
+  { key: "office_flat_floor", label: "办事处 室/楼/座", placeholder: "默认用系统配置" },
+  { key: "office_building", label: "办事处 大厦", placeholder: "默认用系统配置" },
+  { key: "office_street", label: "办事处 街道", placeholder: "默认用系统配置" },
+  { key: "office_district", label: "办事处 区", placeholder: "默认用系统配置" },
   { key: "director_name", label: "董事兼股东姓名", required: true },
   { key: "id_number", label: "身份证号码", required: true },
   {

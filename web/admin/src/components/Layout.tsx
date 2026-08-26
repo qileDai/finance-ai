@@ -10,6 +10,7 @@ import {
   MailOutlined,
   ScheduleOutlined,
   SendOutlined,
+  SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 
@@ -21,6 +22,7 @@ const TITLES: Record<string, string> = {
   "/wework-send": "外部群发消息",
   "/jobs": "注册任务",
   "/email-config": "邮箱配置",
+  "/default-office": "注册配置",
   "/quality": "回答质量",
 };
 
@@ -51,6 +53,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: "系统",
     items: [
       { to: "/email-config", label: "邮箱配置", icon: <MailOutlined /> },
+      { to: "/default-office", label: "注册配置", icon: <SettingOutlined /> },
     ],
   },
 ];

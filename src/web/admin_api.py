@@ -105,6 +105,12 @@ def handle_admin_api(
             if job_id is None:
                 return _err("invalid job id", 400)
             return _handle_job_reject(store, job_id)
+        # 填表重跑
+        if method == "POST" and rel.startswith("jobs/") and rel.endswith("/form-retry"):
+            job_id = _parse_job_id(rel, suffix="/form-retry")
+            if job_id is None:
+                return _err("invalid job id", 400)
+            return _handle_job_form_retry(store, job_id)
         # 邮箱账号配置
         if method == "GET" and rel == "email-accounts":
             return _ok(items=store.list_email_accounts())
@@ -120,6 +126,11 @@ def handle_admin_api(
             if aid is None:
                 return _err("invalid account id", 400)
             return _handle_email_account_delete(store, aid)
+        # 注册办事处默认地址
+        if method == "GET" and rel == "default-office":
+            return _handle_default_office_get(store)
+        if method == "PUT" and rel == "default-office":
+            return _handle_default_office_put(store, body or {})
         if method == "GET" and rel == "quality":
             try:
                 hours = float(query.get("hours", ["24"])[0])
@@ -833,6 +844,21 @@ def _handle_job_reject(
     return _ok(job=job, message=f"rejected #{job_id}")
 
 
+def _handle_job_form_retry(
+    store: ExternalGroupStore, job_id: int
+) -> tuple[dict[str, Any], int]:
+    job = store.reset_job_form_retry(job_id)
+    if not job:
+        return _err("job not found", 404)
+    if job.get("form_status") != "pending":
+        return _err(
+            f"cannot retry form (form_status={job.get('form_status')}; "
+            "need failed)",
+            409,
+        )
+    return _ok(job=job, message=f"form retry #{job_id}")
+
+
 def _handle_email_account_upsert(
     store: ExternalGroupStore, body: dict[str, Any]
 ) -> tuple[dict[str, Any], int]:
@@ -884,6 +910,42 @@ def _handle_email_account_test(
         return _err("登录失败", 400)
     except Exception as e:
         return _err(f"连接失败: {e}", 400)
+
+
+def _handle_default_office_get(
+    store: ExternalGroupStore,
+) -> tuple[dict[str, Any], int]:
+    import json
+
+    raw = store.get_system_setting("icris_default_office") or ""
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        data = {}
+    result = {
+        "flat_floor": data.get("flat_floor", ""),
+        "building": data.get("building", ""),
+        "street": data.get("street", ""),
+        "district": data.get("district", ""),
+    }
+    return _ok(**result)
+
+
+def _handle_default_office_put(
+    store: ExternalGroupStore, body: dict[str, Any]
+) -> tuple[dict[str, Any], int]:
+    import json
+
+    data = {
+        "flat_floor": str(body.get("flat_floor") or "").strip(),
+        "building": str(body.get("building") or "").strip(),
+        "street": str(body.get("street") or "").strip(),
+        "district": str(body.get("district") or "").strip(),
+    }
+    store.set_system_setting(
+        "icris_default_office", json.dumps(data, ensure_ascii=False)
+    )
+    return _ok(**data, message="已更新")
 
 
 def _handle_quality(

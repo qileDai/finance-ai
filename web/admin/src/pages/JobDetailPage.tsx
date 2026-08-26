@@ -19,6 +19,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<JobDetailResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const [formRetrying, setFormRetrying] = useState(false);
 
   useEffect(() => {
     if (!Number.isFinite(jobId) || jobId <= 0) {
@@ -80,6 +81,20 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
       onToast((e as Error).message || `${label}失败`);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function formRetry() {
+    if (!window.confirm(`确认重跑填表任务 #${jobId}？`)) return;
+    setFormRetrying(true);
+    try {
+      const res = await api.formRetryJob(jobId);
+      onToast(res.message || "已重跑填表");
+      onRefresh();
+    } catch (e) {
+      onToast((e as Error).message || "重跑填表失败");
+    } finally {
+      setFormRetrying(false);
     }
   }
 
@@ -219,6 +234,63 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                 <div className="job-error">
                   <strong>失败原因</strong>
                   <pre>{job.last_error}</pre>
+                </div>
+              ) : null}
+            </section>
+
+            <section className="reg-card">
+              <h2>激活与填表</h2>
+              <dl className="job-meta">
+                <div>
+                  <dt>激活状态</dt>
+                  <dd>
+                    <Tag
+                      color={ACTIVATION_TAG_COLOR[job.activation_status || ""] || "default"}
+                    >
+                      {ACTIVATION_LABEL[job.activation_status || ""] || "未激活"}
+                    </Tag>
+                  </dd>
+                </div>
+                <div>
+                  <dt>填表状态</dt>
+                  <dd>
+                    <Tag color={FORM_TAG_COLOR[job.form_status || ""] || "default"}>
+                      {FORM_LABEL[job.form_status || ""] || "未填表"}
+                    </Tag>
+                    {job.form_filled_at ? (
+                      <span className="muted" style={{ marginLeft: 8 }}>
+                        {formatDateTime(job.form_filled_at)}
+                      </span>
+                    ) : null}
+                  </dd>
+                </div>
+                <div>
+                  <dt>填表截图</dt>
+                  <dd>
+                    {job.form_screenshot_path ? (
+                      <Image
+                        src={api.jobScreenshotUrl(job.id, "form")}
+                        width={100}
+                        height={100}
+                        style={{ objectFit: "cover" }}
+                        preview={{ zoom: 0.8 }}
+                      />
+                    ) : (
+                      "-"
+                    )}
+                  </dd>
+                </div>
+              </dl>
+              {job.form_status === "failed" ? (
+                <div className="toolbar" style={{ gap: 12, marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={formRetrying}
+                    onClick={formRetry}
+                  >
+                    重跑填表
+                  </button>
                 </div>
               ) : null}
             </section>

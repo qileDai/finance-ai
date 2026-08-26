@@ -3,12 +3,12 @@
   "company_name_cn": "撼世全球有限公司",
   "company_type": "private_limited_by_shares",
   "registered_office": {
-    "flat_floor": "909O, 9/F",
-    "building": "High Fashion Centre",
-    "street": "909O 9/F., High Fashion Centre,1-11 Kwai Hei Street, Kwai Chung,New Territories, Hong Kong",
+    "flat_floor": "ROOM 18 2/F",
+    "building": "Tuspark",
+    "street": "118 Wai Yip Street",
     "street_cn": "香港新界葵涌葵喜街1-11号达利国际中心9楼909O",
-    "street_en": "909O 9/F., High Fashion Centre,1-11 Kwai Hei Street, Kwai Chung,New Territories, Hong Kong",
-    "district": "Kwai Chung",
+    "street_en": "118 Wai Yip Street",
+    "district": "Kwun Tong",
     "region": "Hong Kong"
   },
   "contact": {
@@ -81,5 +81,9 @@
   },
   "password_hint": "",
   "security_question": "",
-  "security_answer": ""
+  "security_answer": "",
+  "icris_account": {
+    "username": "KYAUk13579",
+    "password": "KYAUk13579@"
+  }
 }

@@ -6,7 +6,10 @@ __pycache__/
 venv/
 output/
 data/materials/
-data/icris_failures
+data/icris_esubmit/
+data/icris_failures/
+data/form_test_screenshots/
+data/icris_form_screenshots/
 *.log
 .playwright/
 .pytest_cache/

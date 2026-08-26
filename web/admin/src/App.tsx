@@ -11,6 +11,7 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { QualityPage } from "./pages/QualityPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { EmailConfigPage } from "./pages/EmailConfigPage";
+import { DefaultOfficePage } from "./pages/DefaultOfficePage";
 import { IdExtractPage } from "./pages/IdExtractPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
 import { WeworkSendPage } from "./pages/WeworkSendPage";
@@ -85,6 +86,10 @@ export default function App() {
             <Route
               path="email-config"
               element={<EmailConfigPage onToast={onToast} />}
+            />
+            <Route
+              path="default-office"
+              element={<DefaultOfficePage onToast={onToast} />}
             />
             <Route
               path="id-extract"

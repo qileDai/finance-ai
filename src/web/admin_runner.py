@@ -35,6 +35,10 @@ TEXT_FIELDS = (
     "id_number",
     "director_address_cn",
     "director_address_en",
+    "office_flat_floor",
+    "office_building",
+    "office_street",
+    "office_district",
     "contact_email",
     "issuing_country",
 )

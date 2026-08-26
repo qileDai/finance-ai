@@ -61,6 +61,87 @@ def import_async_playwright():
         ) from e
 
 
+def _ensure_chrome_profile_disable_translate(profile) -> None:
+    """写入 Chrome Preferences，禁用内置翻译（避免遮挡 ICRIS 顶栏）。"""
+    import json
+    from pathlib import Path
+
+    profile = Path(profile)
+    prefs_path = profile / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs: dict = {}
+    if prefs_path.is_file():
+        try:
+            prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+        except Exception:
+            prefs = {}
+    translate = prefs.setdefault("translate", {})
+    if isinstance(translate, dict):
+        translate["enabled"] = False
+    else:
+        prefs["translate"] = {"enabled": False}
+    prefs["translate_blocked_languages"] = ["zh-CN", "zh-TW", "zh-HK", "zh", "en"]
+    try:
+        prefs_path.write_text(json.dumps(prefs, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.debug("写入 Chrome 禁用翻译 Preferences 失败: %s", e)
+
+
+def _kill_cdp_chrome_by_profile(profile, port: int) -> None:
+    """结束占用本项目 CDP profile / 调试端口的 Chrome，以便用新参数重启。"""
+    import os
+    import signal
+    import subprocess
+    from pathlib import Path
+
+    profile_s = str(Path(profile)).replace("\\", "/").lower()
+    killed = 0
+    try:
+        if os.name == "nt":
+            # PowerShell：按命令行匹配 user-data-dir / remote-debugging-port
+            ps = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "ForEach-Object { "
+                "$c = $_.CommandLine; if (-not $c) { return }; "
+                "$cl = $c.ToLower(); "
+                f"if ($cl -like '*icris-chrome-cdp-profile*' -or $cl -like '*--remote-debugging-port={port}*' "
+                f"-or $cl -like '*{profile_s}*') "
+                "{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True,
+                timeout=15,
+            )
+            killed = 1
+        else:
+            out = subprocess.run(
+                ["ps", "ax", "-o", "pid=,command="],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            for line in (out.stdout or "").splitlines():
+                low = line.lower()
+                if "chrome" not in low and "chromium" not in low:
+                    continue
+                if "icris-chrome-cdp-profile" not in low and f"--remote-debugging-port={port}" not in low:
+                    continue
+                try:
+                    pid = int(line.strip().split(None, 1)[0])
+                    os.kill(pid, signal.SIGTERM)
+                    killed += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug("结束旧 CDP Chrome 失败: %s", e)
+    if killed:
+        logger.info("已结束旧 CDP Chrome（禁用翻译后重启）")
+        import time
+
+        time.sleep(1.5)
+
+
 def _try_launch_cdp_chrome() -> bool:
     """尝试启动带 remote-debugging-port 的 Chrome（Windows/Linux/macOS）"""
     import os
@@ -96,6 +177,8 @@ def _try_launch_cdp_chrome() -> bool:
         return False
 
     is_linux = platform.system() == "Linux"
+    _kill_cdp_chrome_by_profile(profile, port)
+    _ensure_chrome_profile_disable_translate(profile)
     launch_args = [
         str(chrome),
         f"--remote-debugging-port={port}",
@@ -105,6 +188,8 @@ def _try_launch_cdp_chrome() -> bool:
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
+        "--disable-features=Translate,TranslateUI",
+        "--start-maximized",
     ]
     # Linux/容器环境：无法开 sandbox；Xvfb 提供虚拟 DISPLAY，不需要 headless
     if is_linux:
@@ -141,6 +226,7 @@ def _chromium_launch_args() -> list[str]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-infobars",
+        "--disable-features=Translate,TranslateUI",
     ]
     if platform.system() == "Linux":
         args.append("--no-sandbox")
@@ -201,6 +287,19 @@ async def launch_browser(
 
     use_existing = bool(settings.chrome_use_existing) and not force_isolated
     if use_existing:
+        # 先按禁用翻译参数重启 CDP Chrome，避免 Google 翻译气泡遮挡顶栏
+        if _try_launch_cdp_chrome():
+            try:
+                browser = await playwright.chromium.connect_over_cdp(
+                    settings.chrome_cdp_url
+                )
+                logger.info(
+                    "已重启并连接 Chrome CDP（已禁用翻译）: %s",
+                    settings.chrome_cdp_url,
+                )
+                return browser
+            except Exception as e:
+                logger.warning("重启后 CDP 连接失败: %s，尝试连接已有实例", e)
         try:
             browser = await playwright.chromium.connect_over_cdp(settings.chrome_cdp_url)
             logger.info("已连接已有 Chrome: %s", settings.chrome_cdp_url)

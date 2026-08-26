@@ -259,6 +259,24 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
         ),
     },
     {
+      title: "激活/填表",
+      dataIndex: "activation_status",
+      key: "activation_form",
+      width: 100,
+      render: (_: unknown, r: JobRow) => {
+        if (r.status !== "succeeded") return "-";
+        const act = r.activation_status || "";
+        const form = r.form_status || "";
+        if (form === "filled") return <Tag color="success">已填表</Tag>;
+        if (form === "failed") return <Tag color="error">填表失败</Tag>;
+        if (form === "pending") return <Tag color="warning">待填表</Tag>;
+        if (act === "activated") return <Tag color="processing">已激活</Tag>;
+        if (act === "pending") return <Tag color="warning">待激活</Tag>;
+        if (act === "failed") return <Tag color="error">激活失败</Tag>;
+        return <Tag>未激活</Tag>;
+      },
+    },
+    {
       title: "状态",
       dataIndex: "status",
       key: "status",

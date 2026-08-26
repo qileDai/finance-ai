@@ -31,6 +31,7 @@ STEP_CHOICES = {
     "register": StepName.ICRIS_REGISTER,
     "email": StepName.READ_EMAIL,
     "login": StepName.ICRIS_LOGIN,
+    "nnc1": StepName.ICRIS_LOGIN,
     "notify": StepName.NOTIFY,
 }
 
@@ -42,7 +43,8 @@ STEP_DESCRIPTIONS = {
     "package": "③ 打包材料文件夹",
     "register": "④ ICRIS 账号注册（浏览器填写，不提交）",
     "email": "⑤ 读取邮箱获取 ICRIS 账号",
-    "login": "⑥ 登录 ICRIS 填写注册材料",
+    "login": "⑥ ICRIS3EP 登录 + NNC1 填表（CDP 指纹浏览器，mock 数据）",
+    "nnc1": "⑥ ICRIS3EP 登录 + NNC1 填表（同 login，CDP + mock 数据）",
     "notify": "⑦ 核对材料，提醒同事后续操作",
 }
 
@@ -65,7 +67,7 @@ def cmd_steps(_args: argparse.Namespace) -> None:
 
 def check_captcha_deps(step: str | None) -> None:
     """浏览器注册/登录步骤检查验证码与 Playwright 依赖"""
-    if step not in ("register", "login", None):
+    if step not in ("register", "login", "nnc1", None):
         return
 
     try:
@@ -79,7 +81,7 @@ def check_captcha_deps(step: str | None) -> None:
 
     from config.settings import settings
 
-    if step in ("register", "login") and settings.browser_headless:
+    if step in ("register", "login", "nnc1") and settings.browser_headless:
         print(
             "[警告] BROWSER_HEADLESS=true：看不到浏览器窗口。"
             "本机调试请设 BROWSER_HEADLESS=false（Docker/Worker 可继续无头）"
@@ -161,8 +163,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         ctx = WorkflowContext(chat_id=roomid or args.chat_id)
-        if args.step in ("register", "login", "package", "confirm", "notify", "email"):
-            _apply_company_data(ctx, for_steps=("register", "login", "package", "confirm", "notify", "email"))
+        if args.step in ("register", "login", "nnc1", "package", "confirm", "notify", "email"):
+            _apply_company_data(ctx, for_steps=("register", "login", "nnc1", "package", "confirm", "notify", "email"))
 
         ctx = agent.workflow.run_step(step_enum, ctx)
     elif args.full:

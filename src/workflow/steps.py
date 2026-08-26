@@ -185,16 +185,47 @@ class RegistrationWorkflow:
         ctx.log(f"获取账号: {ctx.icris_account.username}")
         return ctx
 
-    def step_icris_login(self, ctx: WorkflowContext) -> WorkflowContext:
-        """⑥ 登录 ICRIS 填写材料"""
-        from src.browser.icris_login import IcrisLoginBot
+    def step_icris_login(
+        self,
+        ctx: WorkflowContext,
+        *,
+        force_isolated_browser: bool = False,
+    ) -> WorkflowContext:
+        """⑥ ICRIS3EP 已激活账号登录 → NNC1 填表（CDP 指纹浏览器，与 s01-s05 登记分离）"""
+        from config.settings import settings
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot
+        from src.materials.packager import load_mock_data
 
-        ctx.log("=== 步骤⑥ 登录 ICRIS 填写材料 ===")
+        ctx.log(
+            f"=== 步骤⑥ ICRIS3EP NNC1 填表（dry_run={settings.dry_run}, "
+            f"isolated={force_isolated_browser}）==="
+        )
+        if not ctx.company_data:
+            ctx.company_data = load_mock_data()
+            ctx.log("未提供资料，使用 mock 数据")
+
         if not ctx.icris_account:
-            ctx = self.step_read_email(ctx)
-        bot = IcrisLoginBot(self.llm)
-        asyncio.run(bot.run(ctx.icris_account, ctx.company_data))
-        ctx.log("ICRIS 材料已填写（未提交）")
+            acct = (ctx.company_data or {}).get("icris_account") or {}
+            username = (acct.get("username") or "").strip()
+            password = (acct.get("password") or "").strip()
+            if username and password:
+                ctx.icris_account = IcrisAccount(username=username, password=password)
+                ctx.log(f"使用 mock 已激活账号: {username}")
+            else:
+                ctx = self.step_read_email(ctx)
+
+        bot = IcrisNnc1FormBot()
+        ok, detail = asyncio.run(
+            bot.run(
+                ctx.icris_account,
+                ctx.company_data,
+                force_isolated=force_isolated_browser,
+            )
+        )
+        if ok:
+            ctx.log("ICRIS NNC1 填表完成（未提交）")
+        else:
+            ctx.log(f"ICRIS NNC1 填表失败: {detail}")
         return ctx
 
     def step_notify_colleague(self, ctx: WorkflowContext) -> WorkflowContext:

@@ -171,6 +171,8 @@ class AdminWebServer:
                     file_path = str(job.get("esubmit_screenshot_path") or "").strip()
                 elif shot_type == "success":
                     file_path = str(job.get("success_screenshot_path") or "").strip()
+                elif shot_type == "form":
+                    file_path = str(job.get("form_screenshot_path") or "").strip()
                 else:
                     file_path = str(job.get("screenshot_path") or "").strip()
 
@@ -272,6 +274,66 @@ class AdminWebServer:
                     )
                     if result is None:
                         return self._send_json({"ok": False, "error": "not found"}, 404)
+                    data, code = result
+                    return self._send_json(data, code)
+                self.send_response(404)
+                self.end_headers()
+
+            def do_PUT(self) -> None:
+                path = urlparse(self.path).path
+                if path.startswith("/admin/api"):
+                    rel = self._api_rel(self.path)
+                    if rel in _PUBLIC_API:
+                        return self._send_json(
+                            {"ok": False, "error": "not found"}, 404
+                        )
+                    if not self._require_session():
+                        return
+                    raw = self._read_body()
+                    body: dict | None = None
+                    if raw:
+                        try:
+                            body = json.loads(raw.decode("utf-8"))
+                        except Exception:
+                            return self._send_json(
+                                {"ok": False, "error": "invalid json body"}, 400
+                            )
+                    result = handle_admin_api(
+                        method="PUT",
+                        path=self.path,
+                        store=store,
+                        icris_worker=icris_worker,
+                        body=body,
+                    )
+                    if result is None:
+                        return self._send_json(
+                            {"ok": False, "error": "not found"}, 404
+                        )
+                    data, code = result
+                    return self._send_json(data, code)
+                self.send_response(404)
+                self.end_headers()
+
+            def do_DELETE(self) -> None:
+                path = urlparse(self.path).path
+                if path.startswith("/admin/api"):
+                    rel = self._api_rel(self.path)
+                    if rel in _PUBLIC_API:
+                        return self._send_json(
+                            {"ok": False, "error": "not found"}, 404
+                        )
+                    if not self._require_session():
+                        return
+                    result = handle_admin_api(
+                        method="DELETE",
+                        path=self.path,
+                        store=store,
+                        icris_worker=icris_worker,
+                    )
+                    if result is None:
+                        return self._send_json(
+                            {"ok": False, "error": "not found"}, 404
+                        )
                     data, code = result
                     return self._send_json(data, code)
                 self.send_response(404)

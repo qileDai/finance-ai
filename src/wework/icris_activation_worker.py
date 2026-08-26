@@ -55,6 +55,120 @@ class IcrisActivationWorker:
                 self._process_one_job(job)
             except Exception as e:
                 logger.error("处理激活任务 #%s 异常: %s", job.get("id"), e)
+        # 激活阶段完成后，处理待填表任务
+        self._check_form_pending_jobs()
+
+    def _check_form_pending_jobs(self) -> None:
+        """处理激活成功后待填表的任务。"""
+        if self._stop.is_set():
+            return
+        jobs = self.store.get_jobs_pending_form()
+        if not jobs:
+            return
+        logger.info("待填表任务 %d 个", len(jobs))
+        for job in jobs:
+            if self._stop.is_set():
+                break
+            try:
+                self._process_form_job(job)
+            except Exception as e:
+                logger.error("处理填表任务 #%s 异常: %s", job.get("id"), e)
+
+    def _process_form_job(self, job: dict) -> None:
+        job_id = int(job.get("id") or 0)
+        if not job_id:
+            return
+
+        # 从 payload_json 取账号密码和公司材料
+        payload_str = str(job.get("payload_json") or "")
+        if not payload_str:
+            self.store.mark_job_form_failed(job_id, "无 payload 数据")
+            self._notify_form_result(job, ok=False, detail="无 payload 数据")
+            return
+
+        try:
+            data = json.loads(payload_str)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.store.mark_job_form_failed(job_id, "payload_json 解析失败")
+            self._notify_form_result(job, ok=False, detail="payload_json 解析失败")
+            return
+
+        # 合并后台配置的默认办事处地址（用户没填的字段用后台默认值）
+        from src.materials.aggregator import apply_default_office
+        apply_default_office(data)
+
+        account_info = (data.get("icris_account") or {}) if isinstance(data, dict) else {}
+        username = str(account_info.get("username") or "").strip()
+        password = str(account_info.get("password") or "").strip()
+        if not username or not password:
+            self.store.mark_job_form_failed(job_id, "无账号密码，无法登录填表")
+            self._notify_form_result(job, ok=False, detail="无账号密码")
+            return
+
+        # 准备截图目录
+        from config.settings import PROJECT_ROOT
+        shot_dir = PROJECT_ROOT / "data" / "icris_form_screenshots"
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        shot_file = shot_dir / f"form_{job_id}_{stamp}.png"
+
+        # 登录填表
+        from src.email.imap_client import IcrisAccount
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot
+
+        account = IcrisAccount(username=username, password=password)
+        bot = IcrisNnc1FormBot()
+        try:
+            ok, detail = asyncio.run(
+                bot.run(
+                    account,
+                    data,
+                    force_isolated=False,
+                    screenshot_path=str(shot_file),
+                )
+            )
+        except RuntimeError:
+            # 无事件循环环境，用新线程跑
+            ok, detail = self._run_in_thread(
+                bot.run, account, data,
+                force_isolated=False,
+                screenshot_path=str(shot_file),
+            )
+        except Exception as e:
+            ok, detail = False, str(e)
+
+        if ok:
+            self.store.mark_job_form_filled(job_id, str(shot_file))
+            logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
+            self._notify_form_result(job, ok=True, detail=str(shot_file))
+        else:
+            self.store.mark_job_form_failed(job_id, f"填表失败: {detail}")
+            logger.error("任务 #%s 填表失败: %s", job_id, detail)
+            self._notify_form_result(job, ok=False, detail=detail)
+
+    def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:
+        """填表结果通知到企微内部群（无配置则跳过）。"""
+        from config.settings import settings
+        chat_id = (settings.icris_review_notify_chat_id or "").strip()
+        if not chat_id:
+            logger.info("填表通知未配置群 chat_id，跳过")
+            return
+        try:
+            from src.wework.client import WeWorkClient
+            client = WeWorkClient()
+            job_id = int(job.get("id") or 0)
+            company = str(job.get("company_name") or "")
+            status_text = "填表成功" if ok else "填表失败"
+            msg = (
+                f"【ICRIS 填表通知】\n"
+                f"任务 #{job_id}\n"
+                f"公司: {company}\n"
+                f"状态: {status_text}\n"
+                f"详情: {detail[:200]}"
+            )
+            client.send_group_text(chat_id, msg)
+        except Exception as e:
+            logger.warning("填表通知发送失败: %s", e)
 
     def _process_one_job(self, job: dict) -> None:
         job_id = int(job.get("id") or 0)
@@ -129,7 +243,7 @@ class IcrisActivationWorker:
             self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
             logger.error("任务 #%s 激活失败: %s", job_id, detail)
 
-    def _run_in_thread(self, coro, *args):
+    def _run_in_thread(self, coro, *args, **kwargs):
         """在新线程的事件循环里运行协程。"""
         result: tuple[bool, str] = (False, "unknown")
 
@@ -137,7 +251,7 @@ class IcrisActivationWorker:
             nonlocal result
             loop = asyncio.new_event_loop()
             try:
-                result = loop.run_until_complete(coro(*args))
+                result = loop.run_until_complete(coro(*args, **kwargs))
             finally:
                 loop.close()
 

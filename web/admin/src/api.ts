@@ -59,6 +59,10 @@ export type JobRow = {
   screenshot_path?: string;
   esubmit_screenshot_path?: string;
   success_screenshot_path?: string;
+  activation_status?: string;
+  form_status?: string;
+  form_filled_at?: string;
+  form_screenshot_path?: string;
   company_name?: string;
   company_name_cn?: string;
   company_name_en?: string;
@@ -134,6 +138,13 @@ export type WeworkSendModes = {
   channel: string;
   webhook_url_set: boolean;
   default_owner_set: boolean;
+};
+
+export type DefaultOffice = {
+  flat_floor: string;
+  building: string;
+  street: string;
+  district: string;
 };
 
 export type WeworkSendResponse = ApiOk<{
@@ -255,6 +266,11 @@ export const api = {
       `/admin/api/jobs/${id}/reject`,
       { method: "POST" },
     ),
+  formRetryJob: (id: number) =>
+    request<ApiOk<{ ok: boolean; message?: string }>>(
+      `/admin/api/jobs/${id}/form-retry`,
+      { method: "POST" },
+    ),
   emailAccounts: {
     list: () =>
       request<ApiOk<{ items: EmailAccount[] }>>(`/admin/api/email-accounts`),
@@ -273,6 +289,14 @@ export const api = {
         `/admin/api/email-accounts/${id}/test`,
         { method: "POST" },
       ),
+  },
+  defaultOffice: {
+    get: () => request<DefaultOffice>("/admin/api/default-office"),
+    update: (data: Partial<DefaultOffice>) =>
+      request<ApiOk>("/admin/api/default-office", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
   },
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
