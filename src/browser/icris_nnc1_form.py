@@ -3906,133 +3906,272 @@ class IcrisNnc1FormBot:
         logger.info("阶段B身分校验通过: 仅公司秘書")
         await page.wait_for_timeout(400)
 
-    async def _click_br_search_button(self, page) -> bool:
-        """点击商業登記號碼旁的「檢索」按钮。"""
-        # 优先：商業登記號碼同一行/容器内的檢索
-        clicked = await page.evaluate(
+    async def _br_search_names_filled(self, page) -> bool:
+        """商業登記號碼检索后中文/英文名称是否已带出。"""
+        return bool(
+            await page.evaluate(
+                """() => {
+                    for (const el of document.querySelectorAll(
+                        'label, .rowTitle, span, div, th, td'
+                    )) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '');
+                        if (!/^(中文名稱|英文名稱|中文名称|英文名称)$/.test(t)) {
+                            continue;
+                        }
+                        const row = el.closest('tr,.ant-row,.ant-form-item,div')
+                            || el.parentElement;
+                        const inp = row?.querySelector(
+                            'textarea, input:not([type=hidden]):not([type=checkbox])'
+                        );
+                        if (inp && (inp.value || '').trim().length > 1) return true;
+                    }
+                    return false;
+                }"""
+            )
+        )
+
+    async def _prepare_br_number_input(self, page) -> bool:
+        """聚焦商業登記號碼输入框并触发 blur，确保值已提交。"""
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const compact = s => (s || '').replace(/\\s+/g, '').trim();
+                    let brInp = null;
+                    for (const el of document.querySelectorAll(
+                        'label, .rowTitle, span, div, th, td, p'
+                    )) {
+                        const t = compact(el.innerText || '');
+                        if (!/^商業登記號碼|^商业登记号码/.test(t) || t.length > 24) {
+                            continue;
+                        }
+                        const row = el.closest(
+                            'tr, .ant-row, .ant-form-item, fieldset, div'
+                        ) || el.parentElement;
+                        brInp = row?.querySelector(
+                            'input:not([type=hidden]):not([type=checkbox])'
+                            + ':not([type=radio]), textarea'
+                        );
+                        if (brInp) break;
+                    }
+                    if (!brInp) {
+                        for (const inp of document.querySelectorAll('input, textarea')) {
+                            if (/^\\d{7,8}$/.test((inp.value || '').trim())) {
+                                brInp = inp;
+                                break;
+                            }
+                        }
+                    }
+                    if (!brInp) return false;
+                    brInp.focus();
+                    brInp.dispatchEvent(new Event('input', { bubbles: true }));
+                    brInp.dispatchEvent(new Event('change', { bubbles: true }));
+                    brInp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+                    return true;
+                }"""
+            )
+        )
+
+    async def _find_br_search_button_coords(self, page) -> dict | None:
+        """定位紧挨商業登記號碼输入框下方的「檢索」按钮坐标。"""
+        raw = await page.evaluate(
             """() => {
                 const compact = s => (s || '').replace(/\\s+/g, '').trim();
-                const isSearch = t => /^(檢索|检索|Search)$/i.test(compact(t));
-                const tryClick = (el) => {
-                    if (!el) return '';
-                    const r = el.getBoundingClientRect();
-                    if (r.width <= 0 || r.height <= 0) return '';
-                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return '';
-                    el.scrollIntoView({ block: 'center' });
-                    el.click();
-                    // 再派鼠标事件兜底
-                    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
-                        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-                    }
-                    return compact(el.innerText || el.value || '檢索');
-                };
-                let scope = null;
+                const isSearch = t => t === '檢索' || t === '检索'
+                    || /^Search$/i.test(t);
+                let brRect = null;
                 for (const el of document.querySelectorAll(
                     'label, .rowTitle, span, div, th, td, p'
                 )) {
                     const t = compact(el.innerText || '');
-                    if (!/^(商業登記號碼|商业登记号码)$/.test(t)
-                        && !(/^商業登記號碼|^商业登记号码/.test(t) && t.length <= 20)) {
+                    if (!/^商業登記號碼|^商业登记号码/.test(t) || t.length > 24) {
                         continue;
                     }
-                    scope = el.closest('tr, .ant-row, .ant-form-item, fieldset, div')
-                        || el.parentElement;
-                    break;
-                }
-                if (!scope) {
-                    for (const inp of document.querySelectorAll('input, textarea')) {
-                        const val = (inp.value || '').trim();
-                        if (!/^\\d{7,8}$/.test(val)) continue;
-                        scope = inp.closest('tr, .ant-row, .ant-form-item, fieldset, div')
-                            || inp.parentElement;
+                    const row = el.closest(
+                        'tr, .ant-row, .ant-form-item, fieldset, div'
+                    ) || el.parentElement;
+                    const brInp = row?.querySelector(
+                        'input:not([type=hidden]):not([type=checkbox])'
+                        + ':not([type=radio]), textarea'
+                    );
+                    if (brInp) {
+                        brRect = brInp.getBoundingClientRect();
                         break;
                     }
                 }
-                const pools = [];
-                if (scope) {
-                    pools.push(scope);
-                    if (scope.parentElement) pools.push(scope.parentElement);
-                    if (scope.parentElement?.parentElement) {
-                        pools.push(scope.parentElement.parentElement);
+                if (!brRect) {
+                    for (const inp of document.querySelectorAll('input, textarea')) {
+                        if (!/^\\d{7,8}$/.test((inp.value || '').trim())) continue;
+                        brRect = inp.getBoundingClientRect();
+                        break;
                     }
                 }
-                for (const root of pools) {
-                    if (!root) continue;
-                    for (const el of root.querySelectorAll(
-                        'button, a, input[type=button], input[type=submit], '
-                        + '[role=button], .btn, .ant-btn'
-                    )) {
-                        if (!isSearch(el.innerText || el.value || '')) continue;
-                        const hit = tryClick(el);
-                        if (hit) return hit;
-                    }
-                    // 灰色小按钮可能是 span.ant-btn 内层
-                    for (const el of root.querySelectorAll('span, div')) {
-                        const t = compact(el.innerText || '');
-                        if (!isSearch(t)) continue;
-                        if (t.length > 4) continue;
-                        const clickable = el.closest('button, a, .ant-btn, [role=button]') || el;
-                        const hit = tryClick(clickable);
-                        if (hit) return hit;
-                    }
-                }
-                // 全局兜底
+                if (!brRect || brRect.width <= 0) return null;
+
+                let best = null;
+                let bestScore = Infinity;
                 for (const el of document.querySelectorAll(
-                    'button, a, input[type=button], .ant-btn, [role=button]'
+                    'button, a, input[type=button], input[type=submit], '
+                    + 'span, div, .ant-btn, [role=button]'
                 )) {
-                    if (!isSearch(el.innerText || el.value || '')) continue;
-                    const hit = tryClick(el);
-                    if (hit) return hit;
+                    const t = compact(el.innerText || el.value || '');
+                    if (!isSearch(t) || t.length > 6) continue;
+                    const clickable = el.closest(
+                        'button, a, .ant-btn, [role=button]'
+                    ) || el;
+                    const r = clickable.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    // 檢索在 BR 输入框正下方（截图：按钮紧贴输入框下方）
+                    if (r.top < brRect.top - 20 || r.top > brRect.bottom + 90) continue;
+                    if (Math.abs(r.left - brRect.left) > 320) continue;
+                    const score = (r.top - brRect.bottom)
+                        + Math.abs(r.left - brRect.left) * 0.05;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = clickable;
+                    }
                 }
-                return '';
+                if (!best) return null;
+                const r = best.getBoundingClientRect();
+                return {
+                    x: r.left + r.width / 2,
+                    y: r.top + r.height / 2,
+                    tag: best.tagName,
+                    cls: (best.className || '').slice(0, 80),
+                };
             }"""
         )
-        if clicked:
-            logger.info("已点击「檢索」(near BR): %s", clicked)
-            await wait_spin_clear(page, timeout_ms=90000)
-            await page.wait_for_timeout(1500)
+        return raw if raw else None
+
+    async def _wait_br_search_result(self, page, *, timeout_ms: int = 45000) -> bool:
+        """等待检索后公司名称带出。"""
+        if await self._br_search_names_filled(page):
+            return True
+        try:
+            await page.wait_for_function(
+                """() => {
+                    for (const el of document.querySelectorAll(
+                        'label, .rowTitle, span, div, th, td'
+                    )) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '');
+                        if (!/^(中文名稱|英文名稱|中文名称|英文名称)$/.test(t)) {
+                            continue;
+                        }
+                        const row = el.closest('tr,.ant-row,.ant-form-item,div')
+                            || el.parentElement;
+                        const inp = row?.querySelector(
+                            'textarea, input:not([type=hidden]):not([type=checkbox])'
+                        );
+                        if (inp && (inp.value || '').trim().length > 1) return true;
+                    }
+                    return false;
+                }""",
+                timeout=timeout_ms,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _click_br_search_button(self, page) -> bool:
+        """点击商業登記號碼旁的「檢索」按钮，并验证检索已触发。"""
+        if await self._br_search_names_filled(page):
+            logger.info("商業登記號碼检索结果已存在，跳过檢索")
             return True
 
-        # Playwright：先定位商業登記號碼行再点檢索
-        br_row = page.locator("tr, .ant-row, .ant-form-item, div").filter(
-            has_text=re.compile(r"商業登記號碼|商业登记号码")
-        ).first
-        if await br_row.count() > 0:
+        await self._prepare_br_number_input(page)
+        await page.wait_for_timeout(300)
+
+        async def _try_mouse_click() -> bool:
+            coords = await self._find_br_search_button_coords(page)
+            if not coords:
+                return False
+            await page.mouse.click(coords["x"], coords["y"])
+            logger.info(
+                "已坐标点击「檢索」(x=%.0f,y=%.0f tag=%s)",
+                coords["x"],
+                coords["y"],
+                coords.get("tag", "?"),
+            )
+            return True
+
+        async def _try_playwright_row_click() -> bool:
+            br_row = page.locator("tr, .ant-row, .ant-form-item, div").filter(
+                has_text=re.compile(r"商業登記號碼|商业登记号码")
+            ).first
+            if await br_row.count() == 0:
+                return False
             for text in ("檢索", "检索", "Search"):
-                btn = br_row.get_by_role("button", name=text).first
+                btn = br_row.get_by_text(text, exact=True).first
                 if await btn.count() == 0:
                     btn = br_row.locator(
                         f"button:has-text('{text}'), .ant-btn:has-text('{text}'), "
-                        f"a:has-text('{text}'), input[value*='{text}']"
+                        f"a:has-text('{text}'), span:has-text('{text}')"
                     ).first
-                if await btn.count() > 0:
-                    await btn.scroll_into_view_if_needed()
-                    try:
-                        await btn.click(timeout=10000)
-                    except Exception:
-                        await btn.click(timeout=10000, force=True)
-                    logger.info("已点击「檢索」(Playwright row): %s", text)
-                    await wait_spin_clear(page, timeout_ms=90000)
-                    await page.wait_for_timeout(1500)
-                    return True
-
-        for text in ("檢索", "检索", "Search"):
-            btn = page.get_by_role("button", name=text).first
-            if await btn.count() == 0:
-                btn = page.locator(
-                    f"button:has-text('{text}'), a:has-text('{text}'), "
-                    f"input[type='button'][value*='{text}'], .ant-btn:has-text('{text}')"
+                if await btn.count() == 0:
+                    continue
+                wrap = btn.locator(
+                    "xpath=ancestor-or-self::button"
+                    "[1] | ancestor-or-self::*[contains(@class,'ant-btn')][1]"
                 ).first
-            if await btn.count() > 0 and await btn.is_visible():
-                await btn.scroll_into_view_if_needed()
+                target = wrap if await wrap.count() > 0 else btn
+                await target.scroll_into_view_if_needed()
                 try:
-                    await btn.click(timeout=10000)
+                    await target.click(timeout=10000)
                 except Exception:
-                    await btn.click(timeout=10000, force=True)
-                logger.info("已点击「檢索」(Playwright): %s", text)
-                await wait_spin_clear(page, timeout_ms=90000)
-                await page.wait_for_timeout(1500)
+                    await target.click(timeout=10000, force=True)
+                logger.info("已点击「檢索」(Playwright row): %s", text)
                 return True
+            return False
+
+        async def _try_enter_on_br_input() -> bool:
+            loc = page.locator("input, textarea").filter(
+                has=page.locator(
+                    "xpath=ancestor::*[contains(., '商業登記號碼')"
+                    " or contains(., '商业登记号码')][1]"
+                )
+            ).first
+            if await loc.count() == 0:
+                ok = await page.evaluate(
+                    """() => {
+                        for (const inp of document.querySelectorAll(
+                            'input, textarea'
+                        )) {
+                            if (!/^\\d{7,8}$/.test((inp.value || '').trim())) {
+                                continue;
+                            }
+                            inp.focus();
+                            return true;
+                        }
+                        return false;
+                    }"""
+                )
+                if not ok:
+                    return False
+            else:
+                await loc.focus()
+            await page.keyboard.press("Enter")
+            logger.info("已在商業登記號碼输入框按 Enter 触发检索")
+            return True
+
+        for attempt, click_fn in enumerate(
+            (_try_mouse_click, _try_playwright_row_click, _try_enter_on_br_input),
+            start=1,
+        ):
+            try:
+                if not await click_fn():
+                    continue
+                await wait_spin_clear(page, timeout_ms=90000)
+                await page.wait_for_timeout(1200)
+                if await self._wait_br_search_result(page, timeout_ms=30000):
+                    logger.info("商業登記號碼检索成功 (attempt=%s)", attempt)
+                    return True
+                logger.warning(
+                    "檢索点击后名称未带出 (attempt=%s)，重试下一种方式",
+                    attempt,
+                )
+            except Exception as e:
+                logger.warning("檢索点击失败 (attempt=%s): %s", attempt, e)
+
+        await self._maybe_screenshot(page, "step3_br_search_fail")
         return False
 
     async def _fill_secretary_hk_address(self, page, office: dict[str, Any]) -> None:
@@ -4090,38 +4229,31 @@ class IcrisNnc1FormBot:
         await page.wait_for_timeout(500)
 
         if br_no:
-            await self._fill_field_by_label(
-                page,
-                ["商業登記號碼", "商业登记号码", "Business Registration"],
-                br_no,
-            )
+            br_filled = False
+            br_field = page.get_by_label(
+                re.compile(r"商業登記號碼|商业登记号码|Business Registration")
+            ).first
+            if await br_field.count() > 0:
+                await br_field.scroll_into_view_if_needed()
+                await br_field.fill(br_no)
+                await br_field.press("Tab")
+                br_filled = True
+                logger.info("已填写 [商業登記號碼]: %s", br_no)
+            if not br_filled:
+                br_filled = await self._fill_field_by_label(
+                    page,
+                    ["商業登記號碼", "商业登记号码", "Business Registration"],
+                    br_no,
+                )
+            if not br_filled:
+                raise RuntimeError("未能填写商業登記號碼")
             await page.wait_for_timeout(400)
             if not await self._click_br_search_button(page):
-                await self._maybe_screenshot(page, "step3_br_search_fail")
                 raise RuntimeError("未找到或未能点击「檢索」按钮")
-            # 等待名称自动带出；超时告警继续
-            try:
-                await page.wait_for_function(
-                    """() => {
-                        for (const el of document.querySelectorAll(
-                            'label, .rowTitle, span, div, th, td'
-                        )) {
-                            const t = (el.innerText || '').replace(/\\s+/g, '');
-                            if (!/^(中文名稱|英文名稱|中文名称|英文名称)$/.test(t)) continue;
-                            const row = el.closest('tr,.ant-row,.ant-form-item,div')
-                                || el.parentElement;
-                            const inp = row?.querySelector(
-                                'textarea, input:not([type=hidden]):not([type=checkbox])'
-                            );
-                            if (inp && (inp.value || '').trim().length > 1) return true;
-                        }
-                        return false;
-                    }""",
-                    timeout=45000,
-                )
-                logger.info("商業登記號碼检索后公司名称已带出")
-            except Exception:
+            if not await self._wait_br_search_result(page, timeout_ms=45000):
                 logger.warning("檢索后公司名称未自动带出，继续填写其余字段")
+            else:
+                logger.info("商業登記號碼检索后公司名称已带出")
 
         await self._fill_secretary_hk_address(page, office)
 

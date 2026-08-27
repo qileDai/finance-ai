@@ -1,10 +1,38 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Image } from "antd";
+import { Image, Tag } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import { StateBox, statusBadge } from "../components/ui";
+
+const ACTIVATION_TAG_COLOR: Record<string, string> = {
+  "": "default",
+  pending: "processing",
+  activated: "success",
+  failed: "error",
+};
+
+const ACTIVATION_LABEL: Record<string, string> = {
+  "": "未激活",
+  pending: "待激活",
+  activated: "已激活",
+  failed: "激活失败",
+};
+
+const FORM_TAG_COLOR: Record<string, string> = {
+  "": "default",
+  pending: "processing",
+  filled: "success",
+  failed: "error",
+};
+
+const FORM_LABEL: Record<string, string> = {
+  "": "未填表",
+  pending: "待填表",
+  filled: "已填表",
+  failed: "填表失败",
+};
 
 type Props = {
   refreshKey: number;
