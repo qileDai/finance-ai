@@ -208,12 +208,25 @@ class RegistrationWorkflow:
         apply_default_office(ctx.company_data)
 
         if not ctx.icris_account:
-            acct = (ctx.company_data or {}).get("icris_account") or {}
+            data = ctx.company_data or {}
+            # NNC1 mock 登录账号与登记注册待生成的 icris_account 分离
+            acct = (
+                data.get("nnc1_mock_account")
+                or data.get("icris_account")
+                or {}
+            )
+            if not isinstance(acct, dict):
+                acct = {}
             username = (acct.get("username") or "").strip()
             password = (acct.get("password") or "").strip()
             if username and password:
                 ctx.icris_account = IcrisAccount(username=username, password=password)
-                ctx.log(f"使用 mock 已激活账号: {username}")
+                src = (
+                    "nnc1_mock_account"
+                    if data.get("nnc1_mock_account")
+                    else "icris_account"
+                )
+                ctx.log(f"使用 mock 已激活账号 ({src}): {username}")
             else:
                 ctx = self.step_read_email(ctx)
 

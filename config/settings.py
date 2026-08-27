@@ -244,7 +244,7 @@ class Settings(BaseSettings):
     # ICRIS 账号凭证生成（用户名=英文名首字母+证件后5位+yt，密码=用户名+后缀）
     icris_credential_mode: str = "yingtai"  # "yingtai" initials+id+yt | "legacy" 旧规则
     icris_username_prefix: str = "Yingtai"  # 兼容：识别旧 Yingtai 前缀以便重算
-    icris_username_random_length: int = 4  # 兼容旧配置（现规则不再使用）
+    icris_username_random_length: int = 4  # yingtai 用户名末尾随机后缀长度
     icris_username_timestamp_digits: int = 4  # 兼容旧名
     icris_password_suffix: str = "@"  # 密码后缀（拼在用户名后）
     # ICRIS 注册是否跳过「電子查冊」+「主要账户」选择（默认跳过；False 回退旧行为）

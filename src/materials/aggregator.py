@@ -143,34 +143,59 @@ def _get_files(materials: dict[str, dict[str, Any]]) -> list[str]:
     return paths
 
 
+def _icris_username_random_length() -> int:
+    """ICRIS 用户名末尾随机后缀长度（默认 4）。"""
+    try:
+        n = int(getattr(settings, "icris_username_random_length", 4) or 4)
+    except (TypeError, ValueError):
+        n = 4
+    return max(1, min(n, 12))
+
+
+def _icris_username_random_suffix(length: int | None = None) -> str:
+    length = length or _icris_username_random_length()
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _yingtai_username_has_random_suffix(username: str, rand_len: int | None = None) -> bool:
+    """新规则：base 以 yt 结尾，且末尾有 rand_len 位随机字符。"""
+    rand_len = rand_len or _icris_username_random_length()
+    u = (username or "").strip()
+    if len(u) < rand_len + 3:
+        return False
+    suffix = u[-rand_len:]
+    if not suffix.isalnum() or not suffix.isascii():
+        return False
+    if not all(c.islower() or c.isdigit() for c in suffix):
+        return False
+    return u[:-rand_len].endswith("yt")
+
+
 def _generate_icris_credentials(
     person_en: str = "", id_number: str = "", *, retry: bool = False
 ) -> tuple[str, str]:
     """生成 ICRIS 账号凭证。
 
-    用户名 = 姓名拼音首字母（小写） + 证件号码后5位 + yt
+    用户名 = 姓名拼音首字母（小写） + 证件号码后5位 + yt + N位随机（默认4）
     密码 = 用户名 + @（icris_password_suffix 配置，默认 @）
-    retry=True（重跑）时用户名末尾加 2 位随机字符（小写字母+数字），
-    因前一次的用户名已在 ICRIS 被占用。
+    retry=True 时重新 roll 随机后缀（任务重跑、用户名已被占用）。
     """
     pw_suffix = getattr(settings, "icris_password_suffix", "@") or "@"
+    rand_len = _icris_username_random_length()
 
-    # 姓名拼音首字母：按空格/连字符分词取每段首字母，统一转小写
     initials = ""
     name = (person_en or "").strip()
     if name:
         parts = re.split(r"[\s\-·•、]+", name)
         initials = "".join(p[0] for p in parts if p).lower()
 
-    # 证件号码后5位（仅保留数字与字母）
     id_tail = re.sub(r"[^A-Za-z0-9]", "", id_number or "")[-5:]
 
-    username = f"{initials}{id_tail}yt"
+    base = f"{initials}{id_tail}yt"
+    username = f"{base}{_icris_username_random_suffix(rand_len)}"
     if retry:
-        rand2 = "".join(
-            secrets.choice(string.ascii_lowercase + string.digits) for _ in range(2)
-        )
-        username = f"{username}{rand2}"
+        username = f"{base}{_icris_username_random_suffix(rand_len)}"
     password = f"{username}{pw_suffix}"
     return username, password
 

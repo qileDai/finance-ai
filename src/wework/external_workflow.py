@@ -80,7 +80,7 @@ class ExternalGroupWorkflow:
         """重跑时重新生成 username/password 并更新 company_data + DB payload_json。
 
         重跑（attempts>1）时前一次的用户名已在 ICRIS 被占用，
-        末尾加 2 位随机字符生成新用户名，同步写入 DB 供前端展示。
+        按新规则重新 roll 末尾 4 位随机字符生成新用户名，同步写入 DB 供前端展示。
         """
         person_en = str(
             (company_data.get("applicant") or {}).get("name_en") or ""
@@ -89,9 +89,13 @@ class ExternalGroupWorkflow:
             (company_data.get("identity_proof") or {}).get("id_number") or ""
         )
         from src.materials.aggregator import _generate_icris_credentials
+        from src.browser.icris_registration import finalize_s02_icris_credentials
 
-        new_user, new_pwd = _generate_icris_credentials(
+        raw_user, raw_pwd = _generate_icris_credentials(
             person_en, id_number, retry=True
+        )
+        new_user, new_pwd = finalize_s02_icris_credentials(
+            company_data, raw_user, raw_pwd
         )
         company_data.setdefault("icris_account", {})["username"] = new_user
         company_data["icris_account"]["password"] = new_pwd

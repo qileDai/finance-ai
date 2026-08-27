@@ -92,11 +92,72 @@ def _is_legacy_yingtai_username(username: str) -> bool:
     return u.startswith(prefix) or u.lower().startswith(prefix.lower())
 
 
+def _s02_password_meets_rules(password: str) -> bool:
+    """ICRIS s02：≥10 位，含数字、大写、小写。"""
+    pwd = password or ""
+    return (
+        len(pwd) >= 10
+        and any(c.isdigit() for c in pwd)
+        and any(c.isupper() for c in pwd)
+        and any(c.islower() for c in pwd)
+    )
+
+
+def _normalize_s02_username(username: str, person_en: str = "") -> str:
+    """s02 用户名：仅首字母大写（与密码规范化方式一致），其余字符保持原样。"""
+    u = (username or "").strip()
+    if not u:
+        return u
+    return u[0].upper() + u[1:]
+
+
+def _s02_username_need_fix(username: str) -> bool:
+    u = (username or "").strip()
+    if not u:
+        return False
+    return u != u[0].upper() + u[1:]
+
+
+def _ensure_s02_password(username: str, suffix: str = "@") -> str:
+    """s02 密码：优先 username+suffix；不合规则首字母大写化或追加 Yt1。"""
+    suffix = suffix or "@"
+    pwd = f"{username}{suffix}"
+    if _s02_password_meets_rules(pwd):
+        return pwd
+    if username:
+        pwd = f"{username[0].upper()}{username[1:]}{suffix}"
+        if _s02_password_meets_rules(pwd):
+            return pwd
+    return f"{username}Yt1{suffix}"
+
+
+def finalize_s02_icris_credentials(
+    data: dict[str, Any],
+    username: str,
+    password: str = "",
+) -> tuple[str, str]:
+    """s02 专用：规范化用户名首字母与密码，写回 icris_account / _icris_session。"""
+    person_en, _ = _person_en_and_id_from_data(data)
+    username = _normalize_s02_username(username, person_en)
+    pw_suffix = getattr(settings, "icris_password_suffix", "@") or "@"
+    password = _ensure_s02_password(username, pw_suffix)
+    acct = data.get("icris_account")
+    if not isinstance(acct, dict):
+        acct = {}
+        data["icris_account"] = acct
+    acct["username"] = username
+    acct["password"] = password
+    session = data.setdefault("_icris_session", {})
+    session["username"] = username
+    session["password"] = password
+    return username, password
+
+
 def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
     """从 company_data 生成 ICRIS 用户名与密码（同一次流程保持一致）。
 
-    yingtai 模式：英文名首字母 + 证件后5位 + yt，密码 = 用户名 + @。
-    旧 Yingtai 前缀预生成凭证会按新规则重算；其它预生成（非 Yingtai）原样使用。
+    yingtai 模式：英文名首字母 + 证件后5位 + yt + 4位随机，密码 = 用户名 + @。
+    旧 Yingtai 前缀或无随机后缀的 initials+yt 凭证会按新规则重算。
     """
     session = data.setdefault("_icris_session", {})
     if session.get("username") and session.get("password"):
@@ -117,32 +178,42 @@ def derive_icris_credentials(data: dict[str, Any]) -> tuple[str, str]:
 
     # yingtai：按 initials+id+yt 生成（含重算旧 Yingtai 前缀）
     if mode == "yingtai":
-        from src.materials.aggregator import _generate_icris_credentials
+        from src.materials.aggregator import (
+            _generate_icris_credentials,
+            _yingtai_username_has_random_suffix,
+        )
 
-        need_regen = (not username) or (
-            _is_legacy_yingtai_username(username) and bool(person_en or id_number)
+        need_regen = (
+            not username
+            or (
+                _is_legacy_yingtai_username(username) and bool(person_en or id_number)
+            )
+            or (bool(username) and not _yingtai_username_has_random_suffix(username))
+            or _s02_username_need_fix(username)
+            or (
+                bool(password_raw)
+                and username
+                and not _s02_password_meets_rules(password_raw)
+            )
         )
         if need_regen:
             username, password = _generate_icris_credentials(
                 person_en=person_en, id_number=id_number
             )
-            acct["username"] = username
-            acct["password"] = password
-            session["username"] = username
-            session["password"] = password
+            username, password = finalize_s02_icris_credentials(
+                data, username, password
+            )
             logger.info(
-                "ICRIS 凭证已生成 (initials+id+yt): user=%s person=%s id_tail=%s",
+                "ICRIS 凭证已生成 (initials+id+yt+rand): user=%s person=%s id_tail=%s",
                 username,
                 person_en[:40],
                 re.sub(r"[^A-Za-z0-9]", "", id_number)[-5:],
             )
             return username, password
 
-        # 已有正确预生成（如 aggregator 写入的 initials+yt）→ 原样使用
-        if username and password_raw:
-            session["username"] = username
-            session["password"] = password_raw
-            return username, password_raw
+        # 预生成凭证：s02 规范化（首字母小写 + 密码合规）
+        if username and password_raw and _yingtai_username_has_random_suffix(username):
+            return finalize_s02_icris_credentials(data, username, password_raw)
 
     # 预生成 username+password（非 yingtai 或未触发重算）→ 原样使用
     if username and password_raw:
@@ -317,6 +388,27 @@ class IcrisRegistrationBot:
         # 人工审核：job_id 和通知回调（allow_submit=True 时 s03a 等待审核）
         self.job_id: int = 0
         self.on_review_needed: Any = None  # Callable[[int, str], None] | None
+
+    def _persist_s02_account_to_job(self, data: dict[str, Any]) -> None:
+        """s02 填表后将最终 icris_account 写回 job payload（供真实 NNC1 登录）。"""
+        if not self.job_id:
+            return
+        acct = data.get("icris_account") or {}
+        username = str(acct.get("username") or "").strip()
+        password = str(acct.get("password") or "").strip()
+        if not username or not password:
+            return
+        try:
+            from src.storage.db import ExternalGroupStore
+
+            ExternalGroupStore().update_job_payload_account(
+                self.job_id, username, password
+            )
+            logger.info(
+                "s02 凭证已写回 job payload #%s: user=%s", self.job_id, username
+            )
+        except Exception as exc:
+            logger.warning("s02 凭证写回 job payload 失败: %s", exc)
 
     def _reset_flow_flags(self) -> None:
         """关页重开前重置步骤内存标志，避免假成功。"""
@@ -1642,10 +1734,30 @@ class IcrisRegistrationBot:
                     const opt = userType.options[userType.selectedIndex];
                     userCategory = userType.value === '0' || /个人|個人/.test((opt && opt.textContent) || '');
                 }
+                if (!userCategory) {
+                    for (const el of document.querySelectorAll(
+                        '.ant-select-selection-item, .ant-select-selection-selected-value'
+                    )) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '');
+                        if (/^个人$|^個人$/.test(t)) { userCategory = true; break; }
+                    }
+                }
                 const checked = v => {
                     const el = document.querySelector(`input[type=checkbox][value="${v}"]`);
                     return !!(el && el.checked);
                 };
+                let electronicSubmit = checked('filing');
+                if (!electronicSubmit) {
+                    for (const wrap of document.querySelectorAll('.ant-checkbox-wrapper')) {
+                        const t = (wrap.innerText || '').replace(/\\s+/g, '').slice(0, 12);
+                        if (!/^电子提交$|^電子提交$/.test(t)) continue;
+                        const inp = wrap.querySelector('input[type=checkbox]');
+                        if (inp && inp.checked) { electronicSubmit = true; break; }
+                        if (wrap.classList.contains('ant-checkbox-wrapper-checked')) {
+                            electronicSubmit = true; break;
+                        }
+                    }
+                }
                 const radioChecked = (n, v) => {
                     const el = document.querySelector(`input[type=radio][name="${n}"][value="${v}"]`);
                     return !!(el && el.checked);
@@ -1656,7 +1768,7 @@ class IcrisRegistrationBot:
                 };
                 return {
                     userCategory,
-                    electronicSubmit: checked('filing'),
+                    electronicSubmit,
                     electronicSearch: checked('search'),
                     primaryAccount: radioChecked('serviceType', 'principal'),
                     username: val('userId'),
@@ -2374,6 +2486,36 @@ class IcrisRegistrationBot:
             await page.wait_for_timeout(400)
         return False
 
+    async def _ensure_electronic_submit_checked(self, page: "Page") -> bool:
+        """s02：确保「电子提交 / 電子提交」已勾选。"""
+        status = await self._get_account_profile_status(page)
+        if status.get("electronicSubmit"):
+            return True
+
+        if await self._check_native_checkbox_by_value(page, "filing"):
+            logger.info("已勾选电子提交 (native value=filing)")
+            await page.wait_for_timeout(400)
+            if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+                return True
+
+        for attempt in range(3):
+            if await self._ensure_checkbox_in_section(
+                page, r"拟订用的服务|擬訂用的服務", r"^电子提交$|^電子提交$"
+            ):
+                await page.wait_for_timeout(400)
+                if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+                    return True
+            if await self._ensure_checkbox_by_text(
+                page, r"^电子提交$|^電子提交$", max_text_len=12, prefer_inner=True
+            ):
+                await page.wait_for_timeout(400)
+                if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+                    return True
+            await page.wait_for_timeout(500)
+
+        logger.warning("未能勾选「电子提交」")
+        return False
+
     async def _fill_account_profile_native(self, page: "Page", data: dict[str, Any]) -> int:
         """按 s02 页面真实 DOM：原生 select/checkbox/radio/input"""
         username, password = derive_icris_credentials(data)
@@ -2383,8 +2525,7 @@ class IcrisRegistrationBot:
         if await self._select_native_user_type_individual(page):
             filled += 1
 
-        if await self._check_native_checkbox_by_value(page, "filing"):
-            logger.info("已勾选电子提交 (value=filing)")
+        if await self._ensure_electronic_submit_checked(page):
             filled += 1
 
         if not getattr(settings, "icris_skip_esearch_principal", True):
@@ -3391,9 +3532,21 @@ class IcrisRegistrationBot:
 
         # 优先：s02 原生表单 (#userType / filing / search / serviceType / #userId ...)
         filled = await self._fill_account_profile_native(page, data)
-        if filled < 5:
-            # 回退：Ant Design 组件路径
-            logger.info("原生填写不足 (%d)，尝试 Ant Design 回退", filled)
+        status = await self._get_account_profile_status(page)
+        need_ant = (
+            filled < 5
+            or not status.get("userCategory")
+            or not status.get("electronicSubmit")
+            or not status.get("username")
+            or not status.get("password")
+        )
+        if need_ant:
+            # 回退：Ant Design 组件路径（含电子提交未勾时补勾）
+            logger.info(
+                "原生填写不足或字段未就绪 (filled=%d status=%s)，尝试 Ant Design 回退",
+                filled,
+                status,
+            )
             if await self._select_user_category_individual(page):
                 filled += 1
                 await page.wait_for_timeout(800)
@@ -3443,6 +3596,7 @@ class IcrisRegistrationBot:
             ):
                 if await self._fill_native_input(page, selector, value):
                     filled += 1
+            await self._ensure_electronic_submit_checked(page)
         else:
             status = await self._get_account_profile_status(page)
             logger.info(
@@ -3453,6 +3607,9 @@ class IcrisRegistrationBot:
             )
 
         status = await self._get_account_profile_status(page)
+        if not status.get("electronicSubmit"):
+            await self._ensure_electronic_submit_checked(page)
+            status = await self._get_account_profile_status(page)
         individual_ok = status.get("userCategory", False)
         if filled == 0:
             form_labels = await page.evaluate(
@@ -3470,13 +3627,37 @@ class IcrisRegistrationBot:
             page.url[:100],
         )
 
-        if filled > 0 and status.get("userCategory") and status.get("username"):
+        if not _s02_password_meets_rules(password):
+            logger.warning("s02 密码不合规，尝试修正后重填")
+            username, password = finalize_s02_icris_credentials(data, username, password)
+            for selector, value in (
+                ("#userId", username),
+                ("#password", password),
+                ("#confirm", password),
+            ):
+                await self._fill_native_input(page, selector, value)
+            status = await self._get_account_profile_status(page)
+
+        password_ok = _s02_password_meets_rules(password)
+        if (
+            filled > 0
+            and password_ok
+            and status.get("userCategory")
+            and status.get("electronicSubmit")
+            and status.get("username")
+            and status.get("password")
+            and status.get("confirmPassword")
+        ):
+            self._persist_s02_account_to_job(data)
             if await self._click_account_profile_continue(page):
                 await self._log_page(page, "账户资料继续后")
             else:
                 logger.warning("账户资料填写后未能点击「继续」")
         elif filled > 0:
-            logger.warning("账户资料未完整，跳过点击继续: %s", status)
+            if not password_ok:
+                logger.warning("s02 密码仍不合规，跳过点击继续: %s", password[:20])
+            else:
+                logger.warning("账户资料未完整，跳过点击继续: %s", status)
 
         return filled
 
@@ -5733,8 +5914,6 @@ class IcrisRegistrationBot:
                 except Exception as shot_err:
                     logger.warning("保存失败截图失败: %s", shot_err)
                 if screenshot_path:
-                    from src.browser.icris_errors import IcrisFlowError
-
                     run_error = IcrisFlowError(str(e), screenshot_path=screenshot_path)
                     run_error.__cause__ = e
             finally:
