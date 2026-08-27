@@ -23,10 +23,6 @@ const TEXT_FIELDS: TextField[] = [
   { key: "business_desc", label: "经营范围" },
   { key: "registered_office_cn", label: "注册地址（中文）" },
   { key: "registered_office_en", label: "注册地址（英文）" },
-  { key: "office_flat_floor", label: "办事处 室/楼/座", placeholder: "默认用系统配置" },
-  { key: "office_building", label: "办事处 大厦", placeholder: "默认用系统配置" },
-  { key: "office_street", label: "办事处 街道", placeholder: "默认用系统配置" },
-  { key: "office_district", label: "办事处 区", placeholder: "默认用系统配置" },
   { key: "director_name", label: "董事兼股东姓名", required: true },
   { key: "id_number", label: "身份证号码", required: true },
   {
@@ -37,6 +33,13 @@ const TEXT_FIELDS: TextField[] = [
   },
   { key: "director_address_cn", label: "住址（中文）" },
   { key: "director_address_en", label: "住址（英文）" },
+];
+
+const OFFICE_FIELDS: TextField[] = [
+  { key: "office_flat_floor", label: "室/楼/座" },
+  { key: "office_building", label: "大厦" },
+  { key: "office_street", label: "街道" },
+  { key: "office_district", label: "区" },
 ];
 
 const ID_TYPE_OPTIONS: { value: string; label: string }[] = [
@@ -108,14 +111,19 @@ function parseRegistrationText(raw: string): Record<string, string> {
     { field: "company_name_en", pattern: /^(公司英文名|公司英文名称|英文名)/ },
     { field: "registered_capital", pattern: /^注册资本/ },
     { field: "business_desc", pattern: /^(经营范围|业务范围)/ },
-    { field: "director_name", pattern: /^(董事|股东)/ },
+    { field: "director_name", pattern: /^董事\s*[+＋、,，&＆]?\s*股东|^股东\s*[+＋、,，&＆]?\s*董事|^董事兼股东|^董事|^股东/ },
     { field: "id_number", pattern: /^(身份证号?码?|证件号|护照号)/ },
     { field: "contact_email", pattern: /^(联络邮箱|邮箱|电邮|电子邮件)/ },
+    { field: "registered_office_cn", pattern: /^(注册办事处|建议地址|办事处地址|注册地址)/ },
+    { field: "office_flat_floor", pattern: /^室[／/]楼[／/]座[^:：]*[:：]|^室\/楼\/座[^:：]*[:：]|^楼层[^:：]*[:：]/ },
+    { field: "office_building", pattern: /^(大厦|大廈|大楼|大樓)[^:：]*[:：]/ },
+    { field: "office_street", pattern: /^街道[／/]屋苑[／/]地段[／/]村[^:：]*[:：]|^街道[^:：]*[:：]/ },
+    { field: "office_district", pattern: /^区[^:：]*[:：]|^區[^:：]*[:：]/ },
   ];
 
   // 已知关键字集合：用于判断「注册地址」后下一行是否为新字段
   const knownKeyRe =
-    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|身份证号?码?|证件号|护照号|注册地址|公司名称|联络邮箱|邮箱|电邮)/;
+    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|身份证号?码?|证件号|护照号|注册地址|公司名称|联络邮箱|邮箱|电邮|注册办事处|建议地址|办事处地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
 
   function stripLeadingNumber(s: string): string {
     return s.replace(/^\s*\d+\s*[、.）)]\s*/, "").trim();
@@ -125,6 +133,27 @@ function parseRegistrationText(raw: string): Record<string, string> {
     const line = lines[i].trim();
     if (!line) continue;
     const stripped = stripLeadingNumber(line);
+
+    // 公司名称：冒号后有值才解析（纯标题行跳过），含中文→中文名，纯英文→英文名
+    const companyNameMatch = stripped.match(/^公司名称\s*[:：]\s*(\S.*)$/);
+    if (companyNameMatch) {
+      const afterColon = companyNameMatch[1].trim();
+      // 截断混在同一行的下一个关键字
+      const nextKeyMatch = afterColon.match(
+        /\s+(中文名|英文名|公司中文名|公司英文名|注册资本|经营范围|董事|股东|身份证|注册地址|联络邮箱|邮箱|住址)/
+      );
+      const val = nextKeyMatch
+        ? afterColon.slice(0, nextKeyMatch.index).trim()
+        : afterColon;
+      if (val) {
+        if (/[\u4e00-\u9fff]/.test(val)) {
+          result.company_name_cn = val;
+        } else {
+          result.company_name_en = val;
+        }
+      }
+      continue;
+    }
 
     // 注册地址：本行可能是中文地址，下一行可能是英文地址
     if (/^注册地址/.test(stripped)) {
@@ -175,7 +204,7 @@ export function RegisterPage({ onToast }: Props) {
   const [defaultEmail, setDefaultEmail] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
-  // 预填默认邮箱 + 恢复运行中任务状态
+  // 预填默认邮箱 + 默认办事处地址 + 恢复运行中任务状态
   useEffect(() => {
     api.registerRunner
       .defaults()
@@ -187,6 +216,23 @@ export function RegisterPage({ onToast }: Props) {
             p.contact_email ? p : { ...p, contact_email: email }
           );
         }
+      })
+      .catch(() => {});
+    api.defaultOffice
+      .get()
+      .then((d) => {
+        setFields((p) => {
+          const updates: Record<string, string> = {};
+          if (!p.office_flat_floor && d.flat_floor)
+            updates.office_flat_floor = d.flat_floor;
+          if (!p.office_building && d.building)
+            updates.office_building = d.building;
+          if (!p.office_street && d.street)
+            updates.office_street = d.street;
+          if (!p.office_district && d.district)
+            updates.office_district = d.district;
+          return Object.keys(updates).length > 0 ? { ...p, ...updates } : p;
+        });
       })
       .catch(() => {});
     api.registerRunner
@@ -496,6 +542,27 @@ export function RegisterPage({ onToast }: Props) {
                 )}
               </label>
             ) : null}
+          </div>
+
+          <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #e8e8e8" }}>
+            <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>公司在香港的注册办事处地址</h3>
+            <small className="muted" style={{ display: "block", marginBottom: 12 }}>
+              不填写则使用系统默认地址（管理后台 &gt; 默认办事处配置）
+            </small>
+            <div className="reg-form">
+              {OFFICE_FIELDS.map((f) => (
+                <label key={f.key} className="reg-field">
+                  <span>{f.label}</span>
+                  <input
+                    type="text"
+                    value={fields[f.key] || ""}
+                    placeholder="默认用系统配置"
+                    onChange={(e) => setField(f.key, e.target.value)}
+                    disabled={submitting}
+                  />
+                </label>
+              ))}
+            </div>
           </div>
 
           <div className="reg-actions">
