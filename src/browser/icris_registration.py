@@ -2486,16 +2486,33 @@ class IcrisRegistrationBot:
             await page.wait_for_timeout(400)
         return False
 
+    async def _electronic_submit_confirmed(self, page: "Page") -> bool:
+        """s02：电子提交在 DOM 与 Ant 勾选态均已确认。"""
+        if await self._verify_checkbox_checked(page, r"电子提交|電子提交"):
+            return True
+        status = await self._get_account_profile_status(page)
+        if not status.get("electronicSubmit"):
+            return False
+        # Ant 类名未同步时：原生 filing 在 ant-checkbox-wrapper 内且已 checked
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const inp = document.querySelector('input[type=checkbox][value="filing"]');
+                    if (!inp || !inp.checked) return false;
+                    return !!inp.closest('.ant-checkbox-wrapper') || inp.checked;
+                }"""
+            )
+        )
+
     async def _ensure_electronic_submit_checked(self, page: "Page") -> bool:
         """s02：确保「电子提交 / 電子提交」已勾选。"""
-        status = await self._get_account_profile_status(page)
-        if status.get("electronicSubmit"):
+        if await self._electronic_submit_confirmed(page):
             return True
 
         if await self._check_native_checkbox_by_value(page, "filing"):
             logger.info("已勾选电子提交 (native value=filing)")
             await page.wait_for_timeout(400)
-            if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+            if await self._electronic_submit_confirmed(page):
                 return True
 
         for attempt in range(3):
@@ -2503,49 +2520,119 @@ class IcrisRegistrationBot:
                 page, r"拟订用的服务|擬訂用的服務", r"^电子提交$|^電子提交$"
             ):
                 await page.wait_for_timeout(400)
-                if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+                if await self._electronic_submit_confirmed(page):
                     return True
             if await self._ensure_checkbox_by_text(
                 page, r"^电子提交$|^電子提交$", max_text_len=12, prefer_inner=True
             ):
                 await page.wait_for_timeout(400)
-                if (await self._get_account_profile_status(page)).get("electronicSubmit"):
+                if await self._electronic_submit_confirmed(page):
                     return True
             await page.wait_for_timeout(500)
 
         logger.warning("未能勾选「电子提交」")
         return False
 
-    async def _fill_account_profile_native(self, page: "Page", data: dict[str, Any]) -> int:
-        """按 s02 页面真实 DOM：原生 select/checkbox/radio/input"""
-        username, password = derive_icris_credentials(data)
-        logger.info("注册用户名 (initials+id+yt): %s", username)
-        filled = 0
+    async def _fill_s02_service_options(self, page: "Page") -> bool:
+        """s02 阶段1：个人 + 电子提交（必选）+ 可选电子查册/主要账户。"""
+        if not await self._select_native_user_type_individual(page):
+            if await self._select_user_category_individual(page):
+                await page.wait_for_timeout(800)
 
-        if await self._select_native_user_type_individual(page):
-            filled += 1
+        status = await self._get_account_profile_status(page)
+        if not status.get("userCategory"):
+            if await self._select_user_category_individual(page):
+                await page.wait_for_timeout(800)
 
-        if await self._ensure_electronic_submit_checked(page):
-            filled += 1
+        if not await self._ensure_electronic_submit_checked(page):
+            for cb_pat in (r"电子提交|電子提交",):
+                if await self._ensure_checkbox_in_section(
+                    page, r"拟订用的服务|擬訂用的服務", cb_pat
+                ):
+                    await page.wait_for_timeout(400)
+                elif await self._ensure_checkbox_by_text(page, cb_pat):
+                    await page.wait_for_timeout(400)
+            if not await self._ensure_electronic_submit_checked(page):
+                logger.warning("s02 阶段1：电子提交未能勾选")
+                return False
 
         if not getattr(settings, "icris_skip_esearch_principal", True):
+            for cb_pat in (r"电子查册|電子查冊",):
+                if await self._ensure_checkbox_by_text(page, cb_pat):
+                    await page.wait_for_timeout(400)
+                elif await self._ensure_checkbox_in_section(
+                    page, r"拟订用的服务|擬訂用的服務", cb_pat
+                ):
+                    await page.wait_for_timeout(400)
             if await self._select_principal_account_after_search(page):
-                filled += 2
+                await page.wait_for_timeout(400)
+            elif await self._select_primary_account_radio(page):
+                await page.wait_for_timeout(400)
         else:
             logger.info(
                 "已跳过电子查冊+主要账户选择 (icris_skip_esearch_principal=True)"
             )
 
-        field_steps = [
+        ok = await self._electronic_submit_confirmed(page)
+        if ok:
+            logger.info("s02 阶段1完成：电子提交已勾选")
+        return ok
+
+    async def _fill_s02_credentials_fields(
+        self, page: "Page", username: str, password: str
+    ) -> int:
+        """s02 阶段2：仅填用户名/密码/确认密码。"""
+        filled = 0
+        for selector, value in (
             ("#userId", username),
             ("#password", password),
             ("#confirm", password),
-        ]
-        for selector, value in field_steps:
+        ):
             if await self._fill_native_input(page, selector, value):
                 filled += 1
 
+        status = await self._get_account_profile_status(page)
+        need_ant = (
+            not status.get("username")
+            or not status.get("password")
+            or not status.get("confirmPassword")
+        )
+        if need_ant:
+            logger.info(
+                "s02 阶段2：原生凭证不足 (status=%s)，尝试 Ant 回退",
+                status,
+            )
+            field_map = [
+                (r"用户名称|用戶名稱|Username|userName|loginName", username),
+                (r"密码|密碼|Password", password),
+                (r"确认密码|確認密碼|confirmPassword|rePassword|Confirm", password),
+            ]
+            for label_pat, value in field_map:
+                if await self._fill_ant_form_by_label(page, label_pat, value):
+                    filled += 1
+                elif await self._fill_input_near_label(page, [label_pat], value):
+                    filled += 1
+                elif await self._fill_field(page, [label_pat], value):
+                    filled += 1
+
+            for selector, value in (
+                ("#userId", username),
+                ("#password", password),
+                ("#confirm", password),
+            ):
+                if await self._fill_native_input(page, selector, value):
+                    filled += 1
+
+        logger.info("s02 阶段2完成：已填用户名/密码 (filled=%d)", filled)
         return filled
+
+    async def _fill_account_profile_native(self, page: "Page", data: dict[str, Any]) -> int:
+        """按 s02 页面真实 DOM：先服务选项，再凭证（兼容旧调用）。"""
+        username, password = derive_icris_credentials(data)
+        logger.info("注册用户名 (initials+id+yt): %s", username)
+        if not await self._fill_s02_service_options(page):
+            return 0
+        return await self._fill_s02_credentials_fields(page, username, password)
 
     async def _log_user_category_dom(self, page: "Page") -> None:
         info = await page.evaluate(
@@ -3530,87 +3617,16 @@ class IcrisRegistrationBot:
         logger.info("开始填写账户资料 (url=%s)", page.url)
         await self._log_account_profile_status(page, prefix="填写前 ")
 
-        # 优先：s02 原生表单 (#userType / filing / search / serviceType / #userId ...)
-        filled = await self._fill_account_profile_native(page, data)
+        # 阶段1：个人 + 电子提交（未勾选则不填凭证、不继续）
+        if not await self._fill_s02_service_options(page):
+            logger.warning("s02 电子提交未勾选，跳过填写用户名/密码与继续")
+            return 0
+
+        # 阶段2：用户名 / 密码 / 确认密码
+        filled = await self._fill_s02_credentials_fields(page, username, password)
         status = await self._get_account_profile_status(page)
-        need_ant = (
-            filled < 5
-            or not status.get("userCategory")
-            or not status.get("electronicSubmit")
-            or not status.get("username")
-            or not status.get("password")
-        )
-        if need_ant:
-            # 回退：Ant Design 组件路径（含电子提交未勾时补勾）
-            logger.info(
-                "原生填写不足或字段未就绪 (filled=%d status=%s)，尝试 Ant Design 回退",
-                filled,
-                status,
-            )
-            if await self._select_user_category_individual(page):
-                filled += 1
-                await page.wait_for_timeout(800)
-
-            checkbox_steps = [
-                r"电子提交|電子提交",
-            ]
-            # 跳过电子查冊时仅勾「电子提交」；不跳过时再补「电子查册」
-            if not getattr(settings, "icris_skip_esearch_principal", True):
-                checkbox_steps.append(r"电子查册|電子查冊")
-            for cb_pat in checkbox_steps:
-                if await self._ensure_checkbox_by_text(page, cb_pat):
-                    filled += 1
-                    await page.wait_for_timeout(400)
-                elif await self._ensure_checkbox_in_section(
-                    page, r"拟订用的服务|擬訂用的服務", cb_pat
-                ):
-                    filled += 1
-                    await page.wait_for_timeout(400)
-
-            if not getattr(settings, "icris_skip_esearch_principal", True):
-                if await self._select_primary_account_radio(page):
-                    filled += 1
-                    await page.wait_for_timeout(400)
-            else:
-                logger.info(
-                    "已跳过电子查冊+主要账户 (Ant 回退, icris_skip_esearch_principal=True)"
-                )
-
-            field_map = [
-                (r"用户名称|用戶名稱|Username|userName|loginName", username),
-                (r"密码|密碼|Password", password),
-                (r"确认密码|確認密碼|confirmPassword|rePassword|Confirm", password),
-            ]
-            for label_pat, value in field_map:
-                if await self._fill_ant_form_by_label(page, label_pat, value):
-                    filled += 1
-                elif await self._fill_input_near_label(page, [label_pat], value):
-                    filled += 1
-                elif await self._fill_field(page, [label_pat], value):
-                    filled += 1
-
-            for selector, value in (
-                ("#userId", username),
-                ("#password", password),
-                ("#confirm", password),
-            ):
-                if await self._fill_native_input(page, selector, value):
-                    filled += 1
-            await self._ensure_electronic_submit_checked(page)
-        else:
-            status = await self._get_account_profile_status(page)
-            logger.info(
-                "账户资料原生填写完成 %d 项 (用户名=%s, 状态=%s)",
-                filled,
-                username,
-                status,
-            )
-
-        status = await self._get_account_profile_status(page)
-        if not status.get("electronicSubmit"):
-            await self._ensure_electronic_submit_checked(page)
-            status = await self._get_account_profile_status(page)
         individual_ok = status.get("userCategory", False)
+
         if filled == 0:
             form_labels = await page.evaluate(
                 """() => [...document.querySelectorAll(
@@ -3630,15 +3646,16 @@ class IcrisRegistrationBot:
         if not _s02_password_meets_rules(password):
             logger.warning("s02 密码不合规，尝试修正后重填")
             username, password = finalize_s02_icris_credentials(data, username, password)
-            for selector, value in (
-                ("#userId", username),
-                ("#password", password),
-                ("#confirm", password),
-            ):
-                await self._fill_native_input(page, selector, value)
+            filled += await self._fill_s02_credentials_fields(page, username, password)
             status = await self._get_account_profile_status(page)
 
         password_ok = _s02_password_meets_rules(password)
+        electronic_ok = await self._ensure_electronic_submit_checked(page)
+        if not electronic_ok:
+            logger.warning("s02 继续前电子提交仍未勾选，不点继续")
+            return filled
+
+        status = await self._get_account_profile_status(page)
         if (
             filled > 0
             and password_ok
@@ -3656,6 +3673,8 @@ class IcrisRegistrationBot:
         elif filled > 0:
             if not password_ok:
                 logger.warning("s02 密码仍不合规，跳过点击继续: %s", password[:20])
+            elif not status.get("electronicSubmit"):
+                logger.warning("s02 电子提交未勾选，跳过点击继续: %s", status)
             else:
                 logger.warning("账户资料未完整，跳过点击继续: %s", status)
 
