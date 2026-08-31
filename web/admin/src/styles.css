@@ -1053,3 +1053,22 @@ table.data tr.clickable:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+.job-shot-preview .ant-image-preview-img-wrapper {
+  pointer-events: none;
+}
+
+.job-shot-preview .ant-image-preview-img {
+  pointer-events: auto;
+  max-height: 80vh !important;
+  max-width: 90vw !important;
+  width: auto !important;
+  height: auto !important;
+}
+
+.job-shot-preview .ant-image-preview-close,
+.job-shot-preview .ant-image-preview-operations,
+.job-shot-preview .ant-image-preview-operations-wrapper {
+  pointer-events: auto;
+}
+

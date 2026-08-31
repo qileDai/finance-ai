@@ -247,6 +247,91 @@ def split_applicant_english_name(name_en: str) -> tuple[str, str]:
     return " ".join(parts[1:]), parts[0]
 
 
+def latin_english_given_surname(name_en: str, name_cn: str = "") -> tuple[str, str]:
+    """有中文名则不填英文姓/名；仅无中文且含拉丁字母时拆英文名。"""
+    if re.search(r"[\u4e00-\u9fff]", str(name_cn or "")):
+        return "", ""
+    text = (name_en or "").strip()
+    if not re.search(r"[A-Za-z]", text):
+        return "", ""
+    return split_applicant_english_name(text)
+
+
+def _admin_job_review_url(job_id: int, admin_public_url: str) -> str:
+    base = (admin_public_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    low = base.lower()
+    if "127.0.0.1" in low or "localhost" in low:
+        return ""
+    return f"{base}/jobs/{int(job_id)}"
+
+
+def format_s03a_review_message(
+    job_id: int,
+    data: dict[str, Any] | None = None,
+    *,
+    admin_public_url: str | None = None,
+) -> str:
+    """s03a 审核 webhook 正文（企微 markdown）。空字段跳过。"""
+    payload = data if isinstance(data, dict) else {}
+    applicant = payload.get("applicant") or {}
+    if not isinstance(applicant, dict):
+        applicant = {}
+    contact = payload.get("contact") or {}
+    if not isinstance(contact, dict):
+        contact = {}
+    acct = payload.get("icris_account") or {}
+    if not isinstance(acct, dict):
+        acct = {}
+
+    cn = str(payload.get("company_name_cn") or "").strip()
+    en = str(payload.get("company_name_en") or "").strip()
+    company = " / ".join(p for p in (cn, en) if p)
+
+    name_cn = str(applicant.get("name_cn") or "").strip()
+    name_en = str(applicant.get("name_en") or "").strip()
+    person = name_cn or name_en
+
+    id_type = str(applicant.get("id_type") or "").strip()
+    id_number = str(applicant.get("id_number") or "").strip()
+    id_line = "  ".join(p for p in (id_type, id_number) if p)
+
+    username = str(acct.get("username") or "").strip()
+    password = str(acct.get("password") or "").strip()
+    account = " / ".join(p for p in (username, password) if p)
+
+    email = (
+        str(contact.get("email") or "").strip()
+        or str(applicant.get("email") or "").strip()
+    )
+
+    if admin_public_url is None:
+        admin_public_url = str(getattr(settings, "admin_public_url", "") or "")
+    admin_url = _admin_job_review_url(job_id, admin_public_url)
+
+    lines = [
+        f"【ICRIS 注册审核】任务 #{job_id}",
+        "请到管理后台核对后点「提交」或「拒绝」",
+    ]
+    if company:
+        lines.append(f"公司：{company}")
+    if person:
+        lines.append(f"申请人：{person}")
+    if id_line:
+        lines.append(f"证件：{id_line}")
+    if account:
+        lines.append(f"账号：{account}")
+    if email:
+        lines.append(f"邮箱：{email}")
+    if admin_url:
+        lines.append(f"后台：[打开任务 #{job_id}]({admin_url})")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "…"
+    return text
+
+
 def derive_mock_china_address(applicant: dict[str, Any]) -> dict[str, str]:
     """非香港地址（中国大陆）mock 数据"""
     cn = applicant.get("address_cn")
@@ -388,6 +473,7 @@ class IcrisRegistrationBot:
         # 人工审核：job_id 和通知回调（allow_submit=True 时 s03a 等待审核）
         self.job_id: int = 0
         self.on_review_needed: Any = None  # Callable[[int, str], None] | None
+        self._company_data: dict[str, Any] = {}
 
     def _persist_s02_account_to_job(self, data: dict[str, Any]) -> None:
         """s02 填表后将最终 icris_account 写回 job payload（供真实 NNC1 登录）。"""
@@ -442,7 +528,9 @@ class IcrisRegistrationBot:
                 await page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
-            # 4) DOM 稳定后再等一小段
+            # 4) 关掉 Cookie 横幅，避免挡住用户信息
+            await self._dismiss_cookie_banner(page)
+            # 5) DOM 稳定后再等一小段
             await page.wait_for_timeout(800)
 
             shot_dir = PROJECT_ROOT / "data" / "icris_esubmit"
@@ -479,7 +567,9 @@ class IcrisRegistrationBot:
                 await page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 pass
-            # 3) DOM 稳定后再等一小段
+            # 3) 关掉 Cookie 横幅（有则关，无则跳过）
+            await self._dismiss_cookie_banner(page)
+            # 4) DOM 稳定后再等一小段
             await page.wait_for_timeout(1000)
 
             shot_dir = PROJECT_ROOT / "data" / "icris_success"
@@ -519,10 +609,7 @@ class IcrisRegistrationBot:
         # 2) 通知审核人
         if self.on_review_needed:
             try:
-                msg = (
-                    f"【ICRIS 注册审核】job #{self.job_id} 已到 s03a 核对页，"
-                    f"请到管理后台确认提交"
-                )
+                msg = format_s03a_review_message(self.job_id, self._company_data)
                 self.on_review_needed(self.job_id, msg)
             except Exception as e:
                 logger.warning("s03a 审核通知发送失败: %s", e)
@@ -1028,6 +1115,52 @@ class IcrisRegistrationBot:
             await cookie_btn.click()
             await page.wait_for_timeout(500)
             logger.info("已接受 Cookie 横幅")
+        else:
+            await self._dismiss_cookie_banner(page)
+
+    async def _dismiss_cookie_banner(self, page: "Page") -> None:
+        """关掉文案含 cookie 的「接受」横幅；没有则跳过。不点条款接受。"""
+        if page.is_closed():
+            return
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                  const nodes = [...document.querySelectorAll(
+                    'button, a, [role=button], input[type=button], input[type=submit]'
+                  )];
+                  const btn = nodes.find((el) => {
+                    const t = (el.innerText || el.value || '').trim();
+                    if (!/接受|Accept/i.test(t)) return false;
+                    const wrap = el.closest('div,section,aside,footer') || el.parentElement;
+                    const ctx = wrap ? (wrap.innerText || '') : '';
+                    return /cookie/i.test(ctx);
+                  });
+                  if (!btn) return false;
+                  btn.click();
+                  return true;
+                }"""
+            )
+            if clicked:
+                await page.wait_for_timeout(400)
+                logger.info("已点击 Cookie 横幅接受")
+            hidden = await page.evaluate(
+                """() => {
+                  let n = 0;
+                  for (const el of document.querySelectorAll('div,section,aside,footer')) {
+                    const t = el.innerText || '';
+                    if (!/cookie/i.test(t) || !/接受|Accept/i.test(t)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.height < 24 || r.height > 280 || r.width < 200) continue;
+                    el.style.setProperty('display', 'none', 'important');
+                    n += 1;
+                  }
+                  return n;
+                }"""
+            )
+            if hidden:
+                logger.info("已隐藏 Cookie 横幅 %s 个", hidden)
+        except Exception as e:
+            logger.debug("关闭 Cookie 横幅跳过: %s", e)
 
     async def _page_language_state(self, page: "Page") -> str:
         """返回页面语言状态: simplified | traditional | unknown"""
@@ -3928,8 +4061,8 @@ class IcrisRegistrationBot:
             applicant = {}
         name_en = applicant.get("name_en", "")
         name_cn = applicant.get("name_cn", "")
-        given, surname = (
-            split_applicant_english_name(name_en) if name_en else ("", "")
+        given, surname = latin_english_given_surname(
+            str(name_en or ""), str(name_cn or "")
         )
         title = applicant.get("title", "Mr")
         id_type = applicant.get("id_type", "HKID")
@@ -5399,11 +5532,16 @@ class IcrisRegistrationBot:
 
         applicant = data.get("applicant", {})
         username, password = derive_icris_credentials(data)
+        given, surname = latin_english_given_surname(
+            str(applicant.get("name_en") or ""),
+            str(applicant.get("name_cn") or ""),
+        )
+        name_en_fill = f"{surname} {given}".strip() if (surname or given) else ""
         field_map = [
             (["title", "salutation", "稱謂"], applicant.get("title", "Mr")),
-            (["surname", "last", "英文姓氏"], applicant.get("name_en", "").split()[-1] if applicant.get("name_en") else ""),
-            (["given", "first", "英文名字"], " ".join(applicant.get("name_en", "").split()[:-1]) if applicant.get("name_en") else ""),
-            (["nameEn", "englishName", "英文"], applicant.get("name_en", "")),
+            (["surname", "last", "英文姓氏"], surname),
+            (["given", "first", "英文名字"], given),
+            (["nameEn", "englishName", "英文"], name_en_fill),
             (["nameCh", "chineseName", "中文"], applicant.get("name_cn", "")),
             (["email", "電郵", "邮箱"], applicant.get("email", "")),
             (["phone", "telephone", "電話", "电话"], applicant.get("phone", "")),
@@ -5882,6 +6020,7 @@ class IcrisRegistrationBot:
         force_isolated_browser: bool = False,
     ) -> None:
         """执行注册流程：打开浏览器 → 验证码 → 条款 → 填写表单（按开关提交）"""
+        self._company_data = data if isinstance(data, dict) else {}
         try:
             from src.browser.launcher import import_async_playwright
 

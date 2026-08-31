@@ -249,15 +249,16 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         split_cn, split_en = _split_cjk_latin_name(person)
         person_cn = person_cn or split_cn
         person_en = person_en or split_en
-    # 纯中文名 → 转拼音式英文名（用于生成用户名首字母）
-    if not person_en and person_cn:
+    # 纯中文名 → 拼音只用于生成用户名，不写入 name_en（S03 不应填英文姓/名）
+    username_en = person_en
+    if not username_en and person_cn:
         try:
             from pypinyin import lazy_pinyin
             pinyins = lazy_pinyin(person_cn)
             if pinyins:
                 family = pinyins[0].capitalize()
                 given = "".join(pinyins[1:]).capitalize() if len(pinyins) > 1 else ""
-                person_en = f"{family} {given}".strip()
+                username_en = f"{family} {given}".strip()
         except Exception:
             pass
     applicant_name_raw = _get_val(materials, "applicant_name")
@@ -281,7 +282,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
 
     if getattr(settings, "icris_credential_mode", "yingtai") == "yingtai":
         icris_username, icris_password = _generate_icris_credentials(
-            person_en=person_en, id_number=_get_val(materials, "id_number")
+            person_en=username_en, id_number=_get_val(materials, "id_number")
         )
     else:
         icris_username = ""
@@ -314,7 +315,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         "founder_members": (
             [
                 {
-                    "name_en": person_en or person,
+                    "name_en": person_en,
                     "name_cn": person_cn,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
@@ -327,7 +328,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         "directors": (
             [
                 {
-                    "name_en": person_en or person,
+                    "name_en": person_en,
                     "name_cn": person_cn,
                     "email": contact_email,
                     "address_cn": _get_val(materials, "director_address_cn"),

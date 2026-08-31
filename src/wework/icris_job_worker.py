@@ -35,7 +35,10 @@ class IcrisJobWorker:
         if self._thread and self._thread.is_alive():
             return
 
-        # 进程重启：回收遗留 running
+        # 进程重启：已拒绝僵尸单修回 failed，再回收真正卡住的 running
+        repaired = self.store.repair_rejected_jobs()
+        if repaired:
+            logger.warning("ICRIS Worker 修复已拒绝僵尸单: %d", repaired)
         recovered = self.store.reset_stale_running_jobs(older_than_minutes=0)
         if recovered:
             logger.warning("ICRIS Worker 回收 stale running 任务: %d", recovered)
@@ -143,10 +146,16 @@ class IcrisJobWorker:
             msgs = capture.snapshot()
             # 任务被取消则不覆盖为 succeeded
             cur_status = self.store.get_job_status(job_id)
-            if cur_status == "cancelled":
+            review_status = self.store.get_job_review_status(job_id)
+            if (
+                cur_status in ("cancelled", "failed")
+                or (review_status or "").lower() == "rejected"
+            ):
                 logger.warning(
-                    "ICRIS job 已被取消（取消后完成）id=%s，保持 cancelled",
+                    "ICRIS job 终态不覆盖为 succeeded id=%s status=%s review=%s",
                     job_id,
+                    cur_status,
+                    review_status,
                 )
             else:
                 self.store.mark_job_succeeded(
@@ -207,8 +216,9 @@ class IcrisJobWorker:
                         "ICRIS job 审核等待中异常退出 id=%s，标记 failed 不重跑",
                         job_id,
                     )
-            # 取消的任务：保持 cancelled，不覆盖为 failed
+            # 取消 / 审核拒绝：保持终态，禁止自动重跑覆盖为 pending
             cur_status = self.store.get_job_status(job_id)
+            review_status = self.store.get_job_review_status(job_id)
             if cur_status == "cancelled":
                 logger.warning(
                     "ICRIS job 已被取消 id=%s，保持 cancelled 不标记 failed",
@@ -218,6 +228,19 @@ class IcrisJobWorker:
                 flush_thread.join(timeout=2.0)
                 capture.uninstall()
                 return
+            if (review_status or "").lower() == "rejected":
+                requeue = False
+                available_at = ""
+                logger.warning(
+                    "ICRIS job 已拒绝不重跑 id=%s status=%s",
+                    job_id,
+                    cur_status,
+                )
+                if cur_status == "failed":
+                    stop_flush.set()
+                    flush_thread.join(timeout=2.0)
+                    capture.uninstall()
+                    return
             ctx_fail = getattr(e, "ctx", None)
             if ctx_fail is not None:
                 capture.merge_ctx_messages(

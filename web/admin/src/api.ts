@@ -51,6 +51,7 @@ export type JobRow = {
   id: number;
   roomid: string;
   status: string;
+  review_status?: string;
   attempts?: number;
   max_attempts?: number;
   dry_run?: number | boolean;

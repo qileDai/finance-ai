@@ -4,7 +4,14 @@ import { Image, Tag } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
-import { StateBox, statusBadge } from "../components/ui";
+import {
+  JOB_SHOT_PREVIEW,
+  StateBox,
+  jobCanCancel,
+  jobCanRequeue,
+  jobStatusLabel,
+  jobStatusTagColor,
+} from "../components/ui";
 
 const ACTIVATION_TAG_COLOR: Record<string, string> = {
   "": "default",
@@ -136,7 +143,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
         <Link to="/jobs" className="btn btn-sm btn-ghost">
           ← 返回列表
         </Link>
-        {job?.status === "pending" || job?.status === "running" ? (
+        {jobCanCancel(job?.status) ? (
           <button
             type="button"
             className="btn btn-sm btn-danger"
@@ -146,7 +153,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
             取消
           </button>
         ) : null}
-        {job?.status === "failed" || job?.status === "cancelled" ? (
+        {jobCanRequeue(job?.status) ? (
           <button
             type="button"
             className="btn btn-sm btn-primary"
@@ -164,7 +171,9 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
             <section className="reg-card">
               <h2>
                 任务 #{job.id}{" "}
-                <span className={statusBadge(job.status)}>{job.status}</span>
+                <Tag color={jobStatusTagColor(job.status, job.review_status)}>
+                  {jobStatusLabel(job.status, job.review_status)}
+                </Tag>
               </h2>
               <dl className="job-meta">
                 <div>
@@ -220,7 +229,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         width={100}
                         height={100}
                         style={{ objectFit: "cover" }}
-                        preview={{ zoom: 0.8 }}
+                        preview={JOB_SHOT_PREVIEW}
                       />
                     ) : (
                       "-"
@@ -236,7 +245,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         width={100}
                         height={100}
                         style={{ objectFit: "cover" }}
-                        preview={{ zoom: 0.8 }}
+                        preview={JOB_SHOT_PREVIEW}
                       />
                     ) : (
                       "-"
@@ -251,6 +260,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         src={api.jobScreenshotUrl(job.id, "fail")}
                         width={400}
                         style={{ objectFit: "contain" }}
+                        preview={JOB_SHOT_PREVIEW}
                       />
                     ) : (
                       "-"
@@ -301,7 +311,7 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                         width={100}
                         height={100}
                         style={{ objectFit: "cover" }}
-                        preview={{ zoom: 0.8 }}
+                        preview={JOB_SHOT_PREVIEW}
                       />
                     ) : (
                       "-"

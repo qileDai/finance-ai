@@ -156,10 +156,20 @@ class RegistrationWorkflow:
                 webhook_url = (settings.icris_review_webhook_url or "").strip()
                 if webhook_url:
                     try:
-                        self.wework.send_webhook_text(webhook_url, msg)
-                        return
+                        self.wework.send_webhook_markdown(webhook_url, msg)
                     except Exception as e:
                         logger.warning("Webhook 发送失败，回退应用消息: %s", e)
+                    else:
+                        try:
+                            from src.storage.db import ExternalGroupStore
+
+                            job = ExternalGroupStore().get_registration_job(int(jid))
+                            shot = str((job or {}).get("esubmit_screenshot_path") or "").strip()
+                            if shot:
+                                self.wework.send_webhook_image(webhook_url, shot)
+                        except Exception as e:
+                            logger.warning("Webhook 审核截图发送失败: %s", e)
+                        return
                 chat_id = (settings.icris_review_notify_chat_id or "").strip()
                 if chat_id:
                     self.wework.send_group_text(chat_id, msg)

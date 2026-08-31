@@ -1358,15 +1358,16 @@ class ExternalGroupStore:
         return dict(row), True
 
     def claim_next_job(self) -> dict[str, Any] | None:
-        """认领最早可执行的 pending 任务（串行 worker 用）。"""
+        """认领最新可执行的 pending 任务（串行 worker 用）。已拒绝单不认领。"""
         now = _utc_now()
         with self._conn() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM registration_jobs
                 WHERE status = 'pending'
+                  AND IFNULL(review_status, '') != 'rejected'
                   AND (available_at = '' OR available_at <= ?)
-                ORDER BY id ASC
+                ORDER BY id DESC
                 LIMIT 1
                 """,
                 (now,),
@@ -1382,6 +1383,7 @@ class ExternalGroupStore:
                     started_at = ?,
                     updated_at = ?
                 WHERE id = ? AND status = 'pending'
+                  AND IFNULL(review_status, '') != 'rejected'
                 """,
                 (now, now, job_id),
             )
@@ -1423,7 +1425,7 @@ class ExternalGroupStore:
                     finished_at = ?,
                     updated_at = ?,
                     last_error = ''
-                WHERE id = ?
+                WHERE id = ? AND status IN ('running', 'awaiting_review')
                 """,
                 (
                     package_dir, package_dir, msgs, msgs,
@@ -1834,7 +1836,6 @@ class ExternalGroupStore:
         import json
 
         now = _utc_now()
-        status = "pending" if requeue else "failed"
         msgs = ""
         if result_messages is not None:
             try:
@@ -1842,6 +1843,19 @@ class ExternalGroupStore:
             except (TypeError, ValueError):
                 msgs = "[]"
         with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status, review_status FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return
+            cur_status = str(row["status"] or "")
+            review = str(row["review_status"] or "").lower()
+            if cur_status == "cancelled":
+                return
+            if review == "rejected":
+                requeue = False
+            status = "pending" if requeue else "failed"
             conn.execute(
                 """
                 UPDATE registration_jobs
@@ -1853,7 +1867,7 @@ class ExternalGroupStore:
                     available_at = CASE WHEN ? != '' THEN ? ELSE available_at END,
                     finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status != 'cancelled'
                 """,
                 (
                     status,
@@ -1929,6 +1943,7 @@ class ExternalGroupStore:
                 """
                 UPDATE registration_jobs
                 SET status = 'pending',
+                    review_status = '',
                     available_at = ?,
                     finished_at = NULL,
                     updated_at = ?,
@@ -2090,6 +2105,24 @@ class ExternalGroupStore:
             out["recent_failures"] = recent_failures
         return out
 
+    def repair_rejected_jobs(self) -> int:
+        """把已拒绝但仍为 pending/running 的僵尸单修回 failed。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'failed',
+                    finished_at = CASE WHEN finished_at IS NULL OR finished_at = ''
+                                       THEN ? ELSE finished_at END,
+                    updated_at = ?
+                WHERE IFNULL(review_status, '') = 'rejected'
+                  AND status IN ('pending', 'running')
+                """,
+                (now, now),
+            )
+            return int(cur.rowcount or 0)
+
     def reset_stale_running_jobs(self, *, older_than_minutes: int = 120) -> int:
         """进程重启后把卡住的 running 回收为 pending。
 
@@ -2111,6 +2144,7 @@ class ExternalGroupStore:
                             ELSE last_error
                         END
                     WHERE status = 'running'
+                      AND IFNULL(review_status, '') != 'rejected'
                     """,
                     (now, now),
                 )
@@ -2131,6 +2165,7 @@ class ExternalGroupStore:
                         ELSE last_error
                     END
                 WHERE status = 'running'
+                  AND IFNULL(review_status, '') != 'rejected'
                   AND (started_at IS NULL OR started_at < ?)
                 """,
                 (now, now, cutoff),

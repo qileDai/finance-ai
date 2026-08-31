@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox } from "../components/ui";
+import { JOB_SHOT_PREVIEW, StateBox, jobCanCancel, jobCanRequeue, jobStatusLabel, jobStatusTagColor } from "../components/ui";
 import {
   Button,
   Card,
   DatePicker,
   Image,
   Input,
+  Modal,
   Select,
   Space,
   Table,
@@ -33,28 +34,6 @@ const STATUS_OPTIONS = [
   { value: "failed", label: "已失败" },
   { value: "cancelled", label: "已取消" },
 ];
-
-const STATUS_TAG_COLOR: Record<string, string> = {
-  pending: "default",
-  running: "processing",
-  awaiting_review: "warning",
-  succeeded: "success",
-  failed: "error",
-  cancelled: "warning",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  pending: "待处理",
-  running: "进行中",
-  awaiting_review: "待审核",
-  succeeded: "已成功",
-  failed: "已失败",
-  cancelled: "已取消",
-};
-
-function statusText(s: string): string {
-  return STATUS_LABEL[s] || s;
-}
 
 export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
   const [status, setStatus] = useState("");
@@ -127,7 +106,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     setIdNumber("");
   }
 
-  async function act(
+  async function runAct(
     id: number,
     kind: "cancel" | "requeue" | "approve" | "reject",
   ) {
@@ -138,7 +117,6 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       reject: "拒绝审核",
     };
     const label = labelMap[kind];
-    if (!window.confirm(`确认${label}任务 #${id}？`)) return;
     setBusyId(id);
     try {
       let res: { message?: string } | null = null;
@@ -153,6 +131,36 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     } finally {
       setBusyId(null);
     }
+  }
+
+  function act(
+    id: number,
+    kind: "cancel" | "requeue" | "approve" | "reject",
+  ) {
+    if (kind === "approve") {
+      Modal.confirm({
+        title: "确认提交？",
+        content: `确认提交任务 #${id}？审核通过后将继续 ICRIS 注册。`,
+        okText: "提交",
+        cancelText: "取消",
+        onOk: () => runAct(id, "approve"),
+      });
+      return;
+    }
+    if (kind === "reject") {
+      Modal.confirm({
+        title: "确认拒绝？",
+        content: `确认拒绝任务 #${id}？任务将标记为已拒绝，不会自动重跑。`,
+        okText: "拒绝",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: () => runAct(id, "reject"),
+      });
+      return;
+    }
+    const label = kind === "cancel" ? "取消" : "重跑";
+    if (!window.confirm(`确认${label}任务 #${id}？`)) return;
+    void runAct(id, kind);
   }
 
   const columns = [
@@ -234,7 +242,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             height={50}
             style={{ objectFit: "cover", cursor: "pointer" }}
             onClick={(e) => e.stopPropagation()}
-            preview={{ mask: false, zoom: 0.8 }}
+            preview={JOB_SHOT_PREVIEW}
           />
         ) : (
           "-"
@@ -252,7 +260,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             height={50}
             style={{ objectFit: "cover", cursor: "pointer" }}
             onClick={(e) => e.stopPropagation()}
-            preview={{ mask: false, zoom: 0.8 }}
+            preview={JOB_SHOT_PREVIEW}
           />
         ) : (
           "-"
@@ -281,8 +289,10 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (s: string) => (
-        <Tag color={STATUS_TAG_COLOR[s] || "default"}>{statusText(s)}</Tag>
+      render: (_: unknown, r: JobRow) => (
+        <Tag color={jobStatusTagColor(r.status, r.review_status)}>
+          {jobStatusLabel(r.status, r.review_status)}
+        </Tag>
       ),
     },
     {
@@ -334,7 +344,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
         <Space
           onClick={(e) => e.stopPropagation()}
         >
-          {r.status === "pending" || r.status === "running" ? (
+          {jobCanCancel(r.status) ? (
             <Button
               size="small"
               danger
@@ -344,7 +354,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
               取消
             </Button>
           ) : null}
-          {r.status === "failed" || r.status === "cancelled" ? (
+          {jobCanRequeue(r.status) ? (
             <Button
               size="small"
               type="primary"

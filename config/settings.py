@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="", validation_alias="ADMIN_PASSWORD")
     # 独立管理后台端口（python main.py admin）；与 bot 回调端口分离
     admin_port: int = Field(default=8082, validation_alias="ADMIN_PORT")
+    # 公网管理后台根路径（含 /admin），审核 webhook 拼任务链接；空则不发链接
+    admin_public_url: str = Field(default="", validation_alias="ADMIN_PUBLIC_URL")
     # Cookie 会话：可选独立密钥；空则由 ADMIN_PASSWORD 派生
     admin_session_secret: str = Field(default="", validation_alias="ADMIN_SESSION_SECRET")
     admin_session_hours: float = Field(default=12.0, validation_alias="ADMIN_SESSION_HOURS")
@@ -230,6 +232,8 @@ class Settings(BaseSettings):
     notify_colleague_open_id: str = ""
     # s03a 人工审核：发到内部企微群的 chat_id（空则不发通知，仅网页等待）
     icris_review_notify_chat_id: str = ""
+    # s03a 人工审核：群机器人 Webhook（配置后优先于 chat_id 应用消息）
+    icris_review_webhook_url: str = ""
     # 审核超时秒数（默认 1800 = 30 分钟）
     icris_review_timeout_seconds: int = 1800
     # L2 注册任务队列 Worker（与 wework-external-bot 同进程）

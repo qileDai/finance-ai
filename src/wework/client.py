@@ -102,6 +102,49 @@ class WXBizMsgCrypt:
         return self.decrypt(echostr)
 
 
+_WEBHOOK_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _compress_webhook_image(raw: bytes) -> bytes:
+    """压到企微 webhook 约 2MB 限制内。"""
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(BytesIO(raw))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    quality = 80
+    w, h = img.size
+    for _ in range(8):
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        out = buf.getvalue()
+        if len(out) <= _WEBHOOK_IMAGE_MAX_BYTES:
+            return out
+        quality = max(40, quality - 10)
+        if w > 800 and h > 800:
+            w = int(w * 0.75)
+            h = int(h * 0.75)
+            img = img.resize((max(1, w), max(1, h)), Image.Resampling.LANCZOS)
+    return out
+
+
+def build_webhook_image_payload(image_path: str) -> dict[str, Any]:
+    """本地图片 → 企微 webhook image payload。"""
+    path = Path(image_path)
+    raw = path.read_bytes()
+    if len(raw) > _WEBHOOK_IMAGE_MAX_BYTES:
+        raw = _compress_webhook_image(raw)
+    if len(raw) > _WEBHOOK_IMAGE_MAX_BYTES:
+        raise ValueError(f"截图过大无法发送: {path} ({len(raw)} bytes)")
+    b64 = base64.b64encode(raw).decode("ascii")
+    digest = hashlib.md5(raw).hexdigest()
+    return {"msgtype": "image", "image": {"base64": b64, "md5": digest}}
+
+
 # ---------------------------------------------------------------------------
 # 企业微信客户端
 # ---------------------------------------------------------------------------
@@ -204,15 +247,43 @@ class WeWorkClient:
 
     def send_webhook_text(self, webhook_url: str, content: str) -> dict[str, Any]:
         """通过群机器人 Webhook 发文本（无需 access_token）"""
-        resp = httpx.post(
-            (webhook_url or "").strip(),
-            json={"msgtype": "text", "text": {"content": content}},
-            timeout=30,
+        return self._post_webhook(
+            webhook_url,
+            {"msgtype": "text", "text": {"content": content}},
         )
+
+    def send_webhook_markdown(self, webhook_url: str, content: str) -> dict[str, Any]:
+        """通过群机器人 Webhook 发 markdown。"""
+        text = (content or "").strip()
+        if len(text) > 4000:
+            text = text[:3990] + "…"
+        return self._post_webhook(
+            webhook_url,
+            {"msgtype": "markdown", "markdown": {"content": text}},
+        )
+
+    def send_webhook_image(self, webhook_url: str, image_path: str) -> dict[str, Any]:
+        """通过群机器人 Webhook 发本地图片（超 2MB 压成 JPEG）。"""
+        payload = build_webhook_image_payload(image_path)
+        return self._post_webhook(webhook_url, payload)
+
+    def _post_webhook(self, webhook_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = (webhook_url or "").strip()
+        if not url:
+            raise RuntimeError("webhook url 为空")
+        resp = httpx.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("errcode", 0) != 0:
-            logger.error("Webhook 发消息失败: %s", data)
+            code = data.get("errcode")
+            if code == 93000:
+                logger.error(
+                    "Webhook 发消息失败: 地址失效或群机器人已不在群，"
+                    "请重新复制 Webhook 并更新 ICRIS_REVIEW_WEBHOOK_URL 后重启: %s",
+                    data,
+                )
+            else:
+                logger.error("Webhook 发消息失败: %s", data)
         else:
             logger.info("已通过 Webhook 发送消息")
         return data
