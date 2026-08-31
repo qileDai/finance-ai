@@ -147,11 +147,12 @@ class IcrisActivationWorker:
             self._notify_form_result(job, ok=False, detail=detail)
 
     def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:
-        """填表结果通知到企微内部群（无配置则跳过）。"""
+        """填表结果通知到企微内部群（无配置则跳过）。优先群机器人 Webhook。"""
         from config.settings import settings
+        webhook_url = (settings.icris_review_webhook_url or "").strip()
         chat_id = (settings.icris_review_notify_chat_id or "").strip()
-        if not chat_id:
-            logger.info("填表通知未配置群 chat_id，跳过")
+        if not webhook_url and not chat_id:
+            logger.info("填表通知未配置 webhook/chat_id，跳过")
             return
         try:
             from src.wework.client import WeWorkClient
@@ -166,7 +167,15 @@ class IcrisActivationWorker:
                 f"状态: {status_text}\n"
                 f"详情: {detail[:200]}"
             )
-            client.send_group_text(chat_id, msg)
+            sent = False
+            if webhook_url:
+                try:
+                    client.send_webhook_text(webhook_url, msg)
+                    sent = True
+                except Exception as e:
+                    logger.warning("填表通知 Webhook 发送失败，回退应用消息: %s", e)
+            if not sent and chat_id:
+                client.send_group_text(chat_id, msg)
         except Exception as e:
             logger.warning("填表通知发送失败: %s", e)
 
@@ -175,26 +184,36 @@ class IcrisActivationWorker:
         if not job_id:
             return
 
-        # 从 payload_json 取注册邮箱
+        # 从 payload_json 取注册邮箱（与 S03 填入 ICRIS 的电邮一致）
         payload_str = str(job.get("payload_json") or "")
         contact_email = ""
         if payload_str:
             try:
                 payload = json.loads(payload_str)
                 contact = payload.get("contact") or {}
+                if not isinstance(contact, dict):
+                    contact = {}
                 contact_email = str(contact.get("email") or "").strip()
+                if not contact_email:
+                    applicant = payload.get("applicant") or {}
+                    if isinstance(applicant, dict):
+                        contact_email = str(applicant.get("email") or "").strip()
             except Exception:
                 pass
+        contact_email = contact_email.lower()
 
         if not contact_email:
             logger.warning("任务 #%s 无注册邮箱，跳过激活", job_id)
             self.store.mark_job_activation_failed(job_id, "无注册邮箱")
             return
 
-        # 查邮箱配置
+        # 按任务电邮查 IMAP 配置
         account = self.store.get_email_account_by_address(contact_email)
         if not account:
-            logger.info("任务 #%s 邮箱 %s 未配置 IMAP，跳过", job_id, contact_email)
+            logger.warning("任务 #%s 邮箱 %s 未配置 IMAP", job_id, contact_email)
+            self.store.mark_job_activation_failed(
+                job_id, f"邮箱未配置 IMAP: {contact_email}"
+            )
             return
 
         # 注册时间

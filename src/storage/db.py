@@ -1548,10 +1548,14 @@ class ExternalGroupStore:
         return [dict(r) for r in rows]
 
     def get_email_account_by_address(self, email: str) -> dict[str, Any] | None:
+        addr = (email or "").strip().lower()
+        if not addr:
+            return None
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM email_accounts WHERE email_address=? AND enabled=1",
-                (email,),
+                "SELECT * FROM email_accounts"
+                " WHERE lower(email_address)=? AND enabled=1",
+                (addr,),
             ).fetchone()
         return dict(row) if row else None
 
@@ -1563,29 +1567,81 @@ class ExternalGroupStore:
         username: str,
         password: str,
         label: str = "",
+        *,
+        account_id: int | None = None,
+        enabled: int | None = None,
     ) -> dict[str, Any]:
+        email = (email or "").strip().lower()
         now = _utc_now()
         with self._conn() as conn:
-            existing = conn.execute(
-                "SELECT id FROM email_accounts WHERE email_address=?", (email,)
-            ).fetchone()
-            if existing:
+            target = None
+            if account_id:
+                target = conn.execute(
+                    "SELECT * FROM email_accounts WHERE id=?",
+                    (account_id,),
+                ).fetchone()
+                if not target:
+                    raise ValueError("account not found")
+            else:
+                target = conn.execute(
+                    "SELECT * FROM email_accounts WHERE lower(email_address)=?",
+                    (email,),
+                ).fetchone()
+
+            if target:
+                other = conn.execute(
+                    "SELECT id FROM email_accounts"
+                    " WHERE lower(email_address)=? AND id!=?",
+                    (email, target["id"]),
+                ).fetchone()
+                if other:
+                    raise ValueError("邮箱地址已存在")
+                pwd = password if password else str(target["password"] or "")
+                enabled_val = (
+                    int(target["enabled"] or 1)
+                    if enabled is None
+                    else (1 if enabled else 0)
+                )
                 conn.execute(
                     """UPDATE email_accounts
-                       SET imap_host=?, imap_port=?, username=?, password=?,
-                           label=?, updated_at=?
+                       SET email_address=?, imap_host=?, imap_port=?, username=?,
+                           password=?, label=?, enabled=?, updated_at=?
                        WHERE id=?""",
-                    (imap_host, imap_port, username, password, label, now, existing["id"]),
+                    (
+                        email,
+                        imap_host,
+                        imap_port,
+                        username,
+                        pwd,
+                        label,
+                        enabled_val,
+                        now,
+                        target["id"],
+                    ),
                 )
-                aid = existing["id"]
+                aid = target["id"]
             else:
-                cur = conn.execute(
-                    """INSERT INTO email_accounts
-                       (email_address, imap_host, imap_port, username, password,
-                        label, enabled, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,1,?,?)""",
-                    (email, imap_host, imap_port, username, password, label, now, now),
-                )
+                enabled_val = 1 if enabled is None else (1 if enabled else 0)
+                try:
+                    cur = conn.execute(
+                        """INSERT INTO email_accounts
+                           (email_address, imap_host, imap_port, username, password,
+                            label, enabled, created_at, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (
+                            email,
+                            imap_host,
+                            imap_port,
+                            username,
+                            password,
+                            label,
+                            enabled_val,
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError("邮箱地址已存在") from exc
                 aid = cur.lastrowid
             row = conn.execute(
                 "SELECT * FROM email_accounts WHERE id=?", (aid,)

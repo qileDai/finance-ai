@@ -3924,6 +3924,8 @@ class IcrisRegistrationBot:
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         applicant = data.get("applicant", {})
+        if not isinstance(applicant, dict):
+            applicant = {}
         name_en = applicant.get("name_en", "")
         name_cn = applicant.get("name_cn", "")
         given, surname = (
@@ -3931,8 +3933,15 @@ class IcrisRegistrationBot:
         )
         title = applicant.get("title", "Mr")
         id_type = applicant.get("id_type", "HKID")
-        # S03 电邮固定用 MATERIALS_DEFAULT_CONTACT_EMAIL（注册邮箱），空则回退 applicant.email
-        email = (getattr(settings, "materials_default_contact_email", "") or "").strip() or applicant.get("email", "")
+        # S03 电邮用任务里的联络邮箱（快速注册可改），空才回退申请人邮箱 / 默认联络邮箱
+        contact = data.get("contact") or {}
+        if not isinstance(contact, dict):
+            contact = {}
+        email = (
+            str(contact.get("email") or "").strip()
+            or str(applicant.get("email") or "").strip()
+            or str(getattr(settings, "materials_default_contact_email", "") or "").strip()
+        )
         phone = applicant.get("phone", "")
         # 真实董事住址（非 mock）：优先 directors，回退 founder_members
         director = (data.get("directors") or [{}])[0] or (
@@ -3947,8 +3956,9 @@ class IcrisRegistrationBot:
         street, region = split_address_street_region(addr_text)
 
         logger.info(
-            "开始填写用户资料 (url=%s) 地址HK=%s street=%s region=%s",
+            "开始填写用户资料 (url=%s) 电邮=%s 地址HK=%s street=%s region=%s",
             page.url[:120],
+            email,
             is_hk,
             street[:40],
             region[:40],

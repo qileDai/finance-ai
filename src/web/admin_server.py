@@ -246,7 +246,7 @@ class AdminWebServer:
                         return self._send_json({"ok": False, "error": "not found"}, 404)
                     if not self._require_session():
                         return
-                    # 需 body 的 POST：submit/extract-id 大 body(30MB)；wework/send 默认 1MB
+                    # 默认读 JSON body（1MB）；证件/提交类接口允许 30MB
                     body: dict | None = None
                     if rel in (
                         "register-runner/submit",
@@ -254,17 +254,20 @@ class AdminWebServer:
                         "id-extract",
                     ):
                         raw = self._read_body(max_bytes=30_000_000)
-                    elif rel in ("wework/send",):
-                        raw = self._read_body()
                     else:
-                        raw = b""
+                        raw = self._read_body()
                     if raw:
                         try:
-                            body = json.loads(raw.decode("utf-8"))
+                            parsed = json.loads(raw.decode("utf-8"))
                         except Exception:
                             return self._send_json(
                                 {"ok": False, "error": "invalid json body"}, 400
                             )
+                        if not isinstance(parsed, dict):
+                            return self._send_json(
+                                {"ok": False, "error": "invalid json body"}, 400
+                            )
+                        body = parsed
                     result = handle_admin_api(
                         method="POST",
                         path=self.path,
@@ -293,11 +296,16 @@ class AdminWebServer:
                     body: dict | None = None
                     if raw:
                         try:
-                            body = json.loads(raw.decode("utf-8"))
+                            parsed = json.loads(raw.decode("utf-8"))
                         except Exception:
                             return self._send_json(
                                 {"ok": False, "error": "invalid json body"}, 400
                             )
+                        if not isinstance(parsed, dict):
+                            return self._send_json(
+                                {"ok": False, "error": "invalid json body"}, 400
+                            )
+                        body = parsed
                     result = handle_admin_api(
                         method="PUT",
                         path=self.path,

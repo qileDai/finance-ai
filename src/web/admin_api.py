@@ -862,17 +862,49 @@ def _handle_job_form_retry(
 def _handle_email_account_upsert(
     store: ExternalGroupStore, body: dict[str, Any]
 ) -> tuple[dict[str, Any], int]:
-    email = str(body.get("email_address") or "").strip()
+    email = str(body.get("email_address") or "").strip().lower()
     imap_host = str(body.get("imap_host") or "").strip()
-    imap_port = int(body.get("imap_port") or 993)
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "").strip()
     label = str(body.get("label") or "").strip()
-    if not email or not imap_host or not username or not password:
+    try:
+        imap_port = int(body.get("imap_port") or 993)
+    except (TypeError, ValueError):
+        return _err("imap_port 无效", 400)
+    if imap_port <= 0 or imap_port > 65535:
+        return _err("imap_port 无效", 400)
+
+    account_id = None
+    raw_id = body.get("id")
+    if raw_id not in (None, "", 0, "0"):
+        try:
+            account_id = int(raw_id)
+        except (TypeError, ValueError):
+            return _err("invalid id", 400)
+
+    enabled = None
+    if "enabled" in body and body.get("enabled") is not None:
+        enabled = 1 if body.get("enabled") in (True, 1, "1", "true", "True") else 0
+
+    if not email or not imap_host or not username:
+        return _err("email_address, imap_host, username 必填", 400)
+    if not password and not account_id:
         return _err("email_address, imap_host, username, password 必填", 400)
-    account = store.upsert_email_account(
-        email, imap_host, imap_port, username, password, label
-    )
+    try:
+        account = store.upsert_email_account(
+            email,
+            imap_host,
+            imap_port,
+            username,
+            password,
+            label,
+            account_id=account_id,
+            enabled=enabled,
+        )
+    except ValueError as e:
+        msg = str(e) or "save failed"
+        code = 404 if msg == "account not found" else 400
+        return _err(msg, code)
     return _ok(account=account, message="saved")
 
 
@@ -893,21 +925,23 @@ def _handle_email_account_test(
     if not account:
         return _err("account not found", 404)
     try:
-        import imaplib
+        from src.email.imap_client import open_imap_inbox
 
-        mail = imaplib.IMAP4_SSL(
-            str(account["imap_host"]), int(account["imap_port"])
-        )
+        mail = None
         try:
-            mail.login(str(account["username"]), str(account["password"]))
-            mail.select("INBOX")
-            typ, _ = mail.search(None, "ALL")
-            ok = typ == "OK"
+            mail = open_imap_inbox(
+                str(account["imap_host"]),
+                int(account["imap_port"]),
+                str(account["username"]),
+                str(account["password"]),
+            )
         finally:
-            mail.logout()
-        if ok:
-            return _ok(message="连接成功")
-        return _err("登录失败", 400)
+            if mail is not None:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
+        return _ok(message="连接成功")
     except Exception as e:
         return _err(f"连接失败: {e}", 400)
 

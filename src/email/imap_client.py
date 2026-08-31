@@ -3,16 +3,42 @@
 from __future__ import annotations
 
 import email
+import html as html_lib
 import imaplib
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.header import decode_header
+from email.message import Message
+from urllib.parse import unquote
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
+_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+_ACTIVATION_URL_KEYWORDS = (
+    "activate",
+    "confirm",
+    "verify",
+    "activation",
+    "啟用",
+    "启用",
+    "激活",
+)
+_SUBJECT_SEARCH_TERMS = (
+    "ICRIS",
+    "e-Services",
+    "Companies Registry",
+    "activate",
+    "activation",
+    "confirm",
+    "verification",
+)
+_FROM_SEARCH_TERMS = ("cr.gov.hk", "e-services")
 
 
 @dataclass
@@ -20,6 +46,185 @@ class IcrisAccount:
     username: str
     password: str
     raw_subject: str = ""
+
+
+def _decode_part_payload(part: Message) -> str:
+    payload = part.get_payload(decode=True)
+    if not payload:
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    for enc in (charset, "utf-8", "gbk", "gb18030"):
+        try:
+            return payload.decode(enc, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def collect_message_body(msg: Message) -> str:
+    """拼接纯文本与 HTML 正文，便于抽激活链接。"""
+    chunks: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() in ("text/plain", "text/html"):
+                chunks.append(_decode_part_payload(part))
+    else:
+        chunks.append(_decode_part_payload(msg))
+    return "\n".join(chunks)
+
+
+def is_activation_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw.lower().startswith("http"):
+        return False
+    lower = raw.lower()
+    if any(k in lower for k in _ACTIVATION_URL_KEYWORDS):
+        return True
+    if "e-services.cr.gov.hk" in lower:
+        path = lower.split("e-services.cr.gov.hk", 1)[-1]
+        if "?" in raw or (path.startswith("/") and len(path) > 2):
+            return True
+    return False
+
+
+def extract_activation_link_from_body(body: str) -> str | None:
+    """从纯文本/HTML 正文提取 ICRIS 激活链接。"""
+    if not body:
+        return None
+    text = html_lib.unescape(body)
+    candidates: list[str] = []
+    for match in _HREF_RE.finditer(text):
+        candidates.append(match.group(1))
+    for match in _URL_RE.finditer(text):
+        candidates.append(match.group(0))
+    for raw in candidates:
+        url = unquote(raw.rstrip(".,;)"))
+        if is_activation_url(url):
+            return url
+    return None
+
+
+def imap_search_queries(since_str: str) -> list[tuple[str | None, str]]:
+    """合法的 IMAP SEARCH 列表（每次一条 SUBJECT/FROM，避免非法 OR）。"""
+    queries: list[tuple[str | None, str]] = []
+    for term in _SUBJECT_SEARCH_TERMS:
+        queries.append((None, f'(SINCE {since_str} SUBJECT "{term}")'))
+    for term in _FROM_SEARCH_TERMS:
+        queries.append((None, f'(SINCE {since_str} FROM "{term}")'))
+    return queries
+
+
+def _imap_response_text(data: object) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, (bytes, bytearray)):
+        return data.decode("utf-8", errors="replace")
+    if isinstance(data, (list, tuple)):
+        parts = [_imap_response_text(x) for x in data if x is not None]
+        return " ".join(p for p in parts if p)
+    return str(data)
+
+
+def _send_imap_id(mail: imaplib.IMAP4) -> None:
+    """网易 163/QQ 要求登录后发送 IMAP ID，否则 SELECT 可能停在 AUTH。"""
+    try:
+        imaplib.Commands["ID"] = ("AUTH", "SELECTED", "NONAUTH")
+        mail._simple_command(
+            "ID",
+            '("name" "finance-ai" "version" "1.0" "vendor" "finance-ai")',
+        )
+        try:
+            mail._untagged_response("ID")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug("IMAP ID 发送失败（可忽略）: %s", e)
+
+
+def _folder_names_from_list(folders: object) -> list[str]:
+    names: list[str] = []
+    if not folders:
+        return names
+    rows = folders if isinstance(folders, (list, tuple)) else [folders]
+    for raw in rows:
+        if not raw:
+            continue
+        line = (
+            raw.decode("utf-8", errors="replace")
+            if isinstance(raw, (bytes, bytearray))
+            else str(raw)
+        )
+        quoted = re.findall(r'"([^"]+)"', line)
+        if quoted:
+            names.append(quoted[-1])
+        else:
+            token = line.split()[-1].strip() if line.split() else ""
+            if token:
+                names.append(token.strip('"'))
+    return names
+
+
+def _try_select(mail: imaplib.IMAP4, mailbox: str) -> tuple[bool, str]:
+    try:
+        typ, data = mail.select(mailbox)
+    except Exception as e:
+        return False, str(e)
+    if str(typ or "").upper() == "OK":
+        return True, ""
+    return False, _imap_response_text(data) or str(typ)
+
+
+def select_imap_inbox(mail: imaplib.IMAP4) -> None:
+    """选中收件箱；失败则抛出，避免在 AUTH 状态下 SEARCH。"""
+    last_err = ""
+    for name in ("INBOX", '"INBOX"', "收件箱"):
+        ok, err = _try_select(mail, name)
+        if ok:
+            return
+        last_err = err or last_err
+    try:
+        typ, folders = mail.list()
+    except Exception:
+        typ, folders = "NO", None
+    if str(typ or "").upper() == "OK":
+        wanted = {"inbox", "收件箱"}
+        for folder in _folder_names_from_list(folders):
+            if folder.lower() in wanted or folder in ("INBOX", "收件箱"):
+                ok, err = _try_select(mail, folder)
+                if ok:
+                    return
+                last_err = err or last_err
+    raise RuntimeError(f"无法打开收件箱: {last_err or 'SELECT failed'}")
+
+
+def login_and_select_inbox(
+    mail: imaplib.IMAP4, username: str, password: str
+) -> None:
+    mail.login(username, password)
+    _send_imap_id(mail)
+    select_imap_inbox(mail)
+
+
+def open_imap_inbox(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    *,
+    connect: Callable[[], imaplib.IMAP4] | None = None,
+) -> imaplib.IMAP4:
+    """SSL 登录并选中收件箱。connect 可注入假连接（单测用）。"""
+    opener = connect or (lambda: imaplib.IMAP4_SSL(host, int(port)))
+    mail = opener()
+    try:
+        login_and_select_inbox(mail, username, password)
+    except Exception:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+        raise
+    return mail
 
 
 class EmailClient:
@@ -79,11 +284,8 @@ class EmailClient:
                 raw_subject="[Mock] ICRIS Account Registration",
             )
 
-        mail = imaplib.IMAP4_SSL(self.host, self.port)
+        mail = open_imap_inbox(self.host, self.port, self.address, self.password)
         try:
-            mail.login(self.address, self.password)
-            mail.select("INBOX")
-
             _, message_numbers = mail.search(None, '(SUBJECT "ICRIS" OR SUBJECT "Companies Registry")')
             ids = message_numbers[0].split()
             if not ids:
@@ -115,6 +317,31 @@ class EmailClient:
         finally:
             mail.logout()
 
+    def _search_message_ids(self, mail: imaplib.IMAP4_SSL, since_str: str) -> list[bytes]:
+        seen: set[bytes] = set()
+        ids: list[bytes] = []
+        for charset, criteria in imap_search_queries(since_str):
+            try:
+                typ, data = mail.search(charset, criteria)
+            except Exception as e:
+                logger.debug("IMAP search 失败 %s: %s", criteria, e)
+                continue
+            if typ != "OK" or not data or not data[0]:
+                continue
+            for mid in data[0].split():
+                if mid not in seen:
+                    seen.add(mid)
+                    ids.append(mid)
+        if ids:
+            return ids
+        try:
+            typ, data = mail.search(None, f"(SINCE {since_str})")
+            if typ == "OK" and data and data[0]:
+                return data[0].split()[-50:]
+        except Exception as e:
+            logger.debug("IMAP SINCE 回退搜索失败: %s", e)
+        return []
+
     def fetch_activation_link(
         self, account: dict, since_date: datetime | None = None
     ) -> str | None:
@@ -135,57 +362,31 @@ class EmailClient:
         since = since_date or (datetime.now() - timedelta(days=7))
         since_str = since.strftime("%d-%b-%Y")
 
-        mail = imaplib.IMAP4_SSL(host, port)
+        mail = None
         try:
-            mail.login(username, password)
-            mail.select("INBOX")
-            # 搜索 ICRIS 相关邮件
-            search_criteria = (
-                f'(SINCE {since_str} '
-                f'SUBJECT "ICRIS" OR SUBJECT "activate" '
-                f'OR SUBJECT "confirm" OR SUBJECT "verification")'
-            )
-            _, message_numbers = mail.search(None, search_criteria)
-            ids = message_numbers[0].split()
+            mail = open_imap_inbox(host, port, username, password)
+            ids = self._search_message_ids(mail, since_str)
             if not ids:
                 logger.info("未找到 ICRIS 激活邮件: %s", username)
                 return None
 
-            # 从最新邮件开始查找激活链接
             for mid in reversed(ids):
                 _, msg_data = mail.fetch(mid, "(RFC822)")
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        ct = part.get_content_type()
-                        if ct in ("text/plain", "text/html"):
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body += payload.decode("utf-8", errors="replace")
-                else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode("utf-8", errors="replace")
-
-                # 提取激活链接：URL 含 activate/confirm/verify 关键词
-                url_pattern = r'https?://[^\s<>"\']+'
-                for match in re.finditer(url_pattern, body):
-                    url = match.group(0).rstrip(".,;)")
-                    url_lower = url.lower()
-                    if any(k in url_lower for k in (
-                        "activate", "confirm", "verify", "activation",
-                    )):
-                        logger.info("找到激活链接: %s", url[:80])
-                        return url
+                body = collect_message_body(msg)
+                link = extract_activation_link_from_body(body)
+                if link:
+                    logger.info("找到激活链接: %s", link[:80])
+                    return link
             logger.info("邮件中未找到激活链接: %s", username)
             return None
         except Exception as e:
             logger.error("读取激活邮件失败 %s: %s", username, e)
             return None
         finally:
-            try:
-                mail.logout()
-            except Exception:
-                pass
+            if mail is not None:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass

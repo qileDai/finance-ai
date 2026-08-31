@@ -153,11 +153,18 @@ class RegistrationWorkflow:
         # 注入审核通知回调：发到内部企微群
         if job_id:
             def _notify_review(jid: int, msg: str) -> None:
+                webhook_url = (settings.icris_review_webhook_url or "").strip()
+                if webhook_url:
+                    try:
+                        self.wework.send_webhook_text(webhook_url, msg)
+                        return
+                    except Exception as e:
+                        logger.warning("Webhook 发送失败，回退应用消息: %s", e)
                 chat_id = (settings.icris_review_notify_chat_id or "").strip()
                 if chat_id:
                     self.wework.send_group_text(chat_id, msg)
                 else:
-                    logger.info("审核通知未配置群 chat_id，跳过: %s", msg)
+                    logger.info("审核通知未配置 chat_id/webhook，跳过: %s", msg)
             bot.on_review_needed = _notify_review
         asyncio.run(
             bot.run(

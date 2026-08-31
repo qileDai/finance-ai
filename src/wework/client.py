@@ -202,6 +202,21 @@ class WeWorkClient:
         resp.raise_for_status()
         return resp.json()
 
+    def send_webhook_text(self, webhook_url: str, content: str) -> dict[str, Any]:
+        """通过群机器人 Webhook 发文本（无需 access_token）"""
+        resp = httpx.post(
+            (webhook_url or "").strip(),
+            json={"msgtype": "text", "text": {"content": content}},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errcode", 0) != 0:
+            logger.error("Webhook 发消息失败: %s", data)
+        else:
+            logger.info("已通过 Webhook 发送消息")
+        return data
+
     def send_material_checklist(self, chat_id: str) -> str:
         """发送材料清单到客户群"""
         checklist_path = PROJECT_ROOT / "templates" / "material_checklist.md"

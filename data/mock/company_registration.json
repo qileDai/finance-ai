@@ -12,7 +12,7 @@
     "region": "Hong Kong"
   },
   "contact": {
-    "email": "contact@humsienk.com",
+    "email": "13828784214@163.com",
     "phone": "91234567"
   },
   "share_capital": {
@@ -26,7 +26,7 @@
       "name_en": "YAO Xiaojia",
       "name_cn": "姚曉佳",
       "id_type": "PRC_ID",
-      "id_number": "440514200003184927",
+      "id_number": "44051420000318492X",
       "address_cn": "广东省深圳市南山区西丽南路8号110室",
       "address_en": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
       "address": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
@@ -38,7 +38,7 @@
       "name_en": "YAO Xiaojia",
       "name_cn": "姚曉佳",
       "id_type": "PRC_ID",
-      "id_number": "440514200003184927",
+      "id_number": "44051420000318492X",
       "address_cn": "广东省深圳市南山区西丽南路8号110室",
       "address_en": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
       "address": "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province",
@@ -47,9 +47,13 @@
     }
   ],
   "company_secretary": {
+    "type": "body_corporate",
+    "hk_registered": true,
+    "br_number": "78090873",
+    "license_number": "TC010510",
+    "company_number": "0852-52667282",
     "name_en": "",
-    "name_cn": "",
-    "type": "natural_person"
+    "name_cn": ""
   },
   "business_nature_code": "",
   "business_nature_desc": "新能源產品、電子元器件銷售，電子商務，國際貿易",
@@ -59,7 +63,7 @@
     "name_en": "YAO Xiaojia",
     "name_cn": "姚曉佳",
     "id_type": "PRC_ID",
-    "id_number": "440514200003184927",
+    "id_number": "44051420000318492X",
     "email": "yaoxiaojia@example.com",
     "phone": "91234567",
     "address_cn": "广东省深圳市南山区西丽南路8号110室",
@@ -69,7 +73,7 @@
   "identity_proof": {
     "id_type": "PRC_ID",
     "id_type_label": "中華人民共和國身分證號碼",
-    "id_number": "440514200003184927",
+    "id_number": "44051420000318492X",
     "submission_method": "online",
     "submission_label": "網上提交",
     "online_document_method": "certified_copy",
@@ -82,8 +86,9 @@
   "password_hint": "",
   "security_question": "",
   "security_answer": "",
-  "icris_account": {
+  "nnc1_mock_account": {
     "username": "KYAUk13579",
-    "password": "KYAUk13579@"
+    "password": "KYAUk13579@",
+    "note": "仅用于 python main.py --step nnc1 已激活账号登录填表，登记注册请用 yingtai 生成规则"
   }
 }

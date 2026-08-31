@@ -277,7 +277,7 @@ export const api = {
   emailAccounts: {
     list: () =>
       request<ApiOk<{ items: EmailAccount[] }>>(`/admin/api/email-accounts`),
-    upsert: (data: Omit<EmailAccount, "id" | "created_at" | "updated_at">) =>
+    upsert: (data: Partial<EmailAccount> & Pick<EmailAccount, "email_address" | "imap_host" | "username">) =>
       request<ApiOk<{ account: EmailAccount; message: string }>>(
         `/admin/api/email-accounts`,
         { method: "POST", body: JSON.stringify(data) },
