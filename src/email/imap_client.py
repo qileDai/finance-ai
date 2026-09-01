@@ -125,20 +125,53 @@ def _imap_response_text(data: object) -> str:
     return str(data)
 
 
-def _send_imap_id(mail: imaplib.IMAP4) -> None:
-    """网易 163/QQ 要求登录后发送 IMAP ID，否则 SELECT 可能停在 AUTH。"""
+def _send_imap_id(mail: imaplib.IMAP4, contact: str = "") -> None:
+    """网易 163/QQ：登录前（NONAUTH）必须发 IMAP ID，否则 SELECT 常停在 AUTH。"""
+    email_addr = (contact or "").replace("\\", "").replace('"', "")
+    payload = (
+        '("name" "finance-ai" "contact" "%s" "version" "1.0" "vendor" "finance-ai")'
+        % (email_addr or "finance-ai@local")
+    )
     try:
         imaplib.Commands["ID"] = ("AUTH", "SELECTED", "NONAUTH")
-        mail._simple_command(
-            "ID",
-            '("name" "finance-ai" "version" "1.0" "vendor" "finance-ai")',
-        )
+        typ, dat = mail._simple_command("ID", payload)
         try:
-            mail._untagged_response("ID")
+            mail._untagged_response(typ, dat, "ID")
+        except TypeError:
+            # 旧签名 _untagged_response(name)
+            mail._untagged_response("ID")  # type: ignore[misc]
         except Exception:
             pass
     except Exception as e:
         logger.debug("IMAP ID 发送失败（可忽略）: %s", e)
+
+
+def format_imap_connect_error(exc: BaseException) -> str:
+    """把 IMAP 测试/登录失败译成可读原因。"""
+    raw = str(exc) or exc.__class__.__name__
+    lower = raw.lower()
+    if "search illegal in state auth" in lower:
+        return (
+            "收件箱未打开（仍停在 AUTH）。163 需在登录前发送 IMAP ID；"
+            "请确认已开启 IMAP 且使用授权码。"
+            f" 原始错误: {raw}"
+        )
+    if "unsafe login" in lower:
+        return (
+            "163 拒绝打开收件箱（Unsafe Login）。请在网页邮箱开启 IMAP，"
+            "使用授权码而非登录密码。"
+            f" 原始错误: {raw}"
+        )
+    if any(
+        k in lower
+        for k in ("authenticationfailed", "invalid credentials", "login fail", "auth fail")
+    ):
+        return f"登录失败，请检查账号和授权码。原始错误: {raw}"
+    if "timed out" in lower or "timeout" in lower:
+        return f"连接超时，无法连上 IMAP 服务器。原始错误: {raw}"
+    if raw.startswith("无法打开收件箱"):
+        return raw
+    return f"连接失败: {raw}"
 
 
 def _folder_names_from_list(folders: object) -> list[str]:
@@ -169,9 +202,13 @@ def _try_select(mail: imaplib.IMAP4, mailbox: str) -> tuple[bool, str]:
         typ, data = mail.select(mailbox)
     except Exception as e:
         return False, str(e)
-    if str(typ or "").upper() == "OK":
+    state = str(getattr(mail, "state", "") or "")
+    if str(typ or "").upper() == "OK" and state == "SELECTED":
         return True, ""
-    return False, _imap_response_text(data) or str(typ)
+    err = _imap_response_text(data) or str(typ)
+    if state and state != "SELECTED":
+        err = f"{err} (state={state})".strip()
+    return False, err
 
 
 def select_imap_inbox(mail: imaplib.IMAP4) -> None:
@@ -200,9 +237,14 @@ def select_imap_inbox(mail: imaplib.IMAP4) -> None:
 def login_and_select_inbox(
     mail: imaplib.IMAP4, username: str, password: str
 ) -> None:
+    _send_imap_id(mail, username)
     mail.login(username, password)
-    _send_imap_id(mail)
+    _send_imap_id(mail, username)
     select_imap_inbox(mail)
+    if str(getattr(mail, "state", "") or "") != "SELECTED":
+        raise RuntimeError(
+            f"无法打开收件箱: IMAP 仍停在 {getattr(mail, 'state', '') or 'AUTH'}"
+        )
 
 
 def open_imap_inbox(
@@ -214,7 +256,9 @@ def open_imap_inbox(
     connect: Callable[[], imaplib.IMAP4] | None = None,
 ) -> imaplib.IMAP4:
     """SSL 登录并选中收件箱。connect 可注入假连接（单测用）。"""
-    opener = connect or (lambda: imaplib.IMAP4_SSL(host, int(port)))
+    opener = connect or (
+        lambda: imaplib.IMAP4_SSL(host, int(port), timeout=15)
+    )
     mail = opener()
     try:
         login_and_select_inbox(mail, username, password)

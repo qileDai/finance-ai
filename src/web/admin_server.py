@@ -405,7 +405,13 @@ class AdminWebServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-        server = ThreadingHTTPServer((host, port), Handler)
+        class AdminHTTPServer(ThreadingHTTPServer):
+            """Windows 下默认 SO_REUSEADDR 会与旧进程静默共享端口，导致请求打到旧代码；
+            关闭后端口被占时第二个实例启动即报错。"""
+
+            allow_reuse_address = False
+
+        server = AdminHTTPServer((host, port), Handler)
         logger.info(
             "[Admin] 已启动 http://%s:%s/admin （登录页；需 ADMIN_PASSWORD；静态目录 %s）",
             host,

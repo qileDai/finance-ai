@@ -924,8 +924,11 @@ def _handle_email_account_test(
     account = next((a for a in accounts if a["id"] == account_id), None)
     if not account:
         return _err("account not found", 404)
+    password = str(account.get("password") or "").strip()
+    if not password:
+        return _err("未保存授权码，请编辑后重新填写", 400)
     try:
-        from src.email.imap_client import open_imap_inbox
+        from src.email.imap_client import format_imap_connect_error, open_imap_inbox
 
         mail = None
         try:
@@ -933,17 +936,23 @@ def _handle_email_account_test(
                 str(account["imap_host"]),
                 int(account["imap_port"]),
                 str(account["username"]),
-                str(account["password"]),
+                password,
             )
+            if str(getattr(mail, "state", "") or "") != "SELECTED":
+                raise RuntimeError(
+                    f"无法打开收件箱: IMAP 仍停在 {getattr(mail, 'state', '') or 'AUTH'}"
+                )
         finally:
             if mail is not None:
                 try:
                     mail.logout()
                 except Exception:
                     pass
-        return _ok(message="连接成功")
+        return _ok(message="IMAP 登录成功，已打开收件箱")
     except Exception as e:
-        return _err(f"连接失败: {e}", 400)
+        from src.email.imap_client import format_imap_connect_error
+
+        return _err(format_imap_connect_error(e), 400)
 
 
 def _handle_default_office_get(

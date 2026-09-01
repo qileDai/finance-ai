@@ -132,8 +132,8 @@ export function EmailConfigPage({ onToast }: Props) {
   async function test(id: number) {
     setTestingId(id);
     try {
-      await api.emailAccounts.test(id);
-      onToast("连接成功");
+      const res = await api.emailAccounts.test(id);
+      onToast(res.message || "IMAP 登录成功，已打开收件箱");
     } catch (e: unknown) {
       onToast((e as Error).message);
     } finally {
