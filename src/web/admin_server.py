@@ -193,9 +193,21 @@ class AdminWebServer:
                     )
 
                 data = p.read_bytes()
+                safe_type = re.sub(r"[^a-z0-9_-]", "", shot_type) or "fail"
+                filename = f"job-{job_id}-{safe_type}.png"
+                as_download = (q.get("download", ["0"]) or ["0"])[0].lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
+                disposition = "attachment" if as_download else "inline"
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(data)))
+                self.send_header(
+                    "Content-Disposition",
+                    f'{disposition}; filename="{filename}"',
+                )
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(data)

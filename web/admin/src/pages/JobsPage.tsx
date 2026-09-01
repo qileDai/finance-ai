@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { JOB_SHOT_PREVIEW, StateBox, jobCanCancel, jobCanRequeue, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { StateBox, jobCanCancel, jobCanRequeue, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import {
+  Alert,
   Button,
   Card,
   DatePicker,
-  Image,
   Input,
   Modal,
   Select,
@@ -16,8 +17,16 @@ import {
   Tag,
   Tooltip,
 } from "antd";
-import { SearchOutlined, ReloadOutlined } from "@ant-design/icons";
+import { SearchOutlined, ReloadOutlined, FolderOpenOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
+import {
+  clearStoredDirectory,
+  directoryName,
+  isDirectoryPickerSupported,
+  loadStoredDirectory,
+  pickDirectory,
+  type ShotDirHandle,
+} from "../lib/saveFolder";
 
 type Props = {
   refreshKey: number;
@@ -53,6 +62,11 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
   const [directorInput, setDirectorInput] = useState("");
   const [idInput, setIdInput] = useState("");
   const nav = useNavigate();
+  const folderOk = isDirectoryPickerSupported();
+  const [saveDir, setSaveDir] = useState<ShotDirHandle | null>(null);
+  const [zoneHover, setZoneHover] = useState(false);
+  const zoneRef = useRef<HTMLDivElement | null>(null);
+  const [zoneEl, setZoneEl] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -75,6 +89,43 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       alive = false;
     };
   }, [status, refreshKey, companyName, directorName, idNumber, dateRange]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!folderOk) return;
+    loadStoredDirectory().then((handle) => {
+      if (alive && handle) setSaveDir(handle);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [folderOk]);
+
+  const pickSaveFolder = useCallback(async (): Promise<ShotDirHandle | null> => {
+    try {
+      const handle = await pickDirectory();
+      if (handle) setSaveDir(handle);
+      return handle;
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : "选择文件夹失败");
+      return null;
+    }
+  }, [onToast]);
+
+  const clearSaveFolder = useCallback(() => {
+    setSaveDir(null);
+    void clearStoredDirectory();
+    onToast("已清除保存文件夹");
+  }, [onToast]);
+
+  const onHoverZone = useCallback((hover: boolean) => {
+    setZoneHover(hover);
+  }, []);
+
+  const setZone = useCallback((el: HTMLDivElement | null) => {
+    zoneRef.current = el;
+    setZoneEl(el);
+  }, []);
 
   const sorted = useMemo(() => {
     const copy = [...items];
@@ -233,16 +284,18 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     {
       title: "核对截图",
       key: "esubmit_screenshot",
-      width: 110,
+      width: 160,
       render: (_: unknown, r: JobRow) =>
         r.esubmit_screenshot_path ? (
-          <Image
+          <DraggableShot
             src={api.jobScreenshotUrl(r.id, "esubmit")}
-            width={80}
-            height={50}
-            style={{ objectFit: "cover", cursor: "pointer" }}
-            onClick={(e) => e.stopPropagation()}
-            preview={JOB_SHOT_PREVIEW}
+            filename={jobShotFilename(r.id, "esubmit")}
+            dir={saveDir}
+            zoneEl={zoneEl}
+            ensureFolder={pickSaveFolder}
+            onSaved={(name) => onToast(`已保存 ${name}`)}
+            onError={onToast}
+            onHoverZone={onHoverZone}
           />
         ) : (
           "-"
@@ -251,16 +304,18 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     {
       title: "成功截图",
       key: "success_screenshot",
-      width: 110,
+      width: 160,
       render: (_: unknown, r: JobRow) =>
         r.success_screenshot_path ? (
-          <Image
+          <DraggableShot
             src={api.jobScreenshotUrl(r.id, "success")}
-            width={80}
-            height={50}
-            style={{ objectFit: "cover", cursor: "pointer" }}
-            onClick={(e) => e.stopPropagation()}
-            preview={JOB_SHOT_PREVIEW}
+            filename={jobShotFilename(r.id, "success")}
+            dir={saveDir}
+            zoneEl={zoneEl}
+            ensureFolder={pickSaveFolder}
+            onSaved={(name) => onToast(`已保存 ${name}`)}
+            onError={onToast}
+            onHoverZone={onHoverZone}
           />
         ) : (
           "-"
@@ -441,9 +496,38 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
           <Button icon={<ReloadOutlined />} onClick={onReset}>
             重置
           </Button>
+          {folderOk ? (
+            <>
+              <Button icon={<FolderOpenOutlined />} onClick={() => void pickSaveFolder()}>
+                {saveDir ? "更换文件夹" : "选择保存文件夹"}
+              </Button>
+              {saveDir ? (
+                <Button type="link" onClick={clearSaveFolder}>
+                  清除
+                </Button>
+              ) : null}
+            </>
+          ) : null}
         </Space>
       </Card>
 
+      {!folderOk ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="当前浏览器不支持保存到本地文件夹，请使用 Chrome 或 Edge"
+        />
+      ) : (
+        <div
+          ref={setZone}
+          className={`shot-save-zone${zoneHover ? " is-hover" : ""}`}
+        >
+          {saveDir
+            ? `把核对/成功截图拖到这里，保存到「${directoryName(saveDir)}」；也可点缩略图旁的保存`
+            : "请先点「选择保存文件夹」，再把截图拖到这里或点保存"}
+        </div>
+      )}
       <StateBox loading={loading} error={error} empty={!sorted.length}>
         <Table
           dataSource={sorted}

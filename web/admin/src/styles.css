@@ -1054,6 +1054,51 @@ table.data tr.clickable:hover td {
   }
 }
 
+.draggable-shot {
+  display: inline-block;
+  cursor: grab;
+  touch-action: none;
+}
+
+.draggable-shot:active {
+  cursor: grabbing;
+}
+
+.draggable-shot .ant-image-img {
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+.shot-save-zone {
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+  padding: 18px 16px;
+  text-align: center;
+  margin-bottom: 12px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.shot-save-zone.is-hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.shot-save-ghost {
+  position: fixed;
+  z-index: 1100;
+  width: 80px;
+  height: 50px;
+  object-fit: cover;
+  pointer-events: none;
+  opacity: 0.9;
+  border-radius: 4px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+  transform: translate(-40px, -25px);
+}
+
 .job-shot-preview .ant-image-preview-img-wrapper {
   pointer-events: none;
 }
