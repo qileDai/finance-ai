@@ -470,6 +470,27 @@ class LLMClient:
             return coerce_address_result({}, en)
         return coerce_address_result(data, en)
 
+    def pick_hk_district(self, address_en: str, options: list[str]) -> dict:
+        """s03 本地地址：从下拉选项里选郵遞區號／区。"""
+        from src.materials.address_classify import (
+            CLASSIFY_HK_DISTRICT_SYSTEM,
+            classify_hk_district_user_prompt,
+        )
+
+        opts = [str(o).strip() for o in options if str(o or "").strip()]
+        if not opts:
+            return {}
+        try:
+            data = self.chat_json(
+                CLASSIFY_HK_DISTRICT_SYSTEM,
+                classify_hk_district_user_prompt(address_en, opts),
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("香港区名 LLM 判定失败: %s", e)
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def classify_director_name(self, raw_name: str) -> dict:
         """姓名原文 → 中文姓名 / 英文姓氏 / 英文名字。"""
         from src.materials.name_classify import (

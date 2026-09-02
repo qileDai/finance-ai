@@ -249,7 +249,7 @@ def nnc1_identity_fill_plan(
     return {
         "hkid": "無",
         "passport": num or "無",
-        "passport_country": names[0] if names else "中国",
+        "passport_country": names[0] if names else "中國",
     }
 
 

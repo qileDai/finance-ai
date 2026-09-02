@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "antd";
 import { api } from "../api";
 import { ImageModal } from "../components/ImageModal";
 
@@ -292,15 +293,16 @@ export function IdExtractPage({ onToast }: Props) {
                   <div className="id-pdf-chip" title={file.name}>
                     📄 {file.name}
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    type="text"
+                    size="small"
                     className="id-preview-del"
                     title="移除文件"
                     disabled={loading}
                     onClick={() => onPickFile(undefined)}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </div>
               ) : previewUrl ? (
                 <div className="id-preview-wrap">
@@ -311,44 +313,41 @@ export function IdExtractPage({ onToast }: Props) {
                     title="点击放大"
                     onClick={() => setModalOpen(true)}
                   />
-                  <button
-                    type="button"
+                  <Button
+                    type="text"
+                    size="small"
                     className="id-preview-del"
                     title="删除图片"
                     disabled={loading}
                     onClick={() => onPickFile(undefined)}
                   >
                     ✕
-                  </button>
+                  </Button>
                 </div>
               ) : null}
             </div>
 
             <div className="reg-actions" style={{ marginTop: 0 }}>
-              <button
-                type="button"
-                className="btn btn-primary"
+              <Button
+                type="primary"
                 disabled={loading || !file}
+                loading={loading}
                 onClick={onRecognize}
               >
                 {loading ? "识别中…" : "开始识别"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
+              </Button>
+              <Button
                 disabled={loading || snipWaiting}
                 onClick={onScreenshot}
               >
                 截图
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
+              </Button>
+              <Button
                 disabled={loading || !copyBlock}
                 onClick={onCopyAll}
               >
                 复制全部
-              </button>
+              </Button>
             </div>
           </div>
         </section>
@@ -380,14 +379,15 @@ export function IdExtractPage({ onToast }: Props) {
                     <label key={row.key} className="reg-field">
                       <span className="id-result-label">
                         {row.label}
-                        <button
-                          type="button"
-                          className="btn btn-ghost id-copy-btn"
+                        <Button
+                          size="small"
+                          type="link"
+                          className="id-copy-btn"
                           onClick={() => onCopyOne(row.label, val)}
                           disabled={!val}
                         >
                           复制
-                        </button>
+                        </Button>
                       </span>
                       <input
                         type="text"

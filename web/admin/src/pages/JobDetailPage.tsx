@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Image, Tag } from "antd";
+import { Image, Tag, Button } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -140,28 +140,28 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
   return (
     <>
       <div className="toolbar" style={{ gap: 12 }}>
-        <Link to="/jobs" className="btn btn-sm btn-ghost">
-          ← 返回列表
+        <Link to="/jobs">
+          <Button size="small">← 返回列表</Button>
         </Link>
         {jobCanCancel(job?.status) ? (
-          <button
-            type="button"
-            className="btn btn-sm btn-danger"
+          <Button
+            size="small"
+            danger
             disabled={busy}
             onClick={() => act("cancel")}
           >
             取消
-          </button>
+          </Button>
         ) : null}
         {jobCanRequeue(job?.status) ? (
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
+          <Button
+            size="small"
+            type="primary"
             disabled={busy}
             onClick={() => act("requeue")}
           >
             重跑
-          </button>
+          </Button>
         ) : null}
       </div>
 
@@ -321,14 +321,15 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
               </dl>
               {job.form_status === "failed" ? (
                 <div className="toolbar" style={{ gap: 12, marginTop: 8 }}>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
+                  <Button
+                    size="small"
+                    type="primary"
                     disabled={formRetrying}
+                    loading={formRetrying}
                     onClick={formRetry}
                   >
                     重跑填表
-                  </button>
+                  </Button>
                 </div>
               ) : null}
             </section>

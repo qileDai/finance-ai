@@ -304,6 +304,10 @@ export const api = {
   },
   quality: (hours = 24) =>
     request<QualityResponse>(`/admin/api/quality?hours=${hours}`),
+  s03Countries: () =>
+    request<ApiOk<{ items: { label: string; value: string }[]; count?: number }>>(
+      "/admin/api/s03-countries"
+    ),
   registerRunner: {
     defaults: () =>
       request<ApiOk<{ contact_email?: string; contact_phone?: string }>>(
@@ -312,7 +316,7 @@ export const api = {
     submit: (
       fields: Record<string, string>,
       files: Record<string, RunnerFile>,
-      dry_run = true
+      dry_run = false
     ) =>
       request<
         ApiOk<{

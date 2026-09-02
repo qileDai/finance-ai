@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Button } from "antd";
 
 type Props = {
   src: string;
@@ -218,17 +219,17 @@ export function ScreenshotCrop({ src, onConfirm, onCancel }: Props) {
           style={toolbarStyle}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
+          <Button onClick={onCancel} disabled={busy}>
             取消
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
+          </Button>
+          <Button
+            type="primary"
             onClick={() => confirmCrop()}
             disabled={busy}
+            loading={busy}
           >
             {busy ? "处理中…" : "完成"}
-          </button>
+          </Button>
         </div>
       ) : null}
     </div>

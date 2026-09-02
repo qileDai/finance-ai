@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
-import { Menu } from "antd";
+import { Menu, Button } from "antd";
 import {
   AppstoreOutlined,
   BarChartOutlined,
@@ -128,12 +128,10 @@ export function Layout({ onRefresh, toast }: Props) {
             <a href="/health" target="_blank" rel="noreferrer">
               /health
             </a>
-            <button type="button" className="btn" onClick={onRefresh}>
-              刷新
-            </button>
-            <button type="button" className="btn btn-primary" onClick={onLogout}>
+            <Button onClick={onRefresh}>刷新</Button>
+            <Button type="primary" onClick={onLogout}>
               退出
-            </button>
+            </Button>
           </div>
         </header>
         <main className="content" key={tick}>

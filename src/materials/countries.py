@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 # (iso3, en, zh-Hans) — 不含台湾作为独立签发国
 PASSPORT_COUNTRIES: tuple[tuple[str, str, str], ...] = (
     ("CHN", "China", "中国"),
@@ -323,15 +327,134 @@ def country_names(iso3: str) -> tuple[str, str]:
     return row[2], row[1]
 
 
+def _to_zh_hk(text: str) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    try:
+        import zhconv
+
+        return zhconv.convert(s, "zh-hk")
+    except Exception:
+        return s
+
+
 def passport_country_option_names(iso3: str) -> list[str]:
-    """NNC1 护照签发国下拉候选（简繁/英文）。台湾与空/CHN 均选中国。"""
+    """护照/住址国家下拉候选：香港繁体优先，再简体/英文。台湾与空/CHN 均选中国。"""
     code = normalize_issuing_iso(iso3) if iso3 else ""
+    names: list[str] = []
     if not code or code == "CHN":
-        return ["中国", "中國", "China", "中華人民共和國", "中华人民共和国"]
-    cn, en = country_names(code)
-    names = [n for n in (cn, en) if n]
-    if code == "HKG":
-        names.extend(["香港", "Hong Kong", "中國香港"])
-    if code == "UZB":
-        names.extend(["烏茲別克斯坦", "乌兹别克", "Uzbekistan"])
+        names = ["中國", "中国", "China", "中華人民共和國", "中华人民共和国"]
+    else:
+        cn, en = country_names(code)
+        trad = _to_zh_hk(cn)
+        for n in (trad, cn, en):
+            if n and n not in names:
+                names.append(n)
+        if code == "HKG":
+            for n in ("香港", "Hong Kong", "中國香港"):
+                if n not in names:
+                    names.append(n)
+        if code == "UZB":
+            names = ["烏茲別克斯坦"] + [n for n in names if n != "烏茲別克斯坦"]
+            for n in ("乌兹别克斯坦", "乌兹别克", "Uzbekistan"):
+                if n not in names:
+                    names.append(n)
     return names
+
+
+S03_COUNTRIES_PATH = Path(__file__).resolve().parents[2] / "data" / "icris_s03_countries.json"
+_S03_OPTIONS: list[dict[str, str]] | None = None
+
+
+def _read_s03_country_file(path: Path) -> list[dict[str, str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    rows = raw.get("options") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    skip = re.compile(r"請選擇|请选择|^Select$|^--+", re.I)
+    for item in rows:
+        if isinstance(item, str):
+            label, value = item.strip(), item.strip()
+        elif isinstance(item, dict):
+            label = str(item.get("label") or "").strip()
+            value = str(item.get("value") or label).strip() or label
+        else:
+            continue
+        if not label or skip.search(label) or label in seen:
+            continue
+        seen.add(label)
+        out.append({"label": label, "value": value})
+    return out
+
+
+def load_s03_country_options(
+    *, path: Path | None = None, reload: bool = False
+) -> list[dict[str, str]]:
+    """ICRIS s03 非香港「國家／地區」下拉原文。"""
+    global _S03_OPTIONS
+    if path is not None:
+        return _read_s03_country_file(path)
+    if _S03_OPTIONS is not None and not reload:
+        return _S03_OPTIONS
+    _S03_OPTIONS = _read_s03_country_file(S03_COUNTRIES_PATH)
+    return _S03_OPTIONS
+
+
+def s03_country_labels(*, path: Path | None = None) -> list[str]:
+    return [row["label"] for row in load_s03_country_options(path=path) if row.get("label")]
+
+
+def resolve_s03_address_country(
+    raw: str,
+    *,
+    options: list[dict[str, str]] | None = None,
+) -> str:
+    """住址国家 → ICRIS 下拉原文。已是原文则原样；ISO3/英文/简体映射到采标 label。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    rows = options if options is not None else load_s03_country_options()
+    labels = [str(r.get("label") or "").strip() for r in rows if str(r.get("label") or "").strip()]
+    label_set = set(labels)
+    by_value = {
+        str(r.get("value") or "").strip().upper(): str(r.get("label") or "").strip()
+        for r in rows
+        if str(r.get("label") or "").strip() and str(r.get("value") or "").strip()
+    }
+    if s in label_set:
+        return s
+    trad = _to_zh_hk(s)
+    if trad in label_set:
+        return trad
+    iso = normalize_address_country(s) or (s.upper() if len(s) == 3 and s.isalpha() else "")
+    if iso and iso.upper() in by_value:
+        return by_value[iso.upper()]
+    key = s.upper().replace(" ", "")
+    if key in by_value:
+        return by_value[key]
+    names = list(passport_country_option_names(iso or s))
+    if s not in names:
+        names.insert(0, s)
+    if trad and trad not in names:
+        names.insert(0, trad)
+    for cand in names:
+        if cand in label_set:
+            return cand
+        t = _to_zh_hk(cand)
+        if t in label_set:
+            return t
+    if not labels:
+        return names[0] if names else s
+    s_l = s.lower()
+    for lab in labels:
+        if s_l == lab.lower() or s in lab or lab in s:
+            return lab
+    if iso == "CHN" and "中國" in label_set:
+        return "中國"
+    return names[0] if names else s

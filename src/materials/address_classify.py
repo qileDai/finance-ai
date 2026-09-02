@@ -13,6 +13,41 @@ from src.materials.countries import (
 
 logger = logging.getLogger(__name__)
 
+CLASSIFY_HK_DISTRICT_SYSTEM = (
+    "你只根据董事兼股东的个人住址，从给定的 ICRIS 下拉选项里选一个香港郵遞區號／区。"
+    "不要看注册地址、公司名。"
+    '只输出 JSON：{"district":"选项原文"}。'
+    "规则："
+    "1) district 必须与选项列表中某一项完全一致。"
+    "2) TIN SHUI WAI / NT / N.T. / 天水圍 属新界元朗区，优先选「天水圍」或「元朗」，不要选香港仔。"
+    "3) 不要因为住址没有 Hong Kong 四字就选香港仔。"
+    "4) 选项对不上时选最接近的区；不要输出其它键。"
+)
+
+_HK_DISTRICT_RULES: list[tuple[re.Pattern[str], tuple[str, ...]]] = [
+    (re.compile(r"tin\s*shui\s*wai|天水[圍围]", re.I), ("天水圍", "元朗")),
+    (re.compile(r"yuen\s*long|元朗", re.I), ("元朗",)),
+    (re.compile(r"tuen\s*mun|屯[門门]", re.I), ("屯門",)),
+    (re.compile(r"sha\s*tin|沙田", re.I), ("沙田",)),
+    (re.compile(r"kwun\s*tong|觀塘|观塘", re.I), ("觀塘",)),
+    (re.compile(r"tsuen\s*wan|荃灣|荃湾", re.I), ("荃灣",)),
+    (re.compile(r"kwai\s*chung|葵涌|葵青", re.I), ("葵涌", "葵青")),
+    (re.compile(r"tai\s*po|大埔", re.I), ("大埔",)),
+    (re.compile(r"fanling|粉嶺|粉岭", re.I), ("粉嶺", "北區")),
+    (re.compile(r"sheung\s*shui|上水", re.I), ("上水", "北區")),
+    (re.compile(r"tseung\s*kwan\s*o|將軍澳|将军澳", re.I), ("將軍澳", "西貢")),
+    (re.compile(r"sai\s*kung|西貢|西贡", re.I), ("西貢",)),
+    (re.compile(r"tung\s*chung|東涌|东涌", re.I), ("東涌", "離島")),
+    (re.compile(r"mong\s*kok|旺角", re.I), ("旺角", "油尖旺")),
+    (re.compile(r"tsim\s*sha\s*tsui|尖沙[咀嘴]", re.I), ("尖沙咀", "油尖旺")),
+    (re.compile(r"sham\s*shui\s*po|深水埗", re.I), ("深水埗",)),
+    (re.compile(r"wong\s*tai\s*sin|黃大仙|黄大仙", re.I), ("黃大仙",)),
+    (re.compile(r"causeway\s*bay|銅鑼灣|铜锣湾", re.I), ("銅鑼灣", "灣仔")),
+    (re.compile(r"wan\s*chai|灣仔|湾仔", re.I), ("灣仔",)),
+    (re.compile(r"aberdeen|香港仔", re.I), ("香港仔", "南區")),
+    (re.compile(r"kowloon|九[龍龙]", re.I), ("九龍",)),
+]
+
 CLASSIFY_ADDRESS_SYSTEM = (
     "你只根据董事兼股东的个人住址（标签可能是住址或地址）的英文正文判断，"
     "不要看注册地址、公司名或其它字段。"
@@ -79,6 +114,109 @@ def english_address_looks_non_hk(address_en: str) -> bool:
         if iso and iso not in ("CHN", "HKG", "MAC", "TWN"):
             return True
     return False
+
+
+def _hk_district_blob(address_en: str, region: str = "", address_cn: str = "") -> str:
+    return " ".join(p for p in (address_en, region, address_cn) if (p or "").strip())
+
+
+def aberdeen_district_allowed(
+    address_en: str, region: str = "", address_cn: str = ""
+) -> bool:
+    blob = _hk_district_blob(address_en, region, address_cn)
+    return bool(re.search(r"aberdeen|香港仔|南區|南区", blob, re.I))
+
+
+def hk_district_select_candidates(
+    address_en: str, region: str = "", address_cn: str = ""
+) -> list[str]:
+    """董事住址 → ICRIS 繁体区/郵遞區號候选（不含万能香港仔）。"""
+    blob = _hk_district_blob(address_en, region, address_cn)
+    out: list[str] = []
+    for pat, names in _HK_DISTRICT_RULES:
+        if not pat.search(blob):
+            continue
+        for name in names:
+            if name == "香港仔" and not aberdeen_district_allowed(
+                address_en, region, address_cn
+            ):
+                continue
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def classify_hk_district_user_prompt(
+    address_en: str, options: list[str], address_cn: str = ""
+) -> str:
+    opts = "、".join(options[:80])
+    addr = (address_en or "").strip() or (address_cn or "").strip() or "（无）"
+    return (
+        "请只根据下面董事个人住址，从选项里选一项。\n\n"
+        f"住址：\n{addr}\n\n选项：\n{opts}"
+    )
+
+
+def _match_district_in_options(name: str, options: list[str]) -> str:
+    raw = (name or "").strip()
+    if not raw or not options:
+        return ""
+    if raw in options:
+        return raw
+    for o in options:
+        if raw in o or o in raw:
+            return o
+    return ""
+
+
+def pick_hk_district_from_options(
+    address_en: str,
+    options: list[str],
+    *,
+    region: str = "",
+    address_cn: str = "",
+    llm: Any | None = None,
+) -> str:
+    """关键字命中且在下拉里的优先；否则 LLM 从选项里挑。不默认香港仔。"""
+    opts = [str(o).strip() for o in options if str(o or "").strip()]
+    opts = [o for o in opts if o and not re.search(r"請選擇|请选择|^Select$", o, re.I)]
+    allow_aberdeen = aberdeen_district_allowed(address_en, region, address_cn)
+
+    def _ok(name: str) -> str:
+        hit = _match_district_in_options(name, opts) if opts else (name or "").strip()
+        if hit and "香港仔" in hit and not allow_aberdeen:
+            return ""
+        return hit
+
+    for cand in hk_district_select_candidates(address_en, region, address_cn):
+        hit = _ok(cand)
+        if hit:
+            return hit
+
+    if not opts:
+        return ""
+    try:
+        client = llm
+        data: Any = None
+        if client is not None and hasattr(client, "pick_hk_district"):
+            data = client.pick_hk_district(address_en or address_cn, opts)
+        elif client is not None and hasattr(client, "chat_json"):
+            data = client.chat_json(
+                CLASSIFY_HK_DISTRICT_SYSTEM,
+                classify_hk_district_user_prompt(
+                    address_en, opts, address_cn=address_cn
+                ),
+                temperature=0.0,
+            )
+        else:
+            data = None
+        if isinstance(data, dict):
+            hit = _ok(str(data.get("district") or data.get("region") or ""))
+            if hit:
+                return hit
+    except Exception as exc:
+        logger.warning("香港区名 LLM 选择失败: %s", exc)
+    return ""
 
 
 def classify_address_user_prompt(address_en: str) -> str:

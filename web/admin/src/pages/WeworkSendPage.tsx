@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Button } from "antd";
 import { api, type WeworkSendModes } from "../api";
 
 type Props = {
@@ -113,17 +114,15 @@ export function WeworkSendPage({ onToast }: Props) {
             </label>
           </div>
           <div className="reg-actions">
-            <button
-              type="button"
-              className="btn btn-primary"
+            <Button
+              type="primary"
               onClick={onSend}
               disabled={sending}
+              loading={sending}
             >
               {sending ? "发送中…" : "发送到外部群"}
-            </button>
-            <button
-              type="button"
-              className="btn-ghost"
+            </Button>
+            <Button
               onClick={() => {
                 setContent("");
                 setLastResult(null);
@@ -131,7 +130,7 @@ export function WeworkSendPage({ onToast }: Props) {
               disabled={sending}
             >
               清空
-            </button>
+            </Button>
           </div>
         </section>
 

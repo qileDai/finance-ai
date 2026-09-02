@@ -217,18 +217,26 @@ export function RegisterPage({ onToast }: Props) {
   const [idFile, setIdFile] = useState<File | undefined>();
   const [taiwanIdFile, setTaiwanIdFile] = useState<File | undefined>();
   const [taiwanPassport, setTaiwanPassport] = useState(false);
-  const [dryRun, setDryRun] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [runnerStatus, setRunnerStatus] = useState<RunnerStatus | null>(null);
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [defaultEmail, setDefaultEmail] = useState("");
   const [parsing, setParsing] = useState(false);
+  const [s03Countries, setS03Countries] = useState<string[]>([]);
   const [messageApi, contextHolder] = message.useMessage();
   const logRef = useRef<HTMLDivElement>(null);
 
   // 预填默认邮箱 + 默认办事处地址 + 恢复运行中任务状态
   useEffect(() => {
+    api.s03Countries()
+      .then((d) => {
+        const items = (d.items || [])
+          .map((x) => (x.value || x.label || "").trim())
+          .filter(Boolean);
+        if (items.length) setS03Countries(items);
+      })
+      .catch(() => {});
     api.registerRunner
       .defaults()
       .then((d) => {
@@ -470,7 +478,7 @@ export function RegisterPage({ onToast }: Props) {
         id_type_user_edited: idTypeUserEdited ? "1" : "0",
         taiwan_passport: taiwanPassport ? "1" : "0",
       };
-      const res = await api.registerRunner.submit(payload, files, dryRun);
+      const res = await api.registerRunner.submit(payload, files, false);
       onToast(
         res.job_id
           ? `已入队任务 #${res.job_id}：${res.company_name}`
@@ -489,7 +497,7 @@ export function RegisterPage({ onToast }: Props) {
               },
             ]
           : [],
-        dry_run: res.dry_run ?? dryRun,
+        dry_run: false,
       });
       setPolling(true);
       resetFormForNext();
@@ -529,14 +537,12 @@ export function RegisterPage({ onToast }: Props) {
           >
             解析填充
           </Button>
-          <button
-            type="button"
-            className="btn btn-ghost"
+          <Button
             disabled={submitting || parsing}
             onClick={() => setPasteText("")}
           >
             清空
-          </button>
+          </Button>
         </div>
       </section>
 
@@ -566,11 +572,7 @@ export function RegisterPage({ onToast }: Props) {
                     {isLocalHkAddress(fields)
                       ? "香港地址（本地地址）"
                       : `非香港地址 · 国家=${
-                          countryLabel(
-                            PASSPORT_COUNTRIES.find(
-                              (c) => c.code === (fields.address_country || "CHN")
-                            ) || PASSPORT_COUNTRIES[0]
-                          ) || fields.address_country || "中国"
+                          fields.address_country || "中國"
                         }`}
                   </small>
                 ) : null}
@@ -644,9 +646,9 @@ export function RegisterPage({ onToast }: Props) {
                       value={fields.address_country || undefined}
                       onChange={(v) => setField("address_country", v || "")}
                       disabled={submitting}
-                      options={PASSPORT_COUNTRIES.map((c) => ({
-                        value: c.code,
-                        label: countryLabel(c),
+                      options={s03Countries.map((label) => ({
+                        value: label,
+                        label,
                       }))}
                       style={{ width: "100%" }}
                     />
@@ -784,30 +786,14 @@ export function RegisterPage({ onToast }: Props) {
           </div>
 
           <div className="reg-actions">
-            <label className="reg-field" style={{ marginBottom: 8 }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input
-                  type="checkbox"
-                  checked={dryRun}
-                  disabled={submitting}
-                  onChange={(e) => setDryRun(e.target.checked)}
-                />
-                dry_run（仅填表，不最终提交）
-              </span>
-              <small className="muted">
-                {dryRun
-                  ? "默认开启：只自动填表，不点 ICRIS 最终提交"
-                  : "已关闭：将允许自动提交（请确认材料无误）"}
-              </small>
-            </label>
-            <button
-              type="button"
-              className="btn btn-primary"
+            <Button
+              type="primary"
               disabled={submitting}
+              loading={submitting}
               onClick={onSubmit}
             >
               {submitting ? "提交中…" : "跑注册"}
-            </button>
+            </Button>
           </div>
         </section>
 
@@ -840,7 +826,6 @@ export function RegisterPage({ onToast }: Props) {
               <div className="reg-meta">
                 <span>开始: {formatDateTime(runnerStatus.started_at)}</span>
                 <span>完成: {formatDateTime(runnerStatus.finished_at)}</span>
-                <span>dry_run: {runnerStatus.dry_run ? "Y" : "N"}</span>
               </div>
               {runnerStatus.error ? (
                 <div className="error-box">{runnerStatus.error}</div>

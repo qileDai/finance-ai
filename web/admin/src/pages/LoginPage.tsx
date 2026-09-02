@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
+import { Button } from "antd";
 import { api } from "../api";
 import { useAuth } from "../auth";
 
@@ -61,9 +62,16 @@ export function LoginPage() {
             />
           </label>
           {error ? <div className="login-error">{error}</div> : null}
-          <button type="submit" className="btn btn-primary login-btn" disabled={busy}>
+          <Button
+            type="primary"
+            htmlType="submit"
+            className="login-btn"
+            loading={busy}
+            disabled={busy}
+            block
+          >
             {busy ? "登录中…" : "登录"}
-          </button>
+          </Button>
         </form>
         <p className="login-hint muted">使用 .env 中 ADMIN_USERNAME / ADMIN_PASSWORD</p>
       </div>

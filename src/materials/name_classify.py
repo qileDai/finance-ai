@@ -123,17 +123,25 @@ def coerce_name_result(data: Any, raw_name: str = "") -> dict[str, str]:
     ).strip()
     surname = str(data.get("surname_en") or data.get("director_surname_en") or "").strip()
     given = str(data.get("given_en") or data.get("director_given_en") or "").strip()
-    name_cn = _cjk_only(name_cn) or name_cn
+    name_cn = _cjk_only(name_cn)
     if re.search(r"[A-Za-z【\[（(]", name_cn):
         name_cn = _cjk_only(name_cn)
+    raw = (raw_name or "").strip()
+    raw_has_cjk = bool(_CJK_RE.search(raw))
+    raw_has_latin = bool(re.search(r"[A-Za-z]", raw))
+    if raw_has_cjk and not raw_has_latin:
+        surname, given = "", ""
+        name_cn = _cjk_only(raw) or name_cn
     if not name_cn and not surname and not given:
         return weak_fallback_name(raw_name)
     fb = weak_fallback_name(raw_name)
-    if fb.get("director_surname_en") and not surname:
-        surname = fb["director_surname_en"]
-        given = given or fb.get("director_given_en") or ""
+    if not (raw_has_cjk and not raw_has_latin):
+        if fb.get("director_surname_en") and not surname:
+            surname = fb["director_surname_en"]
+            given = given or fb.get("director_given_en") or ""
     if fb.get("director_name_cn") and not name_cn:
         name_cn = fb["director_name_cn"]
+    name_cn = _cjk_only(name_cn)
     return {
         "director_name_cn": name_cn,
         "director_surname_en": surname,

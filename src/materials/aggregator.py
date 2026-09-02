@@ -6,7 +6,6 @@ import json
 import re
 import secrets
 import string
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,14 +32,12 @@ def _split_cjk_latin_name(name: str) -> tuple[str, str]:
     cjk_chars: list[str] = []
     latin_chars: list[str] = []
     for c in name:
-        if c.isascii():
+        if "\u4e00" <= c <= "\u9fff" or c in "·•、・":
+            cjk_chars.append(c)
+        elif c.isascii():
             latin_chars.append(c)
-            continue
-        cat = unicodedata.category(c)
-        if cat in ("Lo", "Nl", "Mn") or c in "·•、・":
-            cjk_chars.append(c)
-        else:
-            cjk_chars.append(c)
+        elif c in "，":
+            latin_chars.append(",")
     return "".join(cjk_chars).strip(), "".join(latin_chars).strip()
 
 
@@ -258,6 +255,18 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
     elif not person_en and not surname_en:
         split_cn, split_en = _split_cjk_latin_name(person)
         person_en = split_en
+    if not surname_en and not given_en:
+        latin_src = person_en or (
+            person if not re.search(r"[\u4e00-\u9fff]", person or "") else ""
+        )
+        if latin_src and re.search(r"[A-Za-z]", latin_src):
+            from src.materials.name_classify import weak_fallback_name
+
+            fb = weak_fallback_name(latin_src)
+            surname_en = fb.get("director_surname_en") or ""
+            given_en = fb.get("director_given_en") or ""
+            if surname_en or given_en:
+                person_en = f"{surname_en} {given_en}".strip()
     address_street = _get_val(materials, "director_address_street")
     address_region = _get_val(materials, "director_address_region")
     address_country = _get_val(materials, "address_country")
@@ -383,6 +392,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
         "business_nature_desc": _get_val(materials, "business_desc"),
         "br_certificate_years": br_int,
         "applicant": {
+            "director_name": person,
             "name_en": person_en or am_en,
             "name_cn": person_cn or am_cn,
             "email": _get_val(materials, "applicant_email") or contact_email,

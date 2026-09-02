@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { Button } from "antd";
 import { api } from "../api";
 import { pct, StateBox } from "../components/ui";
 
@@ -76,14 +77,14 @@ export function OverviewPage({ refreshKey }: { refreshKey: number }) {
       <div className="panel">
         <h2>快捷入口</h2>
         <div className="toolbar">
-          <Link className="btn" to="/quality">
-            回答质量
+          <Link to="/quality">
+            <Button>回答质量</Button>
           </Link>
-          <Link className="btn" to="/jobs">
-            注册任务
+          <Link to="/jobs">
+            <Button>注册任务</Button>
           </Link>
-          <Link className="btn" to="/sessions">
-            会话材料
+          <Link to="/sessions">
+            <Button>会话材料</Button>
           </Link>
         </div>
         <p className="muted" style={{ margin: 0 }}>

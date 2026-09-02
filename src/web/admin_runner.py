@@ -184,6 +184,12 @@ def parse_paste_text(*, text: str = "") -> tuple[dict[str, Any], int]:
             s = str(v).strip()
             if s or k == "address_is_hk":
                 fields[k] = s if s else "0"
+    if fields.get("address_country"):
+        from src.materials.countries import resolve_s03_address_country
+
+        fields["address_country"] = resolve_s03_address_country(
+            fields["address_country"]
+        )
     if not fields and not taiwan:
         return {
             "ok": False,
@@ -590,7 +596,7 @@ def submit(
     fields: dict[str, str],
     files: dict[str, dict[str, Any]],
     *,
-    dry_run: bool = True,
+    dry_run: bool = False,
 ) -> tuple[dict[str, Any], int]:
     """校验 → 落盘/materials → enqueue registration_jobs。"""
     global _state
@@ -622,7 +628,7 @@ def submit(
     fields["id_type"] = id_type
 
     from src.materials.address_classify import classify_director_address
-    from src.materials.countries import normalize_address_country
+    from src.materials.countries import resolve_s03_address_country
     from src.materials.name_classify import classify_director_name
 
     addr_en = (fields.get("director_address_en") or "").strip()
@@ -637,9 +643,7 @@ def submit(
             if k == "address_is_hk" or (v and not str(fields.get(k) or "").strip()):
                 fields[k] = str(v)
     if fields.get("address_country"):
-        iso = normalize_address_country(fields["address_country"])
-        if iso:
-            fields["address_country"] = iso
+        fields["address_country"] = resolve_s03_address_country(fields["address_country"])
     raw_name = (fields.get("director_name") or "").strip()
     if raw_name:
         need_cn = not (fields.get("director_name_cn") or "").strip()

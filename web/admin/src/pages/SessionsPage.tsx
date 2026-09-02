@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Button } from "antd";
 import { api, type MaterialRow, type SessionSummary } from "../api";
 import { formatDateTime } from "../format";
 import { StateBox, statusBadge } from "../components/ui";
@@ -36,14 +37,14 @@ export function SessionsPage({ refreshKey }: { refreshKey: number }) {
     <>
       <div className="toolbar">
         {(["all", "group", "kf"] as const).map((c) => (
-          <button
+          <Button
             key={c}
-            type="button"
-            className={`chip ${channel === c ? "active" : ""}`}
+            size="small"
+            type={channel === c ? "primary" : "default"}
             onClick={() => setParams(c === "all" ? {} : { channel: c })}
           >
             {c === "all" ? "全部" : c === "group" ? "群 wr*" : "客服 kf:*"}
-          </button>
+          </Button>
         ))}
       </div>
       <StateBox loading={loading} error={error} empty={!items.length}>
@@ -117,8 +118,8 @@ export function SessionDetailPage({ refreshKey }: { refreshKey: number }) {
   return (
     <>
       <div className="toolbar">
-        <Link className="btn" to="/sessions">
-          ← 返回列表
+        <Link to="/sessions">
+          <Button size="small">← 返回列表</Button>
         </Link>
       </div>
       <StateBox loading={loading} error={error}>

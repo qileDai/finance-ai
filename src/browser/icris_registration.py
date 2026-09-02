@@ -24,6 +24,10 @@ from src.materials.id_type_classify import (
     s03_id_type_select_pattern,
     s04_identity_fill_values,
 )
+from src.materials.address_classify import (
+    hk_district_select_candidates,
+    pick_hk_district_from_options,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -262,6 +266,23 @@ def latin_english_given_surname(name_en: str, name_cn: str = "") -> tuple[str, s
     return split_applicant_english_name(text)
 
 
+def s03_skip_english_name(
+    raw_director_name: str = "",
+    name_cn: str = "",
+    name_en: str = "",
+) -> bool:
+    """原文含汉字且无拉丁字母时，s03 不填英文姓/名（忽略库里残留拼音）。"""
+    src = (raw_director_name or "").strip()
+    if src:
+        return bool(re.search(r"[\u4e00-\u9fff]", src)) and not bool(
+            re.search(r"[A-Za-z]", src)
+        )
+    blob = f"{name_cn or ''} {name_en or ''}"
+    return bool(re.search(r"[\u4e00-\u9fff]", blob)) and not bool(
+        re.search(r"[A-Za-z]", blob)
+    )
+
+
 def _admin_job_review_url(job_id: int, admin_public_url: str) -> str:
     base = (admin_public_url or "").strip().rstrip("/")
     if not base:
@@ -359,7 +380,7 @@ def split_cjk_latin_name(name: str) -> tuple[str, str]:
     """姓名 → (中文部分, 英文部分)。
 
     纯中文→(name,"")；纯英文→("",name)；混合→(CJK片段, 拉丁片段)。
-    ASCII 字符（含空格/字母/数字/标点）归英文，其余（汉字、全角等）归中文。
+    仅汉字进中文；ASCII 与全角逗号进英文，避免「，」写进中文姓名。
     """
     name = (name or "").strip()
     if not name:
@@ -367,15 +388,12 @@ def split_cjk_latin_name(name: str) -> tuple[str, str]:
     cjk_chars: list[str] = []
     latin_chars: list[str] = []
     for c in name:
-        if c.isascii():
+        if "\u4e00" <= c <= "\u9fff" or c in "·•、・":
+            cjk_chars.append(c)
+        elif c.isascii():
             latin_chars.append(c)
-            continue
-        # 非汉字（如全角符号、分隔点）也归中文流，避免污染英文姓名
-        cat = unicodedata.category(c)
-        if cat in ("Lo", "Nl", "Mn") or c in "·•、・":
-            cjk_chars.append(c)
-        else:
-            cjk_chars.append(c)
+        elif c in "，":
+            latin_chars.append(",")
     return "".join(cjk_chars).strip(), "".join(latin_chars).strip()
 
 
@@ -2083,6 +2101,95 @@ class IcrisRegistrationBot:
             rows.append({"i": i, "context": ctx})
         logger.info("%s ant-select 列表 (%d): %s", prefix, count, rows)
 
+    async def _read_s03_district_options(
+        self, page: "Page", keywords: list[str]
+    ) -> list[str]:
+        """读出郵遞區號／区下拉的选项原文（原生 select 或打开 ant-select）。"""
+        native = await page.evaluate(
+            """(keywords) => {
+                const norm = s => (s || '').replace(/[\\s/／:*：]/g, '');
+                const kws = keywords.map(k => norm(k)).filter(Boolean);
+                const titles = [...document.querySelectorAll(
+                    '.rowTitle, th, label, .ant-form-item-label, .control-label'
+                )];
+                for (const title of titles) {
+                    const tt = norm((title.innerText || '').trim());
+                    if (!kws.some(k => tt.includes(k))) continue;
+                    const row = title.closest('tr, .ant-form-item, .form-group, fieldset, div');
+                    const sel = row && row.querySelector('select');
+                    if (!sel) continue;
+                    return [...sel.options].map(o => (o.textContent || '').trim())
+                        .filter(t => t && !/請選擇|请选择|^Select$/i.test(t));
+                }
+                return [];
+            }""",
+            keywords,
+        )
+        if native:
+            return [str(x) for x in native if str(x).strip()]
+        opened = await page.evaluate(
+            """(keywords) => {
+                const norm = s => (s || '').replace(/[\\s/／:*：]/g, '');
+                const kws = keywords.map(k => norm(k)).filter(Boolean);
+                const titles = [...document.querySelectorAll(
+                    '.rowTitle, th, label, .ant-form-item-label, .control-label'
+                )];
+                const openAnt = (selectEl) => {
+                    const trigger = selectEl.querySelector(
+                        '.ant-select-selector, .ant-select-arrow'
+                    ) || selectEl;
+                    trigger.scrollIntoView({ block: 'center' });
+                    trigger.dispatchEvent(new MouseEvent('mousedown', {
+                        bubbles: true, cancelable: true
+                    }));
+                    trigger.click();
+                };
+                for (const title of titles) {
+                    const tt = norm((title.innerText || '').trim());
+                    if (!kws.some(k => tt.includes(k))) continue;
+                    const row = title.closest(
+                        'tr, .ant-form-item, .form-group, fieldset, .content, div'
+                    );
+                    const sel = row && row.querySelector(
+                        '.ant-select, [role=combobox]'
+                    );
+                    if (!sel || sel.tagName === 'SELECT') continue;
+                    openAnt(sel);
+                    return true;
+                }
+                return false;
+            }""",
+            keywords,
+        )
+        if not opened:
+            return []
+        try:
+            dd = page.locator(
+                ".ant-select-dropdown:not(.ant-select-dropdown-hidden)"
+            ).last
+            await dd.wait_for(state="visible", timeout=4000)
+            texts = await page.evaluate(
+                """() => [...document.querySelectorAll(
+                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden) '
+                    + '.ant-select-item-option-content, '
+                    + '.ant-select-dropdown:not(.ant-select-dropdown-hidden) '
+                    + '.ant-select-item-option'
+                )].map(el => (el.innerText || '').trim()).filter(Boolean)"""
+            )
+        except Exception:
+            texts = []
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+        seen: list[str] = []
+        for t in texts or []:
+            s = str(t).strip()
+            if s and s not in seen and not re.search(r"請選擇|请选择|^Select$", s, re.I):
+                seen.append(s)
+        return seen
+
     async def _select_ant_select_by_keywords(
         self, page: "Page", keywords: list[str], option: str
     ) -> bool:
@@ -2318,7 +2425,11 @@ class IcrisRegistrationBot:
 
     async def _select_non_hk_country(self, page: "Page", iso3: str = "CHN") -> bool:
         """非香港地址：按住址国家 ISO 选國家／地區。"""
-        from src.materials.countries import passport_country_option_names
+        from src.materials.countries import (
+            passport_country_option_names,
+            resolve_s03_address_country,
+            load_s03_country_options,
+        )
 
         country_kws = [
             "国家",
@@ -2328,10 +2439,21 @@ class IcrisRegistrationBot:
             "国家／地区",
             "國家／地區",
         ]
+        resolved = resolve_s03_address_country(iso3 or "CHN")
+        extra_values: list[str] = []
+        for row in load_s03_country_options():
+            if str(row.get("label") or "") == resolved and str(row.get("value") or ""):
+                extra_values.append(str(row["value"]))
         options = tuple(
             dict.fromkeys(
-                passport_country_option_names(iso3 or "CHN")
-                or ("中国", "中國", "China")
+                [
+                    resolved,
+                    *extra_values,
+                    *(
+                        passport_country_option_names(iso3 or "CHN")
+                        or ("中国", "中國", "China")
+                    ),
+                ]
             )
         )
 
@@ -4074,23 +4196,30 @@ class IcrisRegistrationBot:
         if not isinstance(applicant, dict):
             applicant = {}
         name_en = applicant.get("name_en", "")
-        name_cn = applicant.get("name_cn", "")
-        if re.search(r"[A-Za-z【\[（(]", str(name_cn or "")):
-            name_cn = "".join(
-                ch for ch in str(name_cn) if "\u4e00" <= ch <= "\u9fff"
-            )
+        name_cn = "".join(
+            ch for ch in str(applicant.get("name_cn") or "") if "\u4e00" <= ch <= "\u9fff"
+        )
+        director_pre = (data.get("directors") or [{}])[0] or {}
+        if not isinstance(director_pre, dict):
+            director_pre = {}
+        raw_person = str(
+            applicant.get("director_name")
+            or director_pre.get("director_name")
+            or ""
+        )
         surname_stored = str(applicant.get("surname_en") or "").strip()
         given_stored = str(applicant.get("given_en") or "").strip()
         if not surname_stored or not given_stored:
-            director_pre = (data.get("directors") or [{}])[0] or {}
-            if isinstance(director_pre, dict):
-                surname_stored = surname_stored or str(
-                    director_pre.get("surname_en") or ""
-                ).strip()
-                given_stored = given_stored or str(
-                    director_pre.get("given_en") or ""
-                ).strip()
-        if surname_stored or given_stored:
+            surname_stored = surname_stored or str(
+                director_pre.get("surname_en") or ""
+            ).strip()
+            given_stored = given_stored or str(
+                director_pre.get("given_en") or ""
+            ).strip()
+        skip_en = s03_skip_english_name(raw_person, name_cn, str(name_en or ""))
+        if skip_en:
+            surname, given = "", ""
+        elif surname_stored or given_stored:
             surname, given = surname_stored, given_stored
         else:
             given, surname = latin_english_given_surname(
@@ -4228,20 +4357,31 @@ class IcrisRegistrationBot:
             await _inc(ok, "街道")
 
         # 区/市/省/州/邮递区号
+        district_kws = ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"]
         if is_hk:
-            district = (region or "").strip() or "香港仔"
-            ok_dist = await self._select_ant_select_by_keywords(
-                page,
-                ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
-                district,
+            options = await self._read_s03_district_options(page, district_kws)
+            picked = pick_hk_district_from_options(
+                addr_en,
+                options,
+                region=region,
+                address_cn=addr_cn,
+                llm=self.llm,
             )
-            if not ok_dist and district != "香港仔":
+            if not picked:
+                cands = hk_district_select_candidates(addr_en, region, addr_cn)
+                picked = cands[0] if cands else ""
+            ok_dist = False
+            if picked:
                 ok_dist = await self._select_ant_select_by_keywords(
-                    page,
-                    ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
-                    "香港仔",
+                    page, district_kws, picked
                 )
-            await _inc(ok_dist, f"区/市/省={district}")
+            else:
+                logger.warning(
+                    "用户资料: 香港区/邮递区号未匹配 addr=%s region=%s",
+                    (addr_en or "")[:80],
+                    (region or "")[:40],
+                )
+            await _inc(ok_dist, f"区/市/省={picked or '(未选)'}")
         elif region:
             # 非香港：文本填入拆分后的区/市/省（如 "Shenzhen City, Guangdong Province"）
             reg_ok = await self._fill_by_placeholder(
@@ -5726,7 +5866,13 @@ class IcrisRegistrationBot:
         )
         surname_stored = str(applicant.get("surname_en") or "").strip()
         given_stored = str(applicant.get("given_en") or "").strip()
-        if surname_stored or given_stored:
+        if s03_skip_english_name(
+            str(applicant.get("director_name") or ""),
+            str(applicant.get("name_cn") or ""),
+            str(applicant.get("name_en") or ""),
+        ):
+            surname, given = "", ""
+        elif surname_stored or given_stored:
             surname, given = surname_stored, given_stored
         name_en_fill = f"{surname} {given}".strip() if (surname or given) else ""
         field_map = [

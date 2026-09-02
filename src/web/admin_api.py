@@ -141,6 +141,15 @@ def handle_admin_api(
             from src.web.admin_runner import defaults as runner_defaults
 
             return _ok(**runner_defaults())
+        if method == "GET" and rel == "s03-countries":
+            from src.materials.countries import load_s03_country_options
+
+            items = [
+                {"label": row["label"], "value": row["label"]}
+                for row in load_s03_country_options()
+                if row.get("label")
+            ]
+            return _ok(items=items, count=len(items))
         if method == "GET" and rel == "register-runner/status":
             from src.web.admin_runner import status as runner_status
 
@@ -240,8 +249,8 @@ def _handle_runner_submit(body: dict | None) -> tuple[dict[str, Any], int]:
     files = body.get("files") or {}
     if not isinstance(fields, dict) or not isinstance(files, dict):
         return _err("fields/files must be objects", 400)
-    # 缺省 dry_run=True；显式 false/0/"false" 才关闭
-    raw_dry = body.get("dry_run", True)
+    # 缺省允许提交（s03a 审核后再点 ICRIS 最终提交）；显式 true 才仅填表
+    raw_dry = body.get("dry_run", False)
     if isinstance(raw_dry, str):
         dry_run = raw_dry.strip().lower() not in ("0", "false", "no", "off")
     else:

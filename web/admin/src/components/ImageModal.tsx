@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Button } from "antd";
 
 type Props = {
   src: string;
@@ -51,25 +52,25 @@ export function ImageModal({ src, alt = "", open, onClose }: Props) {
   return (
     <div className="img-modal-overlay" onMouseDown={onOverlayMouseDown}>
       <div className="img-modal-toolbar">
-        <button type="button" onClick={() => setScale((s) => Math.min(5, s + 0.2))}>
+        <Button size="small" onClick={() => setScale((s) => Math.min(5, s + 0.2))}>
           +
-        </button>
+        </Button>
         <span>{(scale * 100).toFixed(0)}%</span>
-        <button type="button" onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}>
+        <Button size="small" onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}>
           -
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          size="small"
           onClick={() => {
             setScale(1);
             setOffset({ x: 0, y: 0 });
           }}
         >
           重置
-        </button>
-        <button type="button" onClick={onClose}>
+        </Button>
+        <Button size="small" onClick={onClose}>
           ✕
-        </button>
+        </Button>
       </div>
       <div
         className="img-modal-body"
