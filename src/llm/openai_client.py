@@ -409,6 +409,22 @@ class LLMClient:
         )
         return self.chat(system, user)
 
+    def classify_id_document_text(self, text: str, id_number: str = "") -> dict:
+        """根据粘贴资料判定 HKID / PRC_ID / PASSPORT，只返回这两个键。"""
+        from src.materials.id_type_classify import (
+            CLASSIFY_ID_SYSTEM,
+            classify_id_user_prompt,
+            coerce_classify_result,
+        )
+
+        user = classify_id_user_prompt(text, id_number)
+        try:
+            data = self.chat_json(CLASSIFY_ID_SYSTEM, user, temperature=0.0)
+        except Exception as e:
+            logger.warning("证件类型 LLM 判定失败: %s", e)
+            return {"id_type": "", "id_number": (id_number or "").strip()}
+        return coerce_classify_result(data, id_number)
+
     def solve_captcha_from_image(self, image_base64: str, expected_length: int = 5) -> str:
         """使用视觉模型识别 ICRIS 验证码（区分大小写）"""
         response = self.client.chat.completions.create(

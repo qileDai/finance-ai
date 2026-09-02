@@ -46,6 +46,11 @@ from src.browser.icris_ui_common import (
 )
 from src.browser.launcher import create_browser_context, launch_browser
 from src.email.imap_client import IcrisAccount
+from src.materials.id_type_classify import (
+    nnc1_identity_fill_plan,
+    normalize_stored_id_type,
+    split_hkid_number,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3084,27 +3089,8 @@ class IcrisNnc1FormBot:
             logger.warning("认购股本填写失败")
 
     def _normalize_id_type(self, raw: str, id_number: str = "") -> str:
-        """证件类型：HKID / PRC_ID / PASSPORT。"""
-        key = re.sub(r"[\s_\-]+", "", (raw or "").upper())
-        mapping = {
-            "HKID": "HKID",
-            "HK": "HKID",
-            "HONGKONG": "HKID",
-            "PRCID": "PRC_ID",
-            "PRC": "PRC_ID",
-            "CNID": "PRC_ID",
-            "CHINAID": "PRC_ID",
-            "PASSPORT": "PASSPORT",
-            "PPT": "PASSPORT",
-        }
-        if key in mapping:
-            return mapping[key]
-        num = (id_number or "").strip()
-        if re.match(r"^[A-Z]{1,2}\d", num):
-            return "HKID"
-        if re.match(r"^[A-Z0-9]{6,}$", num) and not re.match(r"^\d{18}$", num):
-            return "PASSPORT"
-        return "PRC_ID"
+        """证件类型：库里已有则尊重；空类型才弱兜底。"""
+        return normalize_stored_id_type(raw, id_number)
 
     def _split_non_hk_address_en(self, address_en: str) -> dict[str, str]:
         """英文非香港地址拆分（室/街道/区省市）。"""
@@ -3150,8 +3136,19 @@ class IcrisNnc1FormBot:
 
     def _resolve_person_id(self, person: dict[str, Any], data: dict[str, Any]) -> tuple[str, str]:
         identity = dict(data.get("identity_proof") or {})
-        id_number = (person.get("id_number") or identity.get("id_number") or "").strip()
-        id_type = str(person.get("id_type") or identity.get("id_type") or "")
+        applicant = dict(data.get("applicant") or {})
+        id_number = str(
+            person.get("id_number")
+            or identity.get("id_number")
+            or applicant.get("id_number")
+            or ""
+        ).strip()
+        id_type = str(
+            person.get("id_type")
+            or identity.get("id_type")
+            or applicant.get("id_type")
+            or ""
+        )
         return id_number, self._normalize_id_type(id_type, id_number)
 
     async def _locate_address_block(
@@ -3606,18 +3603,20 @@ class IcrisNnc1FormBot:
 
     async def _fill_hkid_number(self, page, id_number: str) -> bool:
         """填写完整香港身分證號碼（含括号校验位）。"""
-        if not id_number:
+        if not id_number or id_number.strip() == "無":
             return False
-        main = id_number.strip()
-        check = ""
-        m = re.match(r"^([A-Z]{1,2}\d{6})([A0-9])$", main, re.I)
-        if m:
-            main, check = m.group(1), m.group(2)
+        main, check = split_hkid_number(id_number)
         ok = await self._fill_field_by_label(
             page,
             ["完整香港身分證號碼", "完整香港身份证号码"],
             main,
         )
+        if not ok:
+            ok = await self._fill_nnc1_identity_slot(
+                page,
+                ["完整香港身分證號碼", "完整香港身份证号码", "完整香港身分證"],
+                main,
+            )
         if check:
             bracket = page.locator(
                 "xpath=//*[contains(.,'完整香港身分證') or contains(.,'完整香港身份证')]"
@@ -3627,42 +3626,97 @@ class IcrisNnc1FormBot:
                 await bracket.fill(check)
         return ok
 
+    async def _fill_nnc1_identity_slot(
+        self, page, labels: list[str], value: str
+    ) -> bool:
+        """身分識別栏：短标签精确匹配，避免大容器误填。"""
+        if not value:
+            return False
+        ok = await self._fill_field_by_label(page, labels, value)
+        if ok:
+            return True
+        hit = await page.evaluate(
+            """({ labels, value }) => {
+                const setNative = (el, v) => {
+                    el.focus();
+                    el.value = v;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const nodes = [...document.querySelectorAll(
+                    'label, .rowTitle, td, th, span, div, p'
+                )];
+                for (const pat of labels) {
+                    const compactPat = pat.replace(/\\s+/g, '');
+                    for (const el of nodes) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+                        if (!t || t.length > 40) continue;
+                        if (!t.includes(compactPat)) continue;
+                        let inp = el.querySelector(
+                            'input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea'
+                        );
+                        if (!inp) {
+                            const row = el.closest('tr, .ant-form-item, fieldset, div');
+                            inp = row?.querySelector(
+                                'input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea'
+                            );
+                        }
+                        if (!inp || inp.disabled) continue;
+                        const r = inp.getBoundingClientRect();
+                        if (r.width <= 0 && r.height <= 0) continue;
+                        setNative(inp, value);
+                        return pat;
+                    }
+                }
+                return '';
+            }""",
+            {"labels": labels, "value": value},
+        )
+        if hit:
+            logger.info("已填写身分栏 [%s]: %s", hit, value[:80])
+            return True
+        logger.warning("未找到身分栏: %s", labels[0])
+        return False
+
     async def _fill_step3_identity(
         self, page, person: dict[str, Any], data: dict[str, Any]
     ) -> None:
-        """身分識別：HKID 填無或实号；护照/身份证填证件号 + 签发国。"""
+        """身分識別：两个栏都要写；未用一侧显式填「無」。"""
         id_number, id_type = self._resolve_person_id(person, data)
+        plan = nnc1_identity_fill_plan(id_type, id_number)
         await self._scroll_to_section(page, ["身分識別", "身份识别", "Identification"])
+        logger.info(
+            "NNC1-3.1 身分識別 type=%s hkid=%s passport=%s",
+            id_type,
+            plan["hkid"][:16],
+            plan["passport"][:16],
+        )
 
-        if id_type == "HKID" and id_number:
-            await self._fill_hkid_number(page, id_number)
+        hkid_labels = ["完整香港身分證號碼", "完整香港身份证号码", "完整香港身分證"]
+        passport_labels = ["完整護照號碼", "完整护照号码", "Passport"]
+
+        if id_type == "HKID" and plan["hkid"] != "無":
+            await self._fill_hkid_number(page, plan["hkid"])
         else:
-            await self._fill_field_by_label(
-                page,
-                ["完整香港身分證號碼", "完整香港身份证号码"],
-                "無",
-            )
-            if id_number:
-                await self._fill_field_by_label(
+            await self._fill_nnc1_identity_slot(page, hkid_labels, plan["hkid"])
+
+        await self._fill_nnc1_identity_slot(page, passport_labels, plan["passport"])
+
+        if plan.get("passport_country"):
+            country_labels = [
+                "護照簽發國家",
+                "护照签发国家",
+                "護照簽發國家／地區",
+                "護照簽發國家/地區",
+            ]
+            await self._wait_labeled_dropdown_options(page, country_labels)
+            for country in ("中国", "中國", "China", "中華人民共和國"):
+                if await self._select_option_by_label(
                     page,
-                    ["完整護照號碼", "完整护照号码", "Passport"],
-                    id_number,
-                )
-            if id_type in ("PRC_ID", "PASSPORT"):
-                passport_labels = [
-                    "護照簽發國家",
-                    "护照签发国家",
-                    "護照簽發國家／地區",
-                    "護照簽發國家/地區",
-                ]
-                await self._wait_labeled_dropdown_options(page, passport_labels)
-                for country in ("中国", "中國", "China", "中華人民共和國"):
-                    if await self._select_option_by_label(
-                        page,
-                        passport_labels,
-                        country,
-                    ):
-                        break
+                    country_labels,
+                    country,
+                ):
+                    break
 
     async def _click_add_to_officer_list(self, page) -> None:
         """点击「加入至創辦成員/高級人員列表」。"""

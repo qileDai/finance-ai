@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { Button, Spin, message } from "antd";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -112,7 +113,7 @@ function parseRegistrationText(raw: string): Record<string, string> {
     { field: "registered_capital", pattern: /^注册资本/ },
     { field: "business_desc", pattern: /^(经营范围|业务范围)/ },
     { field: "director_name", pattern: /^董事\s*[+＋、,，&＆]?\s*股东|^股东\s*[+＋、,，&＆]?\s*董事|^董事兼股东|^董事|^股东/ },
-    { field: "id_number", pattern: /^(身份证号?码?|证件号|护照号)/ },
+    { field: "id_number", pattern: /^(香港身份证号?码?|香港身分證號?碼?|香港身分证号?码?|身份证号?码?|身分證號?碼?|证件号|护照号|護照號)/ },
     { field: "contact_email", pattern: /^(联络邮箱|邮箱|电邮|电子邮件)/ },
     { field: "registered_office_cn", pattern: /^(注册办事处|建议地址|办事处地址|注册地址)/ },
     { field: "office_flat_floor", pattern: /^室[／/]楼[／/]座[^:：]*[:：]|^室\/楼\/座[^:：]*[:：]|^楼层[^:：]*[:：]/ },
@@ -123,7 +124,7 @@ function parseRegistrationText(raw: string): Record<string, string> {
 
   // 已知关键字集合：用于判断「注册地址」后下一行是否为新字段
   const knownKeyRe =
-    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|身份证号?码?|证件号|护照号|注册地址|公司名称|联络邮箱|邮箱|电邮|注册办事处|建议地址|办事处地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
+    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|香港身份证|香港身分證|香港身分证|身份证号?码?|身分證|证件号|护照号|護照號|注册地址|公司名称|联络邮箱|邮箱|电邮|注册办事处|建议地址|办事处地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
 
   function stripLeadingNumber(s: string): string {
     return s.replace(/^\s*\d+\s*[、.）)]\s*/, "").trim();
@@ -194,6 +195,8 @@ export function RegisterPage({ onToast }: Props) {
     registered_capital: "1万港币",
   });
   const [idType, setIdType] = useState("PRC_ID");
+  const [idTypeUserEdited, setIdTypeUserEdited] = useState(false);
+  const [idTypeFromTextLlm, setIdTypeFromTextLlm] = useState(false);
   const [idFile, setIdFile] = useState<File | undefined>();
   const [taiwanIdFile, setTaiwanIdFile] = useState<File | undefined>();
   const [dryRun, setDryRun] = useState(true);
@@ -202,6 +205,8 @@ export function RegisterPage({ onToast }: Props) {
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [defaultEmail, setDefaultEmail] = useState("");
+  const [parsing, setParsing] = useState(false);
+  const [messageApi, contextHolder] = message.useMessage();
   const logRef = useRef<HTMLDivElement>(null);
 
   // 预填默认邮箱 + 默认办事处地址 + 恢复运行中任务状态
@@ -290,19 +295,84 @@ export function RegisterPage({ onToast }: Props) {
       ...(defaultEmail ? { contact_email: defaultEmail } : {}),
     });
     setIdType("PRC_ID");
+    setIdTypeUserEdited(false);
+    setIdTypeFromTextLlm(false);
     setIdFile(undefined);
     setTaiwanIdFile(undefined);
   }
 
-  function onParse() {
+  async function onParse() {
     const parsed = parseRegistrationText(pasteText);
     const keys = Object.keys(parsed);
     if (!keys.length) {
-      onToast("未识别到可填充字段，请检查关键字格式");
+      messageApi.warning("未识别到可填充字段，请检查关键字格式");
       return;
     }
-    setFields((p) => ({ ...p, ...parsed }));
-    onToast(`已填充 ${keys.length} 项`);
+    setParsing(true);
+    try {
+      setFields((p) => ({ ...p, ...parsed }));
+      if (!idTypeUserEdited) {
+        try {
+          const r = await api.registerRunner.classifyId({
+            text: pasteText,
+            id_number: parsed.id_number || fields.id_number || "",
+          });
+          if (r.id_type && ID_TYPE_OPTIONS.some((o) => o.value === r.id_type)) {
+            setIdType(r.id_type);
+            setIdTypeFromTextLlm(true);
+          }
+          if (r.id_number && !parsed.id_number) {
+            setFields((p) =>
+              p.id_number ? p : { ...p, id_number: r.id_number || "" }
+            );
+          }
+        } catch {
+          /* LLM 失败时保留正则抽出的号码，类型保持当前下拉 */
+        }
+      }
+      messageApi.success(`已填充 ${keys.length} 项`);
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  async function onIdFileChange(file: File | undefined) {
+    setIdFile(file);
+    if (!file || !file.type.startsWith("image/")) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const current: Record<string, string> = { ...fields };
+      if (!idTypeUserEdited && !idTypeFromTextLlm) {
+        delete current.id_type;
+      } else {
+        current.id_type = idType;
+      }
+      const res = await api.registerRunner.extractId({
+        data_url: dataUrl,
+        filename: file.name,
+        current_fields: current,
+        fill_empty_only: true,
+      });
+      const filled = res.fields || {};
+      const skipType = idTypeUserEdited || idTypeFromTextLlm;
+      setFields((p) => {
+        const next = { ...p };
+        for (const [k, v] of Object.entries(filled)) {
+          if (k === "id_type") continue;
+          if (!(next[k] || "").trim() && v) next[k] = v;
+        }
+        return next;
+      });
+      if (
+        !skipType &&
+        filled.id_type &&
+        ID_TYPE_OPTIONS.some((o) => o.value === filled.id_type)
+      ) {
+        setIdType(filled.id_type);
+      }
+    } catch {
+      /* 视觉识别失败不阻断手工上传 */
+    }
   }
 
   function validate(): string | null {
@@ -351,6 +421,8 @@ export function RegisterPage({ onToast }: Props) {
         ...fields,
         id_type: idType,
         issuing_country: fields.issuing_country || "",
+        paste_text: pasteText,
+        id_type_user_edited: idTypeUserEdited ? "1" : "0",
       };
       delete payload.director_name_cn;
       delete payload.director_name_en;
@@ -385,11 +457,14 @@ export function RegisterPage({ onToast }: Props) {
   }
 
   return (
-    <div className="register-page">
+    <>
+      {contextHolder}
+      <Spin spinning={parsing}>
+        <div className="register-page">
       <section className="reg-card reg-paste-card">
         <h2>快速填充</h2>
         <small className="muted">
-          粘贴整段注册信息（含「中文名：」「英文名：」「注册资本：」「经营范围：」「注册地址：」「董事：」「身份证号码：」「住址中文：」「住址英文：」等关键字），点「解析填充」自动写入下方表单。
+          粘贴整段注册信息（含「中文名：」「英文名：」「注册资本：」「经营范围：」「注册地址：」「董事：」「身份证号码：」「香港身份证号码：」「护照号码：」「住址中文：」「住址英文：」等关键字），点「解析填充」自动写入下方表单，并由大模型判定证件类型。
         </small>
         <textarea
           className="reg-paste-area"
@@ -399,21 +474,21 @@ export function RegisterPage({ onToast }: Props) {
           }
           value={pasteText}
           onChange={(e) => setPasteText(e.target.value)}
-          disabled={submitting}
+          disabled={submitting || parsing}
         />
         <div className="reg-paste-actions">
-          <button
-            type="button"
-            className="btn btn-primary"
+          <Button
+            type="primary"
+            loading={parsing}
             disabled={submitting || !pasteText.trim()}
             onClick={onParse}
           >
             解析填充
-          </button>
+          </Button>
           <button
             type="button"
             className="btn btn-ghost"
-            disabled={submitting}
+            disabled={submitting || parsing}
             onClick={() => setPasteText("")}
           >
             清空
@@ -466,6 +541,7 @@ export function RegisterPage({ onToast }: Props) {
                 value={idType}
                 onChange={(e) => {
                   setIdType(e.target.value);
+                  setIdTypeUserEdited(true);
                   setIdFile(undefined);
                   if (e.target.value !== "PASSPORT") {
                     setTaiwanIdFile(undefined);
@@ -516,12 +592,14 @@ export function RegisterPage({ onToast }: Props) {
                 type="file"
                 accept="image/*,application/pdf"
                 disabled={submitting}
-                onChange={(e) => setIdFile(e.target.files?.[0])}
+                onChange={(e) => onIdFileChange(e.target.files?.[0])}
               />
               {idFile ? (
                 <small className="muted">{idFile.name}</small>
               ) : (
-                <small className="muted">上传身份证或护照文件，不自动识别</small>
+                <small className="muted">
+                  可识别姓名住址；证件类型以粘贴资料为准，手工改过下拉则以下拉为准
+                </small>
               )}
             </label>
             {idType === "PASSPORT" &&
@@ -653,6 +731,8 @@ export function RegisterPage({ onToast }: Props) {
           )}
         </section>
       </div>
-    </div>
+        </div>
+      </Spin>
+    </>
   );
 }

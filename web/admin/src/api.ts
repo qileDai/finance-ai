@@ -325,6 +325,14 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ fields, files, dry_run }),
       }),
+    classifyId: (payload: { text?: string; paste_text?: string; id_number?: string }) =>
+      request<ApiOk<{ id_type?: string; id_number?: string }>>(
+        "/admin/api/register-runner/classify-id",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      ),
     extractId: (payload: {
       data_url: string;
       filename?: string;

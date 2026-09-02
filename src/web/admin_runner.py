@@ -132,6 +132,28 @@ def _primary_id_file_key(id_type: str) -> str:
     return "passport" if id_type == "PASSPORT" else "id_card_front"
 
 
+def _truthy(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    return str(val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def classify_id_text(
+    *,
+    text: str = "",
+    id_number: str = "",
+) -> tuple[dict[str, Any], int]:
+    """粘贴资料 → LLM 判定 HKID / PRC_ID / PASSPORT。"""
+    from src.materials.id_type_classify import classify_id_from_text
+
+    result = classify_id_from_text(text or "", id_number or "")
+    return {
+        "ok": True,
+        "id_type": result.get("id_type") or "",
+        "id_number": result.get("id_number") or (id_number or "").strip(),
+    }, 200
+
+
 def _normalize_files_for_id_type(
     files: dict[str, dict[str, Any]], id_type: str
 ) -> dict[str, dict[str, Any]]:
@@ -523,7 +545,29 @@ def submit(
     global _state
     fields = dict(fields or {})
     files = dict(files or {})
-    id_type = (fields.get("id_type") or "PRC_ID").strip().upper() or "PRC_ID"
+    user_edited = _truthy(fields.pop("id_type_user_edited", False))
+    paste_text = str(fields.pop("paste_text", "") or "")
+    id_number = (fields.get("id_number") or "").strip()
+    id_type = (fields.get("id_type") or "").strip().upper()
+    if not user_edited:
+        from src.materials.id_type_classify import classify_id_from_text
+
+        classified = classify_id_from_text(paste_text, id_number)
+        if classified.get("id_type"):
+            id_type = classified["id_type"]
+        if classified.get("id_number") and not id_number:
+            id_number = classified["id_number"]
+            fields["id_number"] = id_number
+        logger.info(
+            "[快速注册] LLM 判定证件类型=%s user_edited=%s num=%s",
+            id_type,
+            user_edited,
+            id_number[:12],
+        )
+    from src.materials.id_type_classify import ICRIS_ID_TYPES, normalize_stored_id_type
+
+    if id_type not in ICRIS_ID_TYPES:
+        id_type = normalize_stored_id_type(id_type, id_number)
     fields["id_type"] = id_type
 
     # 空邮箱回退环境变量

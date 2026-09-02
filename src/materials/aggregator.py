@@ -319,6 +319,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "name_cn": person_cn,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "id_type": _get_val(materials, "id_type"),
+                    "id_number": _get_val(materials, "id_number"),
                     "raw": True,
                 }
             ]
@@ -333,6 +335,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "email": contact_email,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "id_type": _get_val(materials, "id_type"),
+                    "id_number": _get_val(materials, "id_number"),
                     "raw": True,
                 }
             ]

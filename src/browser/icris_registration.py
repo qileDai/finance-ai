@@ -19,6 +19,10 @@ from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
 from src.browser.icris_errors import IcrisFlowError, IcrisStepLoadError
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
+from src.materials.id_type_classify import (
+    normalize_stored_id_type,
+    s03_id_type_select_pattern,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -4065,7 +4069,16 @@ class IcrisRegistrationBot:
             str(name_en or ""), str(name_cn or "")
         )
         title = applicant.get("title", "Mr")
-        id_type = applicant.get("id_type", "HKID")
+        proof = data.get("identity_proof") or {}
+        if not isinstance(proof, dict):
+            proof = {}
+        raw_id_type = str(
+            applicant.get("id_type") or proof.get("id_type") or ""
+        )
+        id_type = self._normalize_icris_id_type(
+            raw_id_type, str(applicant.get("id_number") or proof.get("id_number") or "")
+        )
+        id_type_select = s03_id_type_select_pattern(id_type)
         # S03 电邮用任务里的联络邮箱（快速注册可改），空才回退申请人邮箱 / 默认联络邮箱
         contact = data.get("contact") or {}
         if not isinstance(contact, dict):
@@ -4122,10 +4135,10 @@ class IcrisRegistrationBot:
 
         for label_pat, value, ftype, name in [
             (r"称谓|稱謂|Title", title, "select", "称谓"),
-            (r"身份识别类别|身份識別類別|证件类型|證件類型", id_type, "select", "证件类型"),
+            (r"身份识别类别|身份識別類別|证件类型|證件類型", id_type_select, "select", "证件类型"),
             (
                 r"身份识别号码|身份識別號碼|证件号码|證件號碼",
-                applicant.get("id_number", ""),
+                applicant.get("id_number") or proof.get("id_number") or "",
                 "text",
                 "证件号码",
             ),
@@ -4932,46 +4945,28 @@ class IcrisRegistrationBot:
         return False
 
     def _normalize_icris_id_type(self, raw: str, id_number: str = "") -> str:
-        """归一证件类型：HKID / PRC_ID / PASSPORT。"""
-        t = (raw or "").strip().upper().replace("-", "_").replace(" ", "")
-        aliases = {
-            "HKID": "HKID",
-            "HK_ID": "HKID",
-            "HONGKONG": "HKID",
-            "HONG_KONG": "HKID",
-            "PRC_ID": "PRC_ID",
-            "PRC": "PRC_ID",
-            "CN_ID": "PRC_ID",
-            "CHINA_ID": "PRC_ID",
-            "CHINA": "PRC_ID",
-            "PASSPORT": "PASSPORT",
-            "PP": "PASSPORT",
-            "护照": "PASSPORT",
-            "護照": "PASSPORT",
-        }
-        if t in aliases:
-            return aliases[t]
-        for key, val in aliases.items():
-            if key and key in t:
-                return val
-        num = (id_number or "").strip()
-        if re.match(r"^\d{17}[\dXx]$", num):
-            return "PRC_ID"
-        if re.match(r"^[A-Z]{1,2}\d{6}\(?[\dA]\)?$", num, re.I):
-            return "HKID"
-        if num and re.match(r"^[A-Z0-9]{5,15}$", num, re.I):
-            return "PASSPORT"
-        return "PRC_ID"
+        """归一证件类型：库里已有则尊重；空类型才弱兜底。"""
+        return normalize_stored_id_type(raw, id_number)
 
     def _derive_identity_proof(self, data: dict[str, Any]) -> dict[str, Any]:
         """解析身份证明选项：按 HKID / 中国身份证 / 护照勾选对应项。"""
         proof = data.get("identity_proof") or {}
         applicant = data.get("applicant") or {}
+        founders = data.get("founder_members") or []
+        founder = founders[0] if founders and isinstance(founders[0], dict) else {}
         id_number = str(
-            proof.get("id_number") or applicant.get("id_number") or ""
+            proof.get("id_number")
+            or applicant.get("id_number")
+            or founder.get("id_number")
+            or ""
         ).strip()
         id_type = self._normalize_icris_id_type(
-            str(proof.get("id_type") or applicant.get("id_type") or ""),
+            str(
+                proof.get("id_type")
+                or applicant.get("id_type")
+                or founder.get("id_type")
+                or ""
+            ),
             id_number,
         )
 
@@ -5561,15 +5556,32 @@ class IcrisRegistrationBot:
             sel = selects.nth(i)
             name = (await sel.get_attribute("name") or "").lower()
             if "idtype" in name or "id_type" in name or "doctype" in name:
-                try:
-                    await sel.select_option(label=applicant.get("id_type", "HKID"))
-                    filled += 1
-                except Exception:
+                id_type = self._normalize_icris_id_type(
+                    str(applicant.get("id_type") or ""),
+                    str(applicant.get("id_number") or ""),
+                )
+                labels_by_type = {
+                    "HKID": (id_type, "香港身分證", "香港身分证", "香港身份证"),
+                    "PRC_ID": (id_type, "中华人民共和国", "中華人民共和國"),
+                    "PASSPORT": (id_type, "护照", "護照"),
+                }
+                picked = False
+                for candidate in labels_by_type.get(id_type, (id_type,)):
                     try:
-                        await sel.select_option(index=1)
-                        filled += 1
+                        await sel.select_option(value=candidate)
+                        picked = True
+                        break
                     except Exception:
-                        pass
+                        try:
+                            await sel.select_option(label=re.compile(candidate, re.I))
+                            picked = True
+                            break
+                        except Exception:
+                            continue
+                if picked:
+                    filled += 1
+                else:
+                    logger.warning("s03 证件类型下拉未选中 type=%s", id_type)
 
         logger.info("已填写 %d 个注册表单字段", filled)
         return filled
