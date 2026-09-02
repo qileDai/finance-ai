@@ -154,6 +154,32 @@ def classify_id_text(
     }, 200
 
 
+def parse_paste_text(*, text: str = "") -> tuple[dict[str, Any], int]:
+    """粘贴全文 → LLM 抽字段（失败则正则）。"""
+    from src.materials.quick_register_parse import parse_quick_register_text
+
+    blob = (text or "").strip()
+    if not blob:
+        return {"ok": False, "error": "paste text required", "fields": {}}, 400
+    result = parse_quick_register_text(blob)
+    source = result.pop("source", "") if isinstance(result, dict) else ""
+    taiwan = bool(result.pop("taiwan_passport", False)) if isinstance(result, dict) else False
+    fields = {k: v for k, v in (result or {}).items() if k != "source" and k != "taiwan_passport"}
+    if not fields and not taiwan:
+        return {
+            "ok": False,
+            "error": "未识别到可填充字段",
+            "fields": {},
+            "source": source or "",
+        }, 200
+    return {
+        "ok": True,
+        "fields": fields,
+        "taiwan_passport": taiwan,
+        "source": source,
+    }, 200
+
+
 def _normalize_files_for_id_type(
     files: dict[str, dict[str, Any]], id_type: str
 ) -> dict[str, dict[str, Any]]:
@@ -257,8 +283,14 @@ def _validate(
         errs.append("至少填写一个地址（住址或注册地址）")
     issuing = (fields.get("issuing_country") or "").strip().upper()
     id_type = (fields.get("id_type") or "").strip().upper()
-    if id_type == "PASSPORT" and issuing in ("TWN", "TW", "TAIWAN", "ROC"):
-        if not (fields.get("director_address_cn") or "").strip():
+    from src.materials.countries import is_taiwan_issuing, normalize_issuing_iso
+
+    if id_type == "PASSPORT":
+        iso = normalize_issuing_iso(issuing) or issuing
+        if iso:
+            fields["issuing_country"] = iso
+        taiwan = _truthy(fields.get("taiwan_passport")) or is_taiwan_issuing(issuing)
+        if taiwan and not (fields.get("director_address_cn") or "").strip():
             errs.append("台湾护照请填写住址中文")
     files = files or {}
     has_file = any(
@@ -581,6 +613,7 @@ def submit(
     errs = _validate(fields, files)
     if errs:
         return {"ok": False, "error": "；".join(errs)}, 400
+    fields.pop("taiwan_passport", None)
 
     now = datetime.now()
     ts = now.strftime("%Y%m%d-%H%M%S-") + f"{now.microsecond // 1000:03d}"

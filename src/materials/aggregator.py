@@ -321,6 +321,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "address_en": _get_val(materials, "director_address_en"),
                     "id_type": _get_val(materials, "id_type"),
                     "id_number": _get_val(materials, "id_number"),
+                    "issuing_country": _get_val(materials, "issuing_country"),
                     "raw": True,
                 }
             ]
@@ -337,6 +338,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "address_en": _get_val(materials, "director_address_en"),
                     "id_type": _get_val(materials, "id_type"),
                     "id_number": _get_val(materials, "id_number"),
+                    "issuing_country": _get_val(materials, "issuing_country"),
                     "raw": True,
                 }
             ]
@@ -362,10 +364,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             "phone": _get_val(materials, "applicant_phone") or contact_phone,
             "id_type": _get_val(materials, "id_type"),
             "id_number": _get_val(materials, "id_number"),
+            "issuing_country": _get_val(materials, "issuing_country"),
         },
         "identity_proof": {
             "id_type": _get_val(materials, "id_type") or "PRC_ID",
             "id_number": _get_val(materials, "id_number") or "",
+            "issuing_country": _get_val(materials, "issuing_country"),
             "document_files": doc_files,
             "document_dir": str(Path(doc_files[0]).parent) if doc_files else "",
         },

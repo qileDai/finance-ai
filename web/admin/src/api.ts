@@ -333,6 +333,17 @@ export const api = {
           body: JSON.stringify(payload),
         }
       ),
+    parsePaste: (payload: { text?: string; paste_text?: string }) =>
+      request<
+        ApiOk<{
+          fields?: Record<string, string>;
+          taiwan_passport?: boolean;
+          source?: string;
+        }>
+      >("/admin/api/register-runner/parse-paste", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
     extractId: (payload: {
       data_url: string;
       filename?: string;

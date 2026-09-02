@@ -151,6 +151,8 @@ def handle_admin_api(
             return _handle_runner_extract_id(body)
         if method == "POST" and rel == "register-runner/classify-id":
             return _handle_runner_classify_id(body)
+        if method == "POST" and rel == "register-runner/parse-paste":
+            return _handle_runner_parse_paste(body)
         if method == "POST" and rel == "id-extract":
             return _handle_id_extract(body)
         if method == "POST" and rel == "id-extract/translate":
@@ -256,6 +258,16 @@ def _handle_runner_classify_id(body: dict | None) -> tuple[dict[str, Any], int]:
     text = str(body.get("text") or body.get("paste_text") or "")
     id_number = str(body.get("id_number") or "")
     return classify_id_text(text=text, id_number=id_number)
+
+
+def _handle_runner_parse_paste(body: dict | None) -> tuple[dict[str, Any], int]:
+    """粘贴全文 LLM 解析（简繁标签、住址按正文分中英）。"""
+    from src.web.admin_runner import parse_paste_text
+
+    if not isinstance(body, dict):
+        return _err("request body required", 400)
+    text = str(body.get("text") or body.get("paste_text") or "")
+    return parse_paste_text(text=text)
 
 
 def _handle_runner_extract_id(body: dict | None) -> tuple[dict[str, Any], int]:

@@ -410,20 +410,43 @@ class LLMClient:
         return self.chat(system, user)
 
     def classify_id_document_text(self, text: str, id_number: str = "") -> dict:
-        """根据粘贴资料判定 HKID / PRC_ID / PASSPORT，只返回这两个键。"""
+        """只根据证件标签行判定 HKID / PRC_ID / PASSPORT。"""
         from src.materials.id_type_classify import (
             CLASSIFY_ID_SYSTEM,
             classify_id_user_prompt,
             coerce_classify_result,
+            extract_id_label_lines,
         )
 
-        user = classify_id_user_prompt(text, id_number)
+        snippet = extract_id_label_lines(text)
+        user = classify_id_user_prompt(snippet or text, id_number)
         try:
             data = self.chat_json(CLASSIFY_ID_SYSTEM, user, temperature=0.0)
         except Exception as e:
             logger.warning("证件类型 LLM 判定失败: %s", e)
             return {"id_type": "", "id_number": (id_number or "").strip()}
-        return coerce_classify_result(data, id_number)
+        return coerce_classify_result(data, id_number, source_text=text)
+
+    def parse_quick_register_text(self, text: str) -> dict:
+        """快速注册粘贴全文 → 字段 JSON（简繁标签、住址按正文分中英）。"""
+        from src.materials.quick_register_parse import (
+            PARSE_QUICK_REGISTER_SYSTEM,
+            coerce_parse_result,
+        )
+
+        blob = (text or "").strip()
+        if not blob:
+            return {}
+        try:
+            data = self.chat_json(
+                PARSE_QUICK_REGISTER_SYSTEM,
+                f"粘贴资料:\n{blob}",
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("快速注册 LLM 解析失败: %s", e)
+            return {}
+        return coerce_parse_result(data, source_text=blob)
 
     def solve_captcha_from_image(self, image_base64: str, expected_length: int = 5) -> str:
         """使用视觉模型识别 ICRIS 验证码（区分大小写）"""

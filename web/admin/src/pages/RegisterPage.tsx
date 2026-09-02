@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Button, Spin, message } from "antd";
+import { Button, Select, Spin, message } from "antd";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
+import { PASSPORT_COUNTRIES, countryLabel } from "../countries";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import { statusBadge } from "../components/ui";
@@ -25,7 +26,6 @@ const TEXT_FIELDS: TextField[] = [
   { key: "registered_office_cn", label: "注册地址（中文）" },
   { key: "registered_office_en", label: "注册地址（英文）" },
   { key: "director_name", label: "董事兼股东姓名", required: true },
-  { key: "id_number", label: "身份证号码", required: true },
   {
     key: "contact_email",
     label: "联络邮箱",
@@ -86,16 +86,9 @@ function detectHkAddress(cn: string, en: string): boolean {
   return keywords.some((k) => addr.includes(k));
 }
 
-function isTaiwanIssuing(country: string): boolean {
-  const c = (country || "").trim().toUpperCase();
-  return c === "TWN" || c === "TW" || c === "TAIWAN" || c === "ROC";
-}
-
 /**
- * 把整段注册信息解析为字段映射。
- * 支持「中文名：」「英文名：」「注册资本：」「经营范围：」「注册地址：」
- * 「董事：」「身份证号码：」「住址中文：」「住址英文：」等关键字。
- * 「注册地址：」后紧跟的、不含关键字的英文行视为英文注册地址。
+ * 把整段注册信息解析为字段映射（API 失败时的弱兜底）。
+ * 支持简繁标签；住址按正文判中/英文。
  */
 function parseRegistrationText(raw: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -110,12 +103,12 @@ function parseRegistrationText(raw: string): Record<string, string> {
     { field: "director_address_en", pattern: /^(住址英文|住址（英文）|英文住址)/ },
     { field: "company_name_cn", pattern: /^(公司中文名|公司中文名称|中文名)/ },
     { field: "company_name_en", pattern: /^(公司英文名|公司英文名称|英文名)/ },
-    { field: "registered_capital", pattern: /^注册资本/ },
-    { field: "business_desc", pattern: /^(经营范围|业务范围)/ },
+    { field: "registered_capital", pattern: /^(注册资本|註冊資本)/ },
+    { field: "business_desc", pattern: /^(经营范围|經營範圍|业务范围|業務範圍)/ },
     { field: "director_name", pattern: /^董事\s*[+＋、,，&＆]?\s*股东|^股东\s*[+＋、,，&＆]?\s*董事|^董事兼股东|^董事|^股东/ },
-    { field: "id_number", pattern: /^(香港身份证号?码?|香港身分證號?碼?|香港身分证号?码?|身份证号?码?|身分證號?碼?|证件号|护照号|護照號)/ },
-    { field: "contact_email", pattern: /^(联络邮箱|邮箱|电邮|电子邮件)/ },
-    { field: "registered_office_cn", pattern: /^(注册办事处|建议地址|办事处地址|注册地址)/ },
+    { field: "id_number", pattern: /^(香港身份证号?码?|香港身分證號?碼?|香港身分证号?码?|身份证号?码?|身分證號?碼?|证件号|證件號|护照号|護照號)/ },
+    { field: "contact_email", pattern: /^(联络邮箱|聯絡郵箱|邮箱|電郵|电邮|电子邮件|電子郵件)/ },
+    { field: "registered_office_cn", pattern: /^(注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址|注册地址|註冊地址)/ },
     { field: "office_flat_floor", pattern: /^室[／/]楼[／/]座[^:：]*[:：]|^室\/楼\/座[^:：]*[:：]|^楼层[^:：]*[:：]/ },
     { field: "office_building", pattern: /^(大厦|大廈|大楼|大樓)[^:：]*[:：]/ },
     { field: "office_street", pattern: /^街道[／/]屋苑[／/]地段[／/]村[^:：]*[:：]|^街道[^:：]*[:：]/ },
@@ -124,7 +117,7 @@ function parseRegistrationText(raw: string): Record<string, string> {
 
   // 已知关键字集合：用于判断「注册地址」后下一行是否为新字段
   const knownKeyRe =
-    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|经营范围|业务范围|董事|股东|香港身份证|香港身分證|香港身分证|身份证号?码?|身分證|证件号|护照号|護照號|注册地址|公司名称|联络邮箱|邮箱|电邮|注册办事处|建议地址|办事处地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
+    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|註冊資本|经营范围|經營範圍|业务范围|業務範圍|董事|股东|股東|香港身份证|香港身分證|香港身分证|身份证号?码?|身分證|证件号|證件號|护照号|護照號|注册地址|註冊地址|公司名称|公司名稱|联络邮箱|聯絡郵箱|邮箱|电邮|電郵|注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
 
   function stripLeadingNumber(s: string): string {
     return s.replace(/^\s*\d+\s*[、.）)]\s*/, "").trim();
@@ -136,12 +129,11 @@ function parseRegistrationText(raw: string): Record<string, string> {
     const stripped = stripLeadingNumber(line);
 
     // 公司名称：冒号后有值才解析（纯标题行跳过），含中文→中文名，纯英文→英文名
-    const companyNameMatch = stripped.match(/^公司名称\s*[:：]\s*(\S.*)$/);
+    const companyNameMatch = stripped.match(/^(公司名称|公司名稱)\s*[:：]\s*(\S.*)$/);
     if (companyNameMatch) {
-      const afterColon = companyNameMatch[1].trim();
-      // 截断混在同一行的下一个关键字
+      const afterColon = companyNameMatch[2].trim();
       const nextKeyMatch = afterColon.match(
-        /\s+(中文名|英文名|公司中文名|公司英文名|注册资本|经营范围|董事|股东|身份证|注册地址|联络邮箱|邮箱|住址)/
+        /\s+(中文名|英文名|公司中文名|公司英文名|注册资本|註冊資本|经营范围|經營範圍|董事|股东|股東|身份证|身分證|注册地址|註冊地址|联络邮箱|聯絡郵箱|邮箱|住址)/
       );
       const val = nextKeyMatch
         ? afterColon.slice(0, nextKeyMatch.index).trim()
@@ -156,10 +148,17 @@ function parseRegistrationText(raw: string): Record<string, string> {
       continue;
     }
 
-    // 注册地址：本行可能是中文地址，下一行可能是英文地址
-    if (/^注册地址/.test(stripped)) {
-      const after = stripped.replace(/^注册地址\s*[:：]\s*/, "").trim();
-      if (after) result.registered_office_cn = after;
+    if (/^(注册地址|註冊地址|注册办事处|註冊辦事處|建议地址|建議地址)/.test(stripped)) {
+      const after = stripped
+        .replace(
+          /^(注册地址|註冊地址|注册办事处|註冊辦事處|建议地址|建議地址)\s*[:：]?\s*/,
+          ""
+        )
+        .trim();
+      if (after) {
+        if (looksLikeEnglishAddress(after)) result.registered_office_en = after;
+        else result.registered_office_cn = after;
+      }
       if (i + 1 < lines.length) {
         const next = lines[i + 1].trim();
         if (
@@ -171,6 +170,21 @@ function parseRegistrationText(raw: string): Record<string, string> {
           result.registered_office_en = next;
           i++;
         }
+      }
+      continue;
+    }
+
+    const addrGeneric = stripped.match(
+      /^(住址|居住地址)(?:\s*[（(][^）)]+[）)])?\s*[:：]?\s*(.*)$/
+    );
+    if (
+      addrGeneric &&
+      !/^(住址中文|住址英文|住址（中文）|住址（英文）)/.test(stripped)
+    ) {
+      const val = (addrGeneric[2] || "").trim();
+      if (val) {
+        if (looksLikeEnglishAddress(val)) result.director_address_en = val;
+        else result.director_address_cn = val;
       }
       continue;
     }
@@ -199,6 +213,7 @@ export function RegisterPage({ onToast }: Props) {
   const [idTypeFromTextLlm, setIdTypeFromTextLlm] = useState(false);
   const [idFile, setIdFile] = useState<File | undefined>();
   const [taiwanIdFile, setTaiwanIdFile] = useState<File | undefined>();
+  const [taiwanPassport, setTaiwanPassport] = useState(false);
   const [dryRun, setDryRun] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [runnerStatus, setRunnerStatus] = useState<RunnerStatus | null>(null);
@@ -297,40 +312,48 @@ export function RegisterPage({ onToast }: Props) {
     setIdType("PRC_ID");
     setIdTypeUserEdited(false);
     setIdTypeFromTextLlm(false);
+    setTaiwanPassport(false);
     setIdFile(undefined);
     setTaiwanIdFile(undefined);
   }
 
   async function onParse() {
-    const parsed = parseRegistrationText(pasteText);
-    const keys = Object.keys(parsed);
-    if (!keys.length) {
-      messageApi.warning("未识别到可填充字段，请检查关键字格式");
-      return;
-    }
     setParsing(true);
     try {
-      setFields((p) => ({ ...p, ...parsed }));
-      if (!idTypeUserEdited) {
-        try {
-          const r = await api.registerRunner.classifyId({
-            text: pasteText,
-            id_number: parsed.id_number || fields.id_number || "",
-          });
-          if (r.id_type && ID_TYPE_OPTIONS.some((o) => o.value === r.id_type)) {
-            setIdType(r.id_type);
-            setIdTypeFromTextLlm(true);
-          }
-          if (r.id_number && !parsed.id_number) {
-            setFields((p) =>
-              p.id_number ? p : { ...p, id_number: r.id_number || "" }
-            );
-          }
-        } catch {
-          /* LLM 失败时保留正则抽出的号码，类型保持当前下拉 */
+      let parsed: Record<string, string> = {};
+      let taiwan = false;
+      try {
+        const r = await api.registerRunner.parsePaste({ text: pasteText });
+        parsed = { ...(r.fields || {}) };
+        taiwan = Boolean(r.taiwan_passport);
+        if ((parsed.issuing_country || "").toUpperCase() === "TWN") {
+          parsed.issuing_country = "CHN";
+          taiwan = true;
         }
+      } catch {
+        parsed = parseRegistrationText(pasteText);
       }
-      messageApi.success(`已填充 ${keys.length} 项`);
+      const fillKeys = Object.keys(parsed).filter(
+        (k) => k !== "id_type" && String(parsed[k] || "").trim()
+      );
+      if (!fillKeys.length && !parsed.id_type) {
+        messageApi.warning("未识别到可填充字段，请检查关键字格式");
+        return;
+      }
+      const nextIdType = parsed.id_type || "";
+      const rest = { ...parsed };
+      delete rest.id_type;
+      setFields((p) => ({ ...p, ...rest }));
+      if (
+        !idTypeUserEdited &&
+        nextIdType &&
+        ID_TYPE_OPTIONS.some((o) => o.value === nextIdType)
+      ) {
+        setIdType(nextIdType);
+        setIdTypeFromTextLlm(true);
+      }
+      if (taiwan) setTaiwanPassport(true);
+      messageApi.success(`已填充 ${fillKeys.length || 1} 项`);
     } finally {
       setParsing(false);
     }
@@ -378,7 +401,7 @@ export function RegisterPage({ onToast }: Props) {
   function validate(): string | null {
     if (!(fields.company_name_en || "").trim()) return "公司英文名必填";
     if (!(fields.director_name || "").trim()) return "董事兼股东姓名必填";
-    if (!(fields.id_number || "").trim()) return "身份证号码必填";
+    if (!(fields.id_number || "").trim()) return "证件号码必填";
     const email = (fields.contact_email || "").trim();
     if (!email) return "联络邮箱必填";
     if (email && !email.includes("@")) return "联络邮箱格式无效";
@@ -392,7 +415,7 @@ export function RegisterPage({ onToast }: Props) {
     if (!idFile) return "请上传证件文件（PDF 或图片）";
     if (
       idType === "PASSPORT" &&
-      isTaiwanIssuing(fields.issuing_country || "") &&
+      taiwanPassport &&
       !(fields.director_address_cn || "").trim()
     ) {
       return "台湾护照请填写住址中文";
@@ -423,6 +446,7 @@ export function RegisterPage({ onToast }: Props) {
         issuing_country: fields.issuing_country || "",
         paste_text: pasteText,
         id_type_user_edited: idTypeUserEdited ? "1" : "0",
+        taiwan_passport: taiwanPassport ? "1" : "0",
       };
       delete payload.director_name_cn;
       delete payload.director_name_en;
@@ -501,7 +525,8 @@ export function RegisterPage({ onToast }: Props) {
           <h2>公司资料</h2>
           <div className="reg-form">
             {TEXT_FIELDS.map((f) => (
-              <label key={f.key} className="reg-field">
+              <Fragment key={f.key}>
+              <label className="reg-field">
                 <span>
                   {f.label}
                   {f.required ? <em>*</em> : null}
@@ -534,50 +559,72 @@ export function RegisterPage({ onToast }: Props) {
                   </small>
                 ) : null}
               </label>
-            ))}
-            <label className="reg-field">
-              <span>身份证明类型</span>
-              <select
-                value={idType}
-                onChange={(e) => {
-                  setIdType(e.target.value);
-                  setIdTypeUserEdited(true);
-                  setIdFile(undefined);
-                  if (e.target.value !== "PASSPORT") {
-                    setTaiwanIdFile(undefined);
+              {f.key === "director_name" ? (
+                <div
+                  className={
+                    "reg-id-row" + (idType === "PASSPORT" ? " with-country" : "")
                   }
-                }}
-                disabled={submitting}
-              >
-                {ID_TYPE_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {idType === "PASSPORT" ? (
-              <label className="reg-field">
-                <span>护照签发地</span>
-                <select
-                  value={fields.issuing_country || ""}
-                  onChange={(e) => {
-                    setField("issuing_country", e.target.value);
-                  }}
-                  disabled={submitting}
                 >
-                  <option value="">未指定 / 其他</option>
-                  <option value="CHN">中国大陆</option>
-                  <option value="HKG">香港</option>
-                  <option value="TWN">台湾</option>
-                  <option value="OTHER">其他国家/地区</option>
-                </select>
-                {idType === "PASSPORT" &&
-                isTaiwanIssuing(fields.issuing_country || "") ? (
-                  <small className="muted">台湾护照请填写住址中文</small>
-                ) : null}
-              </label>
-            ) : null}
+                  <label className="reg-field">
+                    <span>身份证明类型</span>
+                    <select
+                      value={idType}
+                      onChange={(e) => {
+                        setIdType(e.target.value);
+                        setIdTypeUserEdited(true);
+                        setIdFile(undefined);
+                        if (e.target.value !== "PASSPORT") {
+                          setTaiwanIdFile(undefined);
+                          setTaiwanPassport(false);
+                        }
+                      }}
+                      disabled={submitting}
+                    >
+                      {ID_TYPE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="reg-field">
+                    <span>
+                      证件号码
+                      <em>*</em>
+                    </span>
+                    <input
+                      type="text"
+                      value={fields.id_number || ""}
+                      onChange={(e) => setField("id_number", e.target.value)}
+                      disabled={submitting}
+                    />
+                  </label>
+                  {idType === "PASSPORT" ? (
+                    <label className="reg-field">
+                      <span>护照签发地</span>
+                      <Select
+                        showSearch
+                        allowClear
+                        optionFilterProp="label"
+                        placeholder="搜索国家"
+                        value={fields.issuing_country || undefined}
+                        onChange={(v) => setField("issuing_country", v || "")}
+                        disabled={submitting}
+                        options={PASSPORT_COUNTRIES.map((c) => ({
+                          value: c.code,
+                          label: countryLabel(c),
+                        }))}
+                        style={{ width: "100%" }}
+                      />
+                      {taiwanPassport ? (
+                        <small className="muted">台湾护照按中国签发；可另传台证</small>
+                      ) : null}
+                    </label>
+                  ) : null}
+                </div>
+              ) : null}
+              </Fragment>
+            ))}
           </div>
 
           <h2>证件文件</h2>
@@ -602,8 +649,7 @@ export function RegisterPage({ onToast }: Props) {
                 </small>
               )}
             </label>
-            {idType === "PASSPORT" &&
-            isTaiwanIssuing(fields.issuing_country || "") ? (
+            {idType === "PASSPORT" && taiwanPassport ? (
               <label className="reg-field">
                 <span>台湾身份证（可选）</span>
                 <input

@@ -605,6 +605,22 @@ table.data tr.clickable:hover td {
   grid-template-columns: 1fr 1fr;
   gap: 12px 14px;
 }
+.reg-id-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(180px, 1.2fr);
+  gap: 12px 14px;
+  align-items: start;
+}
+.reg-id-row.with-country {
+  grid-template-columns: minmax(140px, 0.8fr) minmax(160px, 1fr) minmax(200px, 1.3fr);
+}
+@media (max-width: 720px) {
+  .reg-id-row,
+  .reg-id-row.with-country {
+    grid-template-columns: 1fr;
+  }
+}
 .reg-field {
   display: flex;
   flex-direction: column;

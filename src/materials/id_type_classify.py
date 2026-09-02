@@ -1,7 +1,4 @@
-"""证件类型：LLM 判定 + 入库归一 + NNC1-3.1 双栏填写映射。
-
-类型判定以大模型为主；正则只抽号码 / LLM 失败时弱兜底（看标签，不靠号码形态当主判据）。
-"""
+"""证件类型：只根据证件标签 + 号码判定（不看住址/注册地址）。"""
 
 from __future__ import annotations
 
@@ -13,17 +10,24 @@ logger = logging.getLogger(__name__)
 
 ICRIS_ID_TYPES = ("HKID", "PRC_ID", "PASSPORT")
 
-# 与 LLMClient.classify_id_document_text 共用；测试断言 prompt 覆盖三种粘贴标签
+# 证件标签行（不含住址、注册地址）
+_ID_LABEL_LINE_RE = re.compile(
+    r"香港身份证|香港身分證|香港身分证|"
+    r"身份证号码|身分證號碼|身份证号|身分证号码|身分證號|"
+    r"护照号码|護照號碼|护照号|護照號|"
+    r"证件号|證件號"
+)
+
 CLASSIFY_ID_SYSTEM = (
-    "你是香港公司注册资料助手。根据客户粘贴的文字，判断董事/申请人使用的证件类型。"
+    "你只根据「证件标签 + 号码」判断类型，不要看住址或注册地址。"
     '只输出 JSON：{"id_type":"HKID"|"PRC_ID"|"PASSPORT","id_number":"..."}。'
     "规则："
     "1) 标签「香港身份证号码」「香港身分證號碼」「香港身份证」等 → HKID。"
     "港证校验位可能写成（2）或 (2)，id_number 须保留校验位。"
     "2) 标签「护照号码」「護照號碼」「护照号」→ PASSPORT。"
     "3) 标签「身份证号码」「居民身份证」且不是香港身份证 → PRC_ID（内地证）。"
-    "4) 有多条时取最明确的一条：香港身份证 / 护照优先于笼统的「身份证」。"
-    "5) 同时看标签语义和号码；不要只用号码形态猜测。"
+    "4) 有多条时：香港身份证 / 护照优先于笼统的「身份证」。"
+    "5) 注册地址或住址里出现「香港」不能当作港证。"
     "6) 不要输出其它键或解释。"
 )
 
@@ -46,21 +50,33 @@ _TYPE_ALIASES = {
 }
 
 
+def extract_id_label_lines(text: str) -> str:
+    """只保留含证件标签的行，去掉住址/注册地址等。"""
+    lines: list[str] = []
+    for raw in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if _ID_LABEL_LINE_RE.search(line):
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def classify_id_user_prompt(text: str, id_number: str = "") -> str:
-    blob = (text or "").strip()
+    snippet = extract_id_label_lines(text)
     num = (id_number or "").strip()
-    parts = ["请判定证件类型。"]
-    if blob:
-        parts.append(f"粘贴资料:\n{blob}")
+    parts = ["请只根据证件标签与号码判定类型，忽略地址。"]
+    if snippet:
+        parts.append(f"证件相关行:\n{snippet}")
     if num:
         parts.append(f"当前证件号码: {num}")
-    if not blob and not num:
-        parts.append("（无粘贴资料、无号码）")
+    if not snippet and not num:
+        parts.append("（无证件标签行、无号码）")
     return "\n\n".join(parts)
 
 
 def alias_id_type(raw: str) -> str:
-    """只做别名映射，不猜号码、不默认 PRC_ID。"""
+    """只做别名映射，不猜号码、不做子串误伤。"""
     original = (raw or "").strip()
     if not original:
         return ""
@@ -70,44 +86,54 @@ def alias_id_type(raw: str) -> str:
         return _TYPE_ALIASES[t]
     if t_compact in _TYPE_ALIASES:
         return _TYPE_ALIASES[t_compact]
-    for key, val in _TYPE_ALIASES.items():
-        if key and len(key) >= 4 and key in t:
-            return val
     return ""
 
 
-def coerce_classify_result(data: Any, fallback_number: str = "") -> dict[str, str]:
+def refine_id_type(text: str, id_number: str = "", llm_type: str = "") -> str:
+    """主判据：证件标签行。住址/注册地址不参与。"""
+    snippet = extract_id_label_lines(text)
+    if re.search(r"香港身份证|香港身分證|香港身分证", snippet):
+        return "HKID"
+    if re.search(r"护照号码|護照號碼|护照号|護照號", snippet):
+        return "PASSPORT"
+    if re.search(r"身份证号码|身分證號碼|身份证号|身分证号码|身分證號", snippet):
+        return "PRC_ID"
+    aliased = alias_id_type(llm_type)
+    if aliased in ICRIS_ID_TYPES:
+        return aliased
+    return ""
+
+
+def coerce_classify_result(
+    data: Any, fallback_number: str = "", source_text: str = ""
+) -> dict[str, str]:
     if not isinstance(data, dict):
-        return {"id_type": "", "id_number": (fallback_number or "").strip()}
-    raw_type = str(data.get("id_type") or "").strip()
-    id_type = alias_id_type(raw_type)
+        raw_type, id_number = "", (fallback_number or "").strip()
+    else:
+        raw_type = str(data.get("id_type") or "").strip()
+        id_number = str(data.get("id_number") or fallback_number or "").strip()
+    id_type = refine_id_type(source_text, id_number, raw_type)
     if id_type not in ICRIS_ID_TYPES:
         id_type = ""
-    id_number = str(data.get("id_number") or fallback_number or "").strip()
     return {"id_type": id_type, "id_number": id_number}
 
 
 def weak_fallback_id_type(text: str, id_number: str = "") -> dict[str, str]:
-    """LLM 失败时的弱兜底：优先看粘贴标签，号码形态只作最后提示。"""
-    blob = text or ""
+    """只看证件标签行，不看住址。"""
+    snippet = extract_id_label_lines(text)
     num = (id_number or "").strip()
     extracted = num
     if not extracted:
         m = re.search(
             r"(?:香港身份证号码|香港身分證號碼|护照号码|護照號碼|身份证号码|身分證號碼)"
             r"\s*[:：]\s*(\S+)",
-            blob,
+            snippet,
         )
         if m:
             extracted = m.group(1).strip()
-
-    if re.search(r"香港身份证|香港身分證|香港身分证", blob):
-        return {"id_type": "HKID", "id_number": extracted}
-    if re.search(r"护照号码|護照號碼|护照号|護照號", blob):
-        return {"id_type": "PASSPORT", "id_number": extracted}
-    if re.search(r"身份证号码|身分證號碼|身份证号|身分证号码", blob):
-        return {"id_type": "PRC_ID", "id_number": extracted}
-
+    refined = refine_id_type(text, extracted, "")
+    if refined:
+        return {"id_type": refined, "id_number": extracted}
     guessed = _weak_guess_from_number(extracted)
     if guessed:
         logger.warning(
@@ -170,8 +196,12 @@ def split_hkid_number(id_number: str) -> tuple[str, str]:
     return s, ""
 
 
-def nnc1_identity_fill_plan(id_type: str, id_number: str) -> dict[str, str]:
+def nnc1_identity_fill_plan(
+    id_type: str, id_number: str, issuing_country: str = ""
+) -> dict[str, str]:
     """NNC1-3.1：港证填港证栏、护照栏無；非港证港证栏無、护照栏填号。"""
+    from src.materials.countries import passport_country_option_names
+
     t = normalize_stored_id_type(id_type, id_number)
     num = (id_number or "").strip()
     if t == "HKID":
@@ -180,10 +210,11 @@ def nnc1_identity_fill_plan(id_type: str, id_number: str) -> dict[str, str]:
             "passport": "無",
             "passport_country": "",
         }
+    names = passport_country_option_names(issuing_country)
     return {
         "hkid": "無",
         "passport": num or "無",
-        "passport_country": "中国" if t in ("PRC_ID", "PASSPORT") else "",
+        "passport_country": names[0] if names else "中国",
     }
 
 
@@ -203,7 +234,8 @@ def classify_id_from_text(
     *,
     llm: Any | None = None,
 ) -> dict[str, str]:
-    """LLM 判定类型；失败才弱兜底。"""
+    """只把证件标签行交给 LLM；标签规则覆盖误判。"""
+    snippet = extract_id_label_lines(text)
     try:
         client = llm
         if client is None:
@@ -211,14 +243,14 @@ def classify_id_from_text(
 
             client = LLMClient()
         if hasattr(client, "classify_id_document_text"):
-            data = client.classify_id_document_text(text, id_number)
+            data = client.classify_id_document_text(snippet, id_number)
         else:
             data = client.chat_json(
                 CLASSIFY_ID_SYSTEM,
-                classify_id_user_prompt(text, id_number),
+                classify_id_user_prompt(snippet, id_number),
                 temperature=0.0,
             )
-        result = coerce_classify_result(data, id_number)
+        result = coerce_classify_result(data, id_number, source_text=text)
         if result.get("id_type") in ICRIS_ID_TYPES:
             return result
         logger.warning("LLM 证件分类结果无效: %s", data)
