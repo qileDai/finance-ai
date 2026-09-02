@@ -1,0 +1,1032 @@
+{
+  "source": "icris_s03_non_hk_country",
+  "captured_at": "2026-09-02T08:46:58Z",
+  "url": "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s03.do",
+  "count": 256,
+  "options": [
+    {
+      "label": "中國",
+      "value": "CHN"
+    },
+    {
+      "label": "澳門",
+      "value": "MAC"
+    },
+    {
+      "label": "台灣",
+      "value": "TWN"
+    },
+    {
+      "label": "阿富汗",
+      "value": "AFG"
+    },
+    {
+      "label": "奧蘭群島",
+      "value": "ALA"
+    },
+    {
+      "label": "阿爾巴尼亞",
+      "value": "ALB"
+    },
+    {
+      "label": "阿爾及利亞",
+      "value": "DZA"
+    },
+    {
+      "label": "東薩摩亞",
+      "value": "ASM"
+    },
+    {
+      "label": "安道爾",
+      "value": "AND"
+    },
+    {
+      "label": "安哥拉",
+      "value": "AGO"
+    },
+    {
+      "label": "安圭拉",
+      "value": "AIA"
+    },
+    {
+      "label": "南極洲",
+      "value": "ATA"
+    },
+    {
+      "label": "安提瓜和巴布達",
+      "value": "ATG"
+    },
+    {
+      "label": "阿根廷",
+      "value": "ARG"
+    },
+    {
+      "label": "亞美尼亞",
+      "value": "ARM"
+    },
+    {
+      "label": "阿魯巴",
+      "value": "ABW"
+    },
+    {
+      "label": "澳洲",
+      "value": "AUS"
+    },
+    {
+      "label": "奧地利",
+      "value": "AUT"
+    },
+    {
+      "label": "阿塞拜疆",
+      "value": "AZE"
+    },
+    {
+      "label": "巴哈馬",
+      "value": "BHS"
+    },
+    {
+      "label": "巴林",
+      "value": "BHR"
+    },
+    {
+      "label": "孟加拉國",
+      "value": "BGD"
+    },
+    {
+      "label": "巴巴多斯",
+      "value": "BRB"
+    },
+    {
+      "label": "白俄羅斯",
+      "value": "BLR"
+    },
+    {
+      "label": "比利時",
+      "value": "BEL"
+    },
+    {
+      "label": "伯利茲",
+      "value": "BLZ"
+    },
+    {
+      "label": "貝寧",
+      "value": "BEN"
+    },
+    {
+      "label": "百慕大",
+      "value": "BMU"
+    },
+    {
+      "label": "不丹",
+      "value": "BTN"
+    },
+    {
+      "label": "玻利維亞",
+      "value": "BOL"
+    },
+    {
+      "label": "博內爾、聖尤斯特歇斯和薩巴",
+      "value": "BES"
+    },
+    {
+      "label": "波斯尼亞",
+      "value": "BIH"
+    },
+    {
+      "label": "博茨瓦納",
+      "value": "BWA"
+    },
+    {
+      "label": "布維島",
+      "value": "BVT"
+    },
+    {
+      "label": "巴西",
+      "value": "BRA"
+    },
+    {
+      "label": "英屬印度洋群島",
+      "value": "IOT"
+    },
+    {
+      "label": "英屬維爾京群島",
+      "value": "VGB"
+    },
+    {
+      "label": "文萊",
+      "value": "BRN"
+    },
+    {
+      "label": "保加利亞",
+      "value": "BGR"
+    },
+    {
+      "label": "布基納法索",
+      "value": "BFA"
+    },
+    {
+      "label": "布隆迪",
+      "value": "BDI"
+    },
+    {
+      "label": "柬埔寨",
+      "value": "KHM"
+    },
+    {
+      "label": "喀麥隆",
+      "value": "CMR"
+    },
+    {
+      "label": "加拿大",
+      "value": "CAN"
+    },
+    {
+      "label": "佛得角",
+      "value": "CPV"
+    },
+    {
+      "label": "開曼群島",
+      "value": "CYM"
+    },
+    {
+      "label": "中非共和國",
+      "value": "CAF"
+    },
+    {
+      "label": "乍得",
+      "value": "TCD"
+    },
+    {
+      "label": "海峽群島",
+      "value": "GBR4"
+    },
+    {
+      "label": "智利",
+      "value": "CHL"
+    },
+    {
+      "label": "聖誕島",
+      "value": "CXR"
+    },
+    {
+      "label": "科科斯(基靈)群島",
+      "value": "CCK"
+    },
+    {
+      "label": "哥倫比亞",
+      "value": "COL"
+    },
+    {
+      "label": "科摩羅",
+      "value": "COM"
+    },
+    {
+      "label": "剛果",
+      "value": "COG"
+    },
+    {
+      "label": "庫克群島",
+      "value": "COK"
+    },
+    {
+      "label": "哥斯達黎加",
+      "value": "CRI"
+    },
+    {
+      "label": "科特迪瓦",
+      "value": "CIV"
+    },
+    {
+      "label": "克羅地亞",
+      "value": "HRV"
+    },
+    {
+      "label": "古巴",
+      "value": "CUB"
+    },
+    {
+      "label": "庫拉索島",
+      "value": "CUW"
+    },
+    {
+      "label": "塞浦路斯",
+      "value": "CYP"
+    },
+    {
+      "label": "捷克共和國",
+      "value": "CZE"
+    },
+    {
+      "label": "剛果民主共和國",
+      "value": "COD"
+    },
+    {
+      "label": "丹麥",
+      "value": "DNK"
+    },
+    {
+      "label": "吉布提",
+      "value": "DJI"
+    },
+    {
+      "label": "多米尼克",
+      "value": "DMA"
+    },
+    {
+      "label": "多明尼加共和國",
+      "value": "DOM"
+    },
+    {
+      "label": "厄瓜多爾",
+      "value": "ECU"
+    },
+    {
+      "label": "埃及",
+      "value": "EGY"
+    },
+    {
+      "label": "薩爾瓦多",
+      "value": "SLV"
+    },
+    {
+      "label": "赤道畿內亞",
+      "value": "GNQ"
+    },
+    {
+      "label": "厄立特里亞",
+      "value": "ERI"
+    },
+    {
+      "label": "愛沙尼亞",
+      "value": "EST"
+    },
+    {
+      "label": "埃塞俄比亞",
+      "value": "ETH"
+    },
+    {
+      "label": "福克蘭群島(馬爾維納斯)",
+      "value": "FLK"
+    },
+    {
+      "label": "法羅群島",
+      "value": "FRO"
+    },
+    {
+      "label": "密克羅尼西亞羣島",
+      "value": "FSM"
+    },
+    {
+      "label": "斐濟",
+      "value": "FJI"
+    },
+    {
+      "label": "芬蘭",
+      "value": "FIN"
+    },
+    {
+      "label": "法國",
+      "value": "FRA"
+    },
+    {
+      "label": "法屬圭亞那",
+      "value": "GUF"
+    },
+    {
+      "label": "法屬波利尼西亞",
+      "value": "PYF"
+    },
+    {
+      "label": "法屬南部領土",
+      "value": "ATF"
+    },
+    {
+      "label": "加蓬",
+      "value": "GAB"
+    },
+    {
+      "label": "岡比亞",
+      "value": "GMB"
+    },
+    {
+      "label": "格魯吉亞",
+      "value": "GEO"
+    },
+    {
+      "label": "德國",
+      "value": "DEU"
+    },
+    {
+      "label": "加納",
+      "value": "GHA"
+    },
+    {
+      "label": "直布羅陀",
+      "value": "GIB"
+    },
+    {
+      "label": "希臘",
+      "value": "GRC"
+    },
+    {
+      "label": "格陵蘭",
+      "value": "GRL"
+    },
+    {
+      "label": "格林納達",
+      "value": "GRD"
+    },
+    {
+      "label": "瓜德羅普島",
+      "value": "GLP"
+    },
+    {
+      "label": "關島",
+      "value": "GUM"
+    },
+    {
+      "label": "危地馬拉",
+      "value": "GTM"
+    },
+    {
+      "label": "格恩西島",
+      "value": "GBR1"
+    },
+    {
+      "label": "畿內亞",
+      "value": "GIN"
+    },
+    {
+      "label": "畿內亞比紹",
+      "value": "GNB"
+    },
+    {
+      "label": "圭亞那",
+      "value": "GUY"
+    },
+    {
+      "label": "海地",
+      "value": "HTI"
+    },
+    {
+      "label": "赫德島及麥當奴島",
+      "value": "HMD"
+    },
+    {
+      "label": "羅馬教廷(梵蒂岡)",
+      "value": "VAT"
+    },
+    {
+      "label": "洪都拉斯",
+      "value": "HND"
+    },
+    {
+      "label": "匈牙利",
+      "value": "HUN"
+    },
+    {
+      "label": "冰島",
+      "value": "ISL"
+    },
+    {
+      "label": "印度",
+      "value": "IND"
+    },
+    {
+      "label": "印尼",
+      "value": "IDN"
+    },
+    {
+      "label": "伊拉克",
+      "value": "IRQ"
+    },
+    {
+      "label": "愛爾蘭",
+      "value": "IRL"
+    },
+    {
+      "label": "伊朗",
+      "value": "IRN"
+    },
+    {
+      "label": "馬恩島",
+      "value": "GBR3"
+    },
+    {
+      "label": "以色列",
+      "value": "ISR"
+    },
+    {
+      "label": "意大利",
+      "value": "ITA"
+    },
+    {
+      "label": "牙買加",
+      "value": "JAM"
+    },
+    {
+      "label": "日本",
+      "value": "JPN"
+    },
+    {
+      "label": "澤西島",
+      "value": "GBR2"
+    },
+    {
+      "label": "約旦",
+      "value": "JOR"
+    },
+    {
+      "label": "哈薩克",
+      "value": "KAZ"
+    },
+    {
+      "label": "肯尼亞",
+      "value": "KEN"
+    },
+    {
+      "label": "基里巴斯共和國",
+      "value": "KIR"
+    },
+    {
+      "label": "科威特",
+      "value": "KWT"
+    },
+    {
+      "label": "吉爾吉斯",
+      "value": "KGZ"
+    },
+    {
+      "label": "老撾人民民主共和國",
+      "value": "LAO"
+    },
+    {
+      "label": "拉脫維亞",
+      "value": "LVA"
+    },
+    {
+      "label": "黎巴嫩",
+      "value": "LBN"
+    },
+    {
+      "label": "萊索托",
+      "value": "LSO"
+    },
+    {
+      "label": "利比里亞",
+      "value": "LBR"
+    },
+    {
+      "label": "利比亞",
+      "value": "LBY"
+    },
+    {
+      "label": "列支敦士登",
+      "value": "LIE"
+    },
+    {
+      "label": "立陶苑",
+      "value": "LTU"
+    },
+    {
+      "label": "盧森堡",
+      "value": "LUX"
+    },
+    {
+      "label": "馬達加斯加",
+      "value": "MDG"
+    },
+    {
+      "label": "馬拉維",
+      "value": "MWI"
+    },
+    {
+      "label": "馬來西亞",
+      "value": "MYS"
+    },
+    {
+      "label": "馬爾代夫",
+      "value": "MDV"
+    },
+    {
+      "label": "馬里",
+      "value": "MLI"
+    },
+    {
+      "label": "馬耳他",
+      "value": "MLT"
+    },
+    {
+      "label": "馬紹爾羣島",
+      "value": "MHL"
+    },
+    {
+      "label": "馬提尼克島",
+      "value": "MTQ"
+    },
+    {
+      "label": "毛里塔尼亞",
+      "value": "MRT"
+    },
+    {
+      "label": "毛里求斯",
+      "value": "MUS"
+    },
+    {
+      "label": "馬約特島",
+      "value": "MYT"
+    },
+    {
+      "label": "墨西哥",
+      "value": "MEX"
+    },
+    {
+      "label": "摩納哥",
+      "value": "MCO"
+    },
+    {
+      "label": "蒙古",
+      "value": "MNG"
+    },
+    {
+      "label": "黑山",
+      "value": "MNE"
+    },
+    {
+      "label": "蒙特塞拉特島",
+      "value": "MSR"
+    },
+    {
+      "label": "摩洛哥",
+      "value": "MAR"
+    },
+    {
+      "label": "莫桑比克",
+      "value": "MOZ"
+    },
+    {
+      "label": "緬甸",
+      "value": "MMR"
+    },
+    {
+      "label": "納米比亞",
+      "value": "NAM"
+    },
+    {
+      "label": "瑙魯",
+      "value": "NRU"
+    },
+    {
+      "label": "尼泊爾",
+      "value": "NPL"
+    },
+    {
+      "label": "荷蘭",
+      "value": "NLD"
+    },
+    {
+      "label": "荷屬安的列斯群島",
+      "value": "ANT"
+    },
+    {
+      "label": "新喀里多尼亞",
+      "value": "NCL"
+    },
+    {
+      "label": "新西蘭",
+      "value": "NZL"
+    },
+    {
+      "label": "尼加拉瓜",
+      "value": "NIC"
+    },
+    {
+      "label": "尼日爾",
+      "value": "NER"
+    },
+    {
+      "label": "尼日利亞",
+      "value": "NGA"
+    },
+    {
+      "label": "紐埃",
+      "value": "NIU"
+    },
+    {
+      "label": "諾福克島",
+      "value": "NFK"
+    },
+    {
+      "label": "北馬里亞納群島",
+      "value": "MNP"
+    },
+    {
+      "label": "挪威",
+      "value": "NOR"
+    },
+    {
+      "label": "阿曼",
+      "value": "OMN"
+    },
+    {
+      "label": "巴基斯坦",
+      "value": "PAK"
+    },
+    {
+      "label": "帕勞群島",
+      "value": "PLW"
+    },
+    {
+      "label": "巴勒斯坦佔領區",
+      "value": "PSE"
+    },
+    {
+      "label": "巴拿馬",
+      "value": "PAN"
+    },
+    {
+      "label": "巴布亞新幾內亞",
+      "value": "PNG"
+    },
+    {
+      "label": "巴拉圭",
+      "value": "PRY"
+    },
+    {
+      "label": "秘魯",
+      "value": "PER"
+    },
+    {
+      "label": "菲律賓",
+      "value": "PHL"
+    },
+    {
+      "label": "皮特克恩島",
+      "value": "PCN"
+    },
+    {
+      "label": "波蘭",
+      "value": "POL"
+    },
+    {
+      "label": "葡萄牙",
+      "value": "PRT"
+    },
+    {
+      "label": "赫特河省公國",
+      "value": "HUT"
+    },
+    {
+      "label": "波多黎各",
+      "value": "PRI"
+    },
+    {
+      "label": "卡塔爾",
+      "value": "QAT"
+    },
+    {
+      "label": "韓國",
+      "value": "KOR"
+    },
+    {
+      "label": "科索沃共和國",
+      "value": "XKS"
+    },
+    {
+      "label": "摩爾多瓦",
+      "value": "MDA"
+    },
+    {
+      "label": "南蘇丹共和國",
+      "value": "SSD"
+    },
+    {
+      "label": "留尼汪島",
+      "value": "REU"
+    },
+    {
+      "label": "羅馬尼亞",
+      "value": "ROU"
+    },
+    {
+      "label": "俄羅斯",
+      "value": "RUS"
+    },
+    {
+      "label": "盧旺達",
+      "value": "RWA"
+    },
+    {
+      "label": "聖巴泰勒米島",
+      "value": "BLM"
+    },
+    {
+      "label": "聖赫勒拿島",
+      "value": "SHN"
+    },
+    {
+      "label": "聖基茨及尼維斯",
+      "value": "KNA"
+    },
+    {
+      "label": "聖盧西亞",
+      "value": "LCA"
+    },
+    {
+      "label": "法屬聖馬丁島",
+      "value": "MAF"
+    },
+    {
+      "label": "聖皮埃爾島及密克隆島",
+      "value": "SPM"
+    },
+    {
+      "label": "聖雲仙及格蘭尼丁斯",
+      "value": "VCT"
+    },
+    {
+      "label": "薩摩亞",
+      "value": "WSM"
+    },
+    {
+      "label": "聖馬力諾",
+      "value": "SMR"
+    },
+    {
+      "label": "聖多美及普林西比",
+      "value": "STP"
+    },
+    {
+      "label": "沙特阿拉伯",
+      "value": "SAU"
+    },
+    {
+      "label": "塞內加爾",
+      "value": "SEN"
+    },
+    {
+      "label": "塞爾維亞",
+      "value": "SRB"
+    },
+    {
+      "label": "塞爾維亞及黑山",
+      "value": "SCG"
+    },
+    {
+      "label": "塞舌爾",
+      "value": "SYC"
+    },
+    {
+      "label": "塞拉利昂",
+      "value": "SLE"
+    },
+    {
+      "label": "新加坡",
+      "value": "SGP"
+    },
+    {
+      "label": "荷屬聖馬丁",
+      "value": "SXM"
+    },
+    {
+      "label": "斯洛伐克",
+      "value": "SVK"
+    },
+    {
+      "label": "斯洛文尼亞",
+      "value": "SVN"
+    },
+    {
+      "label": "所羅門群島",
+      "value": "SLB"
+    },
+    {
+      "label": "索馬里",
+      "value": "SOM"
+    },
+    {
+      "label": "南非",
+      "value": "ZAF"
+    },
+    {
+      "label": "南喬治亞島及南桑威奇群島",
+      "value": "SGS"
+    },
+    {
+      "label": "西班牙",
+      "value": "ESP"
+    },
+    {
+      "label": "斯里蘭卡",
+      "value": "LKA"
+    },
+    {
+      "label": "蘇丹",
+      "value": "SDN"
+    },
+    {
+      "label": "蘇里南",
+      "value": "SUR"
+    },
+    {
+      "label": "斯瓦爾巴特群島及揚馬延島",
+      "value": "SJM"
+    },
+    {
+      "label": "斯威士蘭",
+      "value": "SWZ"
+    },
+    {
+      "label": "瑞典",
+      "value": "SWE"
+    },
+    {
+      "label": "瑞士",
+      "value": "CHE"
+    },
+    {
+      "label": "敍利亞",
+      "value": "SYR"
+    },
+    {
+      "label": "塔吉克",
+      "value": "TJK"
+    },
+    {
+      "label": "泰國",
+      "value": "THA"
+    },
+    {
+      "label": "北馬其頓共和國",
+      "value": "MKD"
+    },
+    {
+      "label": "東帝汶",
+      "value": "TLS"
+    },
+    {
+      "label": "多哥",
+      "value": "TGO"
+    },
+    {
+      "label": "托克勞",
+      "value": "TKL"
+    },
+    {
+      "label": "湯加",
+      "value": "TON"
+    },
+    {
+      "label": "特立尼達及多巴哥",
+      "value": "TTO"
+    },
+    {
+      "label": "突尼斯",
+      "value": "TUN"
+    },
+    {
+      "label": "土耳其",
+      "value": "TUR"
+    },
+    {
+      "label": "土庫曼",
+      "value": "TKM"
+    },
+    {
+      "label": "特克斯和凱科斯群島",
+      "value": "TCA"
+    },
+    {
+      "label": "圖瓦盧",
+      "value": "TUV"
+    },
+    {
+      "label": "美屬維爾京群島",
+      "value": "VIR"
+    },
+    {
+      "label": "烏干達",
+      "value": "UGA"
+    },
+    {
+      "label": "烏克蘭",
+      "value": "UKR"
+    },
+    {
+      "label": "阿拉伯聯合酋長國",
+      "value": "ARE"
+    },
+    {
+      "label": "英國",
+      "value": "GBR"
+    },
+    {
+      "label": "坦桑尼亞",
+      "value": "TZA"
+    },
+    {
+      "label": "美國",
+      "value": "USA"
+    },
+    {
+      "label": "美國偏遠小島",
+      "value": "UMI"
+    },
+    {
+      "label": "烏拉圭",
+      "value": "URY"
+    },
+    {
+      "label": "烏茲別克",
+      "value": "UZB"
+    },
+    {
+      "label": "瓦努阿圖",
+      "value": "VUT"
+    },
+    {
+      "label": "委內瑞拉",
+      "value": "VEN"
+    },
+    {
+      "label": "越南",
+      "value": "VNM"
+    },
+    {
+      "label": "瓦利斯和富圖納",
+      "value": "WLF"
+    },
+    {
+      "label": "西撒哈拉",
+      "value": "ESH"
+    },
+    {
+      "label": "也門",
+      "value": "YEM"
+    },
+    {
+      "label": "南斯拉夫",
+      "value": "YUG"
+    },
+    {
+      "label": "贊比亞",
+      "value": "ZMB"
+    },
+    {
+      "label": "津巴布韋",
+      "value": "ZWE"
+    },
+    {
+      "label": "通訊語言",
+      "value": "通訊語言"
+    },
+    {
+      "label": "English",
+      "value": "E"
+    },
+    {
+      "label": "繁體中文",
+      "value": "C"
+    }
+  ]
+}

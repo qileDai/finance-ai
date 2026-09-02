@@ -458,3 +458,30 @@ def resolve_s03_address_country(
     if iso == "CHN" and "中國" in label_set:
         return "中國"
     return names[0] if names else s
+
+
+def icris_country_select_candidates(
+    iso3: str,
+    *,
+    options: list[dict[str, str]] | None = None,
+) -> list[str]:
+    """s03 住址国 / s04 护照签发国下拉候选：ICRIS label → ISO3 → 旧名。"""
+    raw = (iso3 or "CHN").strip() or "CHN"
+    rows = options if options is not None else load_s03_country_options()
+    resolved = resolve_s03_address_country(raw, options=rows)
+    extra_values: list[str] = []
+    for row in rows:
+        if str(row.get("label") or "") == resolved and str(row.get("value") or ""):
+            extra_values.append(str(row["value"]))
+    return list(
+        dict.fromkeys(
+            [
+                resolved,
+                *extra_values,
+                *(
+                    passport_country_option_names(raw)
+                    or ("中国", "中國", "China")
+                ),
+            ]
+        )
+    )

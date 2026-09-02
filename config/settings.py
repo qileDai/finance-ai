@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_api_base: str = "https://ai-yyds.com/v1"
     openai_model: str = "gpt-4o-mini"
-    # 证件看图：建议配置 gpt-4o（中英兼顾）；空则回退 openai_model
+    # 证件看图：证件识别页用 Gemini 3.6 Flash；空则回退 openai_model
     openai_vision_model: str = ""
 
     # 住址中文→英文翻译引擎（证件识别模块的切换按钮：Google / 有道 / DeepL，防止 LLM 翻译不准）
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     youdao_app_secret: str = ""
     # DeepL：Free 版 key 以 :fx 结尾（走 api-free.deepl.com，50万字符/月免费不绑卡）；Pro 版普通 key
     deepl_auth_key: str = ""
-    # 证件识别的 LLM 翻译专用模型（空则回退 OPENAI_MODEL；建议 gpt-4o，比 mini 明显更准）
+    # 证件识别的 LLM 翻译专用模型（空则回退 OPENAI_MODEL；证件页用 Gemini 3.6 Flash）
     translate_model: str = Field(default="", validation_alias="TRANSLATE_MODEL")
 
     # 管理后台登录（空密码则无法登录 /admin）

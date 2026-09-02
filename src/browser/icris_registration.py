@@ -2425,11 +2425,7 @@ class IcrisRegistrationBot:
 
     async def _select_non_hk_country(self, page: "Page", iso3: str = "CHN") -> bool:
         """非香港地址：按住址国家 ISO 选國家／地區。"""
-        from src.materials.countries import (
-            passport_country_option_names,
-            resolve_s03_address_country,
-            load_s03_country_options,
-        )
+        from src.materials.countries import icris_country_select_candidates
 
         country_kws = [
             "国家",
@@ -2439,23 +2435,7 @@ class IcrisRegistrationBot:
             "国家／地区",
             "國家／地區",
         ]
-        resolved = resolve_s03_address_country(iso3 or "CHN")
-        extra_values: list[str] = []
-        for row in load_s03_country_options():
-            if str(row.get("label") or "") == resolved and str(row.get("value") or ""):
-                extra_values.append(str(row["value"]))
-        options = tuple(
-            dict.fromkeys(
-                [
-                    resolved,
-                    *extra_values,
-                    *(
-                        passport_country_option_names(iso3 or "CHN")
-                        or ("中国", "中國", "China")
-                    ),
-                ]
-            )
-        )
+        options = tuple(icris_country_select_candidates(iso3 or "CHN"))
 
         await self._wait_country_select_visible(page, timeout_ms=15000)
         await page.wait_for_timeout(_FORM_PAUSE_MS)
@@ -4598,21 +4578,8 @@ class IcrisRegistrationBot:
 
         return await self._is_identity_proof_step(page)
 
-    def _s03a_url_from_current(self, url: str) -> str:
-        """将 registration/s04.do（或 s03.do）替换为 s03a.do，保留 query。"""
-        u = url or ""
-        if re.search(r"registration/s03a\.do", u, re.I):
-            return u
-        return re.sub(
-            r"(registration/)s0[34](\.do)",
-            r"\1s03a\2",
-            u,
-            count=1,
-            flags=re.I,
-        )
-
     async def _advance_from_identity_to_esubmit(self, page: "Page") -> bool:
-        """s04 点继续并等待进入 s03a；前端未跳转时 reload / 直达 s03a.do。"""
+        """s04 点继续并等待进入 s03a；不拼 URL 强行跳转。"""
         if await self._is_esubmit_terms_step(page):
             return True
         if not self._is_identity_proof_url(page.url) and not await self._is_identity_proof_step(
@@ -4651,31 +4618,11 @@ class IcrisRegistrationBot:
                 break
             await page.wait_for_timeout(600)
 
-        if self._is_identity_proof_url(page.url) and not await self._get_validation_errors(
-            page
-        ):
-            logger.info("s04 仍显示身份证明且无校验，尝试 reload 拉取 s03a")
-            try:
-                await page.reload(wait_until="commit", timeout=60000)
-                await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
-            except Exception as exc:
-                logger.warning("s04→s03a reload 失败: %s", exc)
-            if await self._is_esubmit_terms_step(page):
-                logger.info("reload 后已进入 s03a")
-                return True
-
-            s03a = self._s03a_url_from_current(page.url)
-            if s03a != page.url and re.search(r"registration/s03a\.do", s03a, re.I):
-                logger.info("直达 s03a.do: %s", s03a[:120])
-                try:
-                    await page.goto(s03a, wait_until="commit", timeout=60000)
-                    await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
-                except Exception as exc:
-                    logger.warning("goto s03a 失败: %s", exc)
-                if await self._is_esubmit_terms_step(page):
-                    logger.info("goto s03a 后已进入条款确认页")
-                    return True
-
+        if self._is_identity_proof_url(page.url):
+            logger.warning(
+                "s04 点继续后仍停在身份证明页（不强制跳 s03a） url=%s",
+                page.url[:120],
+            )
         return await self._is_esubmit_terms_step(page)
 
     def _is_identity_proof_url(self, url: str) -> bool:
@@ -5714,8 +5661,8 @@ class IcrisRegistrationBot:
         return False
 
     async def _select_s04_passport_country(self, page: "Page", iso3: str) -> bool:
-        """s04 护照：選護照簽發國家／地區。"""
-        from src.materials.countries import passport_country_option_names
+        """s04 护照：選護照簽發國家／地區（与 s03 非香港住址同一套 ICRIS 选项）。"""
+        from src.materials.countries import icris_country_select_candidates
 
         kws = [
             "護照簽發國家",
@@ -5727,12 +5674,7 @@ class IcrisRegistrationBot:
             "護照簽發",
             "护照签发",
         ]
-        options = tuple(
-            dict.fromkeys(
-                passport_country_option_names(iso3 or "CHN")
-                or ("中国", "中國", "China")
-            )
-        )
+        options = tuple(icris_country_select_candidates(iso3 or "CHN"))
         await page.wait_for_timeout(_FORM_PAUSE_MS)
         for option in options:
             if await self._select_ant_select_by_keywords(page, kws, option):

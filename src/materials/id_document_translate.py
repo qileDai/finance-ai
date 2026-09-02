@@ -75,7 +75,7 @@ def ensure_passport_english_name(name_cn: str, name_en: str) -> str:
     try:
         from src.llm.openai_client import LLMClient
 
-        client = LLMClient()
+        client = LLMClient(model=(settings.translate_model or None))
         data = client.chat_json(
             system=(
                 "你是护照姓名罗马化助手。把中文姓名转为护照常用的英文拼音姓名"
