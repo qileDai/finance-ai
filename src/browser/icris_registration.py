@@ -22,6 +22,7 @@ from src.llm.openai_client import LLMClient
 from src.materials.id_type_classify import (
     normalize_stored_id_type,
     s03_id_type_select_pattern,
+    s04_identity_fill_values,
 )
 
 if TYPE_CHECKING:
@@ -2313,7 +2314,12 @@ class IcrisRegistrationBot:
             return False
 
     async def _select_non_hk_country_china(self, page: "Page") -> bool:
-        """非香港地址：國家／地區选中国（兼容简繁/全称/英文）。"""
+        return await self._select_non_hk_country(page, "CHN")
+
+    async def _select_non_hk_country(self, page: "Page", iso3: str = "CHN") -> bool:
+        """非香港地址：按住址国家 ISO 选國家／地區。"""
+        from src.materials.countries import passport_country_option_names
+
         country_kws = [
             "国家",
             "國家",
@@ -2322,26 +2328,30 @@ class IcrisRegistrationBot:
             "国家／地区",
             "國家／地區",
         ]
-        options = ("中国", "中國", "中華人民共和國", "China")
+        options = tuple(
+            dict.fromkeys(
+                passport_country_option_names(iso3 or "CHN")
+                or ("中国", "中國", "China")
+            )
+        )
 
         await self._wait_country_select_visible(page, timeout_ms=15000)
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
         for option in options:
             if await self._select_ant_select_by_keywords(page, country_kws, option):
-                logger.info("国家/地区已选: %s", option)
+                logger.info("国家/地区已选: %s iso=%s", option, iso3)
                 return True
 
-        # 兜底：rowTitle Playwright 再试一轮
         for option in options:
             if await self._select_dropdown_by_rowtitle_playwright(
                 page, country_kws, option
             ):
-                logger.info("国家/地区兜底已选: %s", option)
+                logger.info("国家/地区兜底已选: %s iso=%s", option, iso3)
                 return True
 
         await self._log_ant_selects(page, "国家/地区失败")
-        logger.warning("国家/地区：未能选中中国（非香港地址）")
+        logger.warning("国家/地区：未能选中 iso=%s options=%s", iso3, options[:4])
         return False
 
     async def _select_dropdown_by_rowtitle_playwright(
@@ -4065,9 +4075,27 @@ class IcrisRegistrationBot:
             applicant = {}
         name_en = applicant.get("name_en", "")
         name_cn = applicant.get("name_cn", "")
-        given, surname = latin_english_given_surname(
-            str(name_en or ""), str(name_cn or "")
-        )
+        if re.search(r"[A-Za-z【\[（(]", str(name_cn or "")):
+            name_cn = "".join(
+                ch for ch in str(name_cn) if "\u4e00" <= ch <= "\u9fff"
+            )
+        surname_stored = str(applicant.get("surname_en") or "").strip()
+        given_stored = str(applicant.get("given_en") or "").strip()
+        if not surname_stored or not given_stored:
+            director_pre = (data.get("directors") or [{}])[0] or {}
+            if isinstance(director_pre, dict):
+                surname_stored = surname_stored or str(
+                    director_pre.get("surname_en") or ""
+                ).strip()
+                given_stored = given_stored or str(
+                    director_pre.get("given_en") or ""
+                ).strip()
+        if surname_stored or given_stored:
+            surname, given = surname_stored, given_stored
+        else:
+            given, surname = latin_english_given_surname(
+                str(name_en or ""), str(name_cn or "")
+            )
         title = applicant.get("title", "Mr")
         proof = data.get("identity_proof") or {}
         if not isinstance(proof, dict):
@@ -4098,8 +4126,24 @@ class IcrisRegistrationBot:
         addr_en = (director.get("address_en", "") or "").strip()
         addr_cn = (director.get("address_cn", "") or "").strip()
         addr_text = addr_en or addr_cn
-        is_hk = detect_hk_address(addr_en, addr_cn)
-        street, region = split_address_street_region(addr_text)
+        street = str(
+            director.get("address_street") or applicant.get("address_street") or ""
+        ).strip()
+        region = str(
+            director.get("address_region") or applicant.get("address_region") or ""
+        ).strip()
+        address_country = str(
+            director.get("address_country") or applicant.get("address_country") or ""
+        ).strip()
+        hk_raw = str(
+            director.get("address_is_hk") or applicant.get("address_is_hk") or ""
+        ).strip().lower()
+        if hk_raw:
+            is_hk = hk_raw in ("1", "true", "yes")
+        else:
+            is_hk = detect_hk_address(addr_en, "")
+        if not street and not region:
+            street, region = split_address_street_region(addr_en or addr_text)
 
         logger.info(
             "开始填写用户资料 (url=%s) 电邮=%s 地址HK=%s street=%s region=%s",
@@ -4185,15 +4229,19 @@ class IcrisRegistrationBot:
 
         # 区/市/省/州/邮递区号
         if is_hk:
-            # HK 分支保持选「香港仔」（注册地址为 HK 时沿用）
-            await _inc(
-                await self._select_ant_select_by_keywords(
+            district = (region or "").strip() or "香港仔"
+            ok_dist = await self._select_ant_select_by_keywords(
+                page,
+                ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
+                district,
+            )
+            if not ok_dist and district != "香港仔":
+                ok_dist = await self._select_ant_select_by_keywords(
                     page,
                     ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"],
                     "香港仔",
-                ),
-                "区/市/省=香港仔",
-            )
+                )
+            await _inc(ok_dist, f"区/市/省={district}")
         elif region:
             # 非香港：文本填入拆分后的区/市/省（如 "Shenzhen City, Guangdong Province"）
             reg_ok = await self._fill_by_placeholder(
@@ -4207,7 +4255,9 @@ class IcrisRegistrationBot:
 
         # 国家/地区（仅非香港地址时选「中国」；不依赖 ant-select 数量门槛）
         if not is_hk:
-            country_ok = await self._select_non_hk_country_china(page)
+            country_ok = await self._select_non_hk_country(
+                page, address_country or "CHN"
+            )
             await _inc(country_ok, "国家/地区")
             if not country_ok:
                 logger.warning(
@@ -4985,6 +5035,13 @@ class IcrisRegistrationBot:
             ),
             "PASSPORT": r"護照號碼|护照号码|^護照$|^护照$|護照|护照",
         }
+        issuing_country = str(
+            proof.get("issuing_country")
+            or applicant.get("issuing_country")
+            or founder.get("issuing_country")
+            or ""
+        ).strip()
+
         id_type_pat = type_labels.get(id_type, type_labels["PRC_ID"])
         if proof.get("id_type_label"):
             id_type_pat = re.escape(str(proof["id_type_label"]))
@@ -5008,6 +5065,7 @@ class IcrisRegistrationBot:
         return {
             "id_type": id_type,
             "id_number": id_number,
+            "issuing_country": issuing_country,
             "id_type_pat": id_type_pat,
             "submission_pat": submission_pat,
             "online_pat": online_pat,
@@ -5406,6 +5464,147 @@ class IcrisRegistrationBot:
             logger.warning("s04 证件类型正则选择失败: %s", exc)
         return False
 
+    async def _fill_s04_hkid_pair(
+        self, page: "Page", main: str, check: str
+    ) -> bool:
+        """s04 港证：第一框主体、括号内第二框校验位。禁止整串含括号写入第一框。"""
+        main = (main or "").strip()
+        check = (check or "").strip()
+        if not main:
+            return False
+        ok = await page.evaluate(
+            """({ main, check }) => {
+                const setNative = (el, v) => {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype, 'value'
+                    ).set;
+                    el.focus();
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const vis = (el) => {
+                    if (!el || el.disabled) return false;
+                    const t = (el.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden','radio','checkbox','file','submit','button'].includes(t))
+                        return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const textInputs = (root) => [...(root || document).querySelectorAll(
+                    'input:not([disabled])'
+                )].filter(vis);
+
+                const markers = [...document.querySelectorAll(
+                    'label, span, div, td, th, p, li, .ant-radio-wrapper'
+                )];
+                let block = null;
+                for (const el of markers) {
+                    const t = (el.innerText || '').replace(/\\s+/g, '');
+                    if (!t || t.length > 60) continue;
+                    if (!/香港身分[證证証]號碼|香港身份[證证]号码/.test(t)) continue;
+                    let n = el;
+                    for (let i = 0; i < 10 && n; i++) {
+                        const found = textInputs(n);
+                        if (found.length >= 2) { block = n; break; }
+                        if (found.length >= 1 && !block) block = n;
+                        n = n.parentElement;
+                    }
+                    if (block && textInputs(block).length >= 1) break;
+                }
+                const inputs = textInputs(block || document.body);
+                if (!inputs.length) return false;
+                const pair = inputs.length >= 2 ? inputs.slice(0, 2) : [inputs[0]];
+                setNative(pair[0], main);
+                if (check && pair[1]) setNative(pair[1], check);
+                return pair[0].value === main && (
+                    !check || !pair[1] || pair[1].value === check
+                );
+            }""",
+            {"main": main, "check": check},
+        )
+        if ok:
+            logger.info("s04 港证已拆填 main=%s check=%s", main, check)
+            return True
+        loc = page.locator(
+            "xpath=//label[contains(.,'香港身分證') or contains(.,'香港身分证')"
+            " or contains(.,'香港身份证')]"
+            "/following::input[not(@type='hidden') and not(@type='radio')"
+            " and not(@type='checkbox') and not(@type='file')]"
+        )
+        try:
+            n = await loc.count()
+            if n >= 1:
+                await loc.nth(0).fill(main)
+                await loc.nth(0).dispatch_event("input")
+                await loc.nth(0).dispatch_event("change")
+                if check and n >= 2:
+                    await loc.nth(1).fill(check)
+                    await loc.nth(1).dispatch_event("input")
+                    await loc.nth(1).dispatch_event("change")
+                logger.info("s04 港证 xpath 已拆填 main=%s check=%s", main, check)
+                return True
+        except Exception as exc:
+            logger.warning("s04 港证拆填失败: %s", exc)
+        return False
+
+    async def _fill_s04_single_number(self, page: "Page", number: str) -> bool:
+        """s04 内地证/护照：整号填一个框。"""
+        number = (number or "").strip()
+        if not number:
+            return False
+        for pat in (
+            r"護照號碼|护照号码|身分證號碼|身份证号码|證件號碼|证件号码",
+            r"號碼|号码|Number|Passport",
+        ):
+            if await self._fill_by_placeholder(page, pat, number):
+                return True
+            if await self._fill_enabled_field_by_label(page, pat, number):
+                return True
+        for sel in (
+            "input[name*='idNo' i]",
+            "input[id*='idNo' i]",
+            "input[name*='idNum' i]",
+            "input[name*='passport' i]",
+            "input[placeholder*='號碼' i]",
+            "input[placeholder*='号码' i]",
+        ):
+            if await self._fill_native_input(page, sel, number):
+                return True
+        return False
+
+    async def _select_s04_passport_country(self, page: "Page", iso3: str) -> bool:
+        """s04 护照：選護照簽發國家／地區。"""
+        from src.materials.countries import passport_country_option_names
+
+        kws = [
+            "護照簽發國家",
+            "护照签发国家",
+            "護照簽發國家／地區",
+            "護照簽發國家/地區",
+            "护照签发国家/地区",
+            "护照签发国家／地区",
+            "護照簽發",
+            "护照签发",
+        ]
+        options = tuple(
+            dict.fromkeys(
+                passport_country_option_names(iso3 or "CHN")
+                or ("中国", "中國", "China")
+            )
+        )
+        await page.wait_for_timeout(_FORM_PAUSE_MS)
+        for option in options:
+            if await self._select_ant_select_by_keywords(page, kws, option):
+                logger.info("s04 护照签发国已选: %s iso=%s", option, iso3)
+                return True
+        for option in options:
+            if await self._select_dropdown_by_rowtitle_playwright(page, kws, option):
+                logger.info("s04 护照签发国兜底已选: %s iso=%s", option, iso3)
+                return True
+        logger.warning("s04 护照签发国未选中 iso=%s options=%s", iso3, options[:4])
+        return False
+
     async def _fill_identity_proof_step(self, page: "Page", data: dict[str, Any]) -> int:
         """填写身份证明（s04）：证件类型 / 号码 / 证明文件提交方式"""
         if self._identity_proof_filled and await self._is_identity_proof_step(page):
@@ -5446,33 +5645,27 @@ class IcrisRegistrationBot:
                 proof["id_type_pat"],
             )
 
-        # 选择证件类型后可能出现号码输入框
+        # 选择证件类型后出现号码输入框：港证拆两框，护照填号+签发国，内地证整号
         id_ok = False
-        for pat in (
-            r"身分證號碼|身份证号码|護照號碼|护照号码|證件號碼|证件号码|身分證明|身份证明",
-            r"號碼|号码|Number",
-        ):
-            if await self._fill_by_placeholder(page, pat, proof["id_number"]):
-                id_ok = True
-                break
-            if await self._fill_enabled_field_by_label(page, pat, proof["id_number"]):
-                id_ok = True
-                break
-        if not id_ok:
-            for sel in (
-                "input[name*='idNo' i]",
-                "input[id*='idNo' i]",
-                "input[name*='idNum' i]",
-                "input[name*='passport' i]",
-                "input[placeholder*='號碼' i]",
-                "input[placeholder*='号码' i]",
-            ):
-                if await self._fill_native_input(page, sel, proof["id_number"]):
-                    id_ok = True
-                    break
+        fill_plan = s04_identity_fill_values(
+            proof["id_type"],
+            proof["id_number"],
+            str(proof.get("issuing_country") or ""),
+        )
+        if fill_plan["id_type"] == "HKID":
+            id_ok = await self._fill_s04_hkid_pair(
+                page, fill_plan["hkid_main"], fill_plan["hkid_check"]
+            )
+        else:
+            id_ok = await self._fill_s04_single_number(page, fill_plan["number"])
+            if fill_plan["id_type"] == "PASSPORT":
+                if await self._select_s04_passport_country(
+                    page, fill_plan["passport_country_iso"] or "CHN"
+                ):
+                    filled += 1
         if id_ok:
             filled += 1
-            logger.info("身份证明号码已填写")
+            logger.info("身份证明号码已填写 type=%s", fill_plan["id_type"])
         else:
             logger.debug("未找到身份证明号码输入框（部分类型可能无需填写）")
 
@@ -5531,6 +5724,10 @@ class IcrisRegistrationBot:
             str(applicant.get("name_en") or ""),
             str(applicant.get("name_cn") or ""),
         )
+        surname_stored = str(applicant.get("surname_en") or "").strip()
+        given_stored = str(applicant.get("given_en") or "").strip()
+        if surname_stored or given_stored:
+            surname, given = surname_stored, given_stored
         name_en_fill = f"{surname} {given}".strip() if (surname or given) else ""
         field_map = [
             (["title", "salutation", "稱謂"], applicant.get("title", "Mr")),

@@ -243,12 +243,25 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
     person = _director_name(materials)
     person_cn = _get_val(materials, "director_name_cn")
     person_en = _get_val(materials, "director_name_en")
+    surname_en = _get_val(materials, "director_surname_en")
+    given_en = _get_val(materials, "director_given_en")
+    if surname_en or given_en:
+        person_en = f"{surname_en} {given_en}".strip()
+    if person_cn and re.search(r"[A-Za-z【\[（(]", person_cn):
+        person_cn = "".join(ch for ch in person_cn if "\u4e00" <= ch <= "\u9fff")
     if not person_cn and not person_en:
         person_cn, person_en = _split_cjk_latin_name(person)
-    elif not person_cn or not person_en:
+    elif not person_cn:
         split_cn, split_en = _split_cjk_latin_name(person)
-        person_cn = person_cn or split_cn
+        person_cn = split_cn
         person_en = person_en or split_en
+    elif not person_en and not surname_en:
+        split_cn, split_en = _split_cjk_latin_name(person)
+        person_en = split_en
+    address_street = _get_val(materials, "director_address_street")
+    address_region = _get_val(materials, "director_address_region")
+    address_country = _get_val(materials, "address_country")
+    address_is_hk = _get_val(materials, "address_is_hk")
     # 纯中文名 → 拼音只用于生成用户名，不写入 name_en（S03 不应填英文姓/名）
     username_en = person_en
     if not username_en and person_cn:
@@ -319,6 +332,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "name_cn": person_cn,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "address_street": address_street,
+                    "address_region": address_region,
+                    "address_country": address_country,
+                    "address_is_hk": address_is_hk,
+                    "surname_en": surname_en,
+                    "given_en": given_en,
                     "id_type": _get_val(materials, "id_type"),
                     "id_number": _get_val(materials, "id_number"),
                     "issuing_country": _get_val(materials, "issuing_country"),
@@ -336,6 +355,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "email": contact_email,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "address_street": address_street,
+                    "address_region": address_region,
+                    "address_country": address_country,
+                    "address_is_hk": address_is_hk,
+                    "surname_en": surname_en,
+                    "given_en": given_en,
                     "id_type": _get_val(materials, "id_type"),
                     "id_number": _get_val(materials, "id_number"),
                     "issuing_country": _get_val(materials, "issuing_country"),
@@ -365,6 +390,12 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             "id_type": _get_val(materials, "id_type"),
             "id_number": _get_val(materials, "id_number"),
             "issuing_country": _get_val(materials, "issuing_country"),
+            "surname_en": surname_en,
+            "given_en": given_en,
+            "address_street": address_street,
+            "address_region": address_region,
+            "address_country": address_country,
+            "address_is_hk": address_is_hk,
         },
         "identity_proof": {
             "id_type": _get_val(materials, "id_type") or "PRC_ID",

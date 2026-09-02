@@ -69,21 +69,27 @@ function looksLikeEnglishAddress(s: string): boolean {
 }
 
 /**
- * 检测是否香港地址：含 香港/Hong Kong/Kowloon/九龍/新界 → True。
- * 与后端 src.browser.icris_registration.detect_hk_address 同款逻辑。
+ * 检测是否香港地址：仅看董事个人住址关键字（与后端 english_address_is_hk 一致）。
  */
-function detectHkAddress(cn: string, en: string): boolean {
-  const addr = `${en || ""} ${cn || ""}`.toLowerCase();
-  const keywords = [
-    "hong kong",
-    "kowloon",
-    "new territories",
-    "香港",
-    "九龍",
-    "九龙",
-    "新界",
-  ];
-  return keywords.some((k) => addr.includes(k));
+const HK_EN_RE =
+  /\bhong\s*kong\b|\bkowloon\b|new\s*territories|\bhksar\b|hk\s*island|\bN\.?\s*T\.?\b|tin\s*shui\s*wai|yuen\s*long|tuen\s*mun|sha\s*tin|kwun\s*tong|tsuen\s*wan|kwai\s*chung|tai\s*po|fanling|sheung\s*shui|tseung\s*kwan\s*o|sai\s*kung|tung\s*chung|mong\s*kok|tsim\s*sha\s*tsui|sham\s*shui\s*po|wong\s*tai\s*sin|causeway\s*bay|wan\s*chai|\baberdeen\b/i;
+const HK_CN_RE = /香港|九[龍龙]|新界/;
+
+function detectHkAddressEn(en: string): boolean {
+  return HK_EN_RE.test(en || "");
+}
+
+function detectHkAddressCn(cn: string): boolean {
+  return HK_CN_RE.test(cn || "");
+}
+
+function isLocalHkAddress(fields: Record<string, string>): boolean {
+  if (fields.address_is_hk === "1") return true;
+  if (fields.address_is_hk === "0") return false;
+  return (
+    detectHkAddressEn(fields.director_address_en || "") ||
+    detectHkAddressCn(fields.director_address_cn || "")
+  );
 }
 
 /**
@@ -99,8 +105,8 @@ function parseRegistrationText(raw: string): Record<string, string> {
 
   // 行首（去掉 "1、" "2." "(3)" 等编号后）匹配关键字
   const rules: { field: string; pattern: RegExp }[] = [
-    { field: "director_address_cn", pattern: /^(住址中文|住址（中文）|中文住址)/ },
-    { field: "director_address_en", pattern: /^(住址英文|住址（英文）|英文住址)/ },
+    { field: "director_address_cn", pattern: /^(住址中文|住址（中文）|中文住址|地址中文|中文地址|地址（中文）)/ },
+    { field: "director_address_en", pattern: /^(住址英文|住址（英文）|英文住址|地址英文|英文地址|地址（英文）)/ },
     { field: "company_name_cn", pattern: /^(公司中文名|公司中文名称|中文名)/ },
     { field: "company_name_en", pattern: /^(公司英文名|公司英文名称|英文名)/ },
     { field: "registered_capital", pattern: /^(注册资本|註冊資本)/ },
@@ -117,7 +123,11 @@ function parseRegistrationText(raw: string): Record<string, string> {
 
   // 已知关键字集合：用于判断「注册地址」后下一行是否为新字段
   const knownKeyRe =
-    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|註冊資本|经营范围|經營範圍|业务范围|業務範圍|董事|股东|股東|香港身份证|香港身分證|香港身分证|身份证号?码?|身分證|证件号|證件號|护照号|護照號|注册地址|註冊地址|公司名称|公司名稱|联络邮箱|聯絡郵箱|邮箱|电邮|電郵|注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
+    /^(住址中文|住址英文|住址（中文|住址（英文|中文住址|英文住址|地址中文|地址英文|地址（中文|地址（英文|中文地址|英文地址|住址|居住地址|地址|公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|注册资本|註冊資本|经营范围|經營範圍|业务范围|業務範圍|董事|股东|股東|香港身份证|香港身分證|香港身分证|身份证号?码?|身分證|证件号|證件號|护照号|護照號|注册地址|註冊地址|公司名称|公司名稱|联络邮箱|聯絡郵箱|邮箱|电邮|電郵|注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址|室[／/]楼|大厦|大廈|大楼|大樓|街道|区|區)/;
+  const officeLabelRe =
+    /^(注册地址|註冊地址|注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址)/;
+  const directorAddrLineRe =
+    /^(?:住址中文|住址英文|住址（中文）|住址（英文）|中文住址|英文住址|地址中文|地址英文|地址（中文）|地址（英文）|中文地址|英文地址|居住地址|住址|地址)(?:\s*[（(][^）)]+[）)])?\s*[:：]?\s*(.*)$/;
 
   function stripLeadingNumber(s: string): string {
     return s.replace(/^\s*\d+\s*[、.）)]\s*/, "").trim();
@@ -148,12 +158,10 @@ function parseRegistrationText(raw: string): Record<string, string> {
       continue;
     }
 
-    if (/^(注册地址|註冊地址|注册办事处|註冊辦事處|建议地址|建議地址)/.test(stripped)) {
+    if (officeLabelRe.test(stripped)) {
       const after = stripped
-        .replace(
-          /^(注册地址|註冊地址|注册办事处|註冊辦事處|建议地址|建議地址)\s*[:：]?\s*/,
-          ""
-        )
+        .replace(officeLabelRe, "")
+        .replace(/^[:：]\s*/, "")
         .trim();
       if (after) {
         if (looksLikeEnglishAddress(after)) result.registered_office_en = after;
@@ -174,14 +182,9 @@ function parseRegistrationText(raw: string): Record<string, string> {
       continue;
     }
 
-    const addrGeneric = stripped.match(
-      /^(住址|居住地址)(?:\s*[（(][^）)]+[）)])?\s*[:：]?\s*(.*)$/
-    );
-    if (
-      addrGeneric &&
-      !/^(住址中文|住址英文|住址（中文）|住址（英文）)/.test(stripped)
-    ) {
-      const val = (addrGeneric[2] || "").trim();
+    const addrLine = stripped.match(directorAddrLineRe);
+    if (addrLine && !officeLabelRe.test(stripped)) {
+      const val = (addrLine[1] || "").trim();
       if (val) {
         if (looksLikeEnglishAddress(val)) result.director_address_en = val;
         else result.director_address_cn = val;
@@ -343,16 +346,35 @@ export function RegisterPage({ onToast }: Props) {
       const nextIdType = parsed.id_type || "";
       const rest = { ...parsed };
       delete rest.id_type;
-      setFields((p) => ({ ...p, ...rest }));
+      const officeKeep: Record<string, string> = {};
+      for (const k of [
+        "office_flat_floor",
+        "office_building",
+        "office_street",
+        "office_district",
+      ]) {
+        if ((fields[k] || "").trim()) officeKeep[k] = fields[k];
+      }
+      setIdFile(undefined);
+      setTaiwanIdFile(undefined);
+      setIdTypeUserEdited(false);
+      setIdTypeFromTextLlm(false);
+      setTaiwanPassport(Boolean(taiwan));
+      setFields({
+        registered_capital: rest.registered_capital || "1万港币",
+        ...(defaultEmail ? { contact_email: defaultEmail } : {}),
+        ...officeKeep,
+        ...rest,
+      });
       if (
-        !idTypeUserEdited &&
         nextIdType &&
         ID_TYPE_OPTIONS.some((o) => o.value === nextIdType)
       ) {
         setIdType(nextIdType);
         setIdTypeFromTextLlm(true);
+      } else {
+        setIdType("PRC_ID");
       }
-      if (taiwan) setTaiwanPassport(true);
       messageApi.success(`已填充 ${fillKeys.length || 1} 项`);
     } finally {
       setParsing(false);
@@ -448,8 +470,6 @@ export function RegisterPage({ onToast }: Props) {
         id_type_user_edited: idTypeUserEdited ? "1" : "0",
         taiwan_passport: taiwanPassport ? "1" : "0",
       };
-      delete payload.director_name_cn;
-      delete payload.director_name_en;
       const res = await api.registerRunner.submit(payload, files, dryRun);
       onToast(
         res.job_id
@@ -541,24 +561,98 @@ export function RegisterPage({ onToast }: Props) {
                 {f.key === "director_address_en" &&
                 (fields.director_address_cn || fields.director_address_en) ? (
                   <small
-                    className={
-                      detectHkAddress(
-                        fields.director_address_cn || "",
-                        fields.director_address_en || ""
-                      )
-                        ? "badge ok"
-                        : "badge warn"
-                    }
+                    className={isLocalHkAddress(fields) ? "badge ok" : "badge warn"}
                   >
-                    {detectHkAddress(
-                      fields.director_address_cn || "",
-                      fields.director_address_en || ""
-                    )
+                    {isLocalHkAddress(fields)
                       ? "香港地址（本地地址）"
-                      : "非香港地址 · 国家/地区=中国"}
+                      : `非香港地址 · 国家=${
+                          countryLabel(
+                            PASSPORT_COUNTRIES.find(
+                              (c) => c.code === (fields.address_country || "CHN")
+                            ) || PASSPORT_COUNTRIES[0]
+                          ) || fields.address_country || "中国"
+                        }`}
                   </small>
                 ) : null}
               </label>
+              {f.key === "director_name" ? (
+                <div className="reg-id-row with-country">
+                  <label className="reg-field">
+                    <span>中文姓名</span>
+                    <input
+                      type="text"
+                      value={fields.director_name_cn || ""}
+                      onChange={(e) => setField("director_name_cn", e.target.value)}
+                      disabled={submitting}
+                    />
+                  </label>
+                  <label className="reg-field">
+                    <span>英文姓氏</span>
+                    <input
+                      type="text"
+                      value={fields.director_surname_en || ""}
+                      onChange={(e) =>
+                        setField("director_surname_en", e.target.value)
+                      }
+                      disabled={submitting}
+                    />
+                  </label>
+                  <label className="reg-field">
+                    <span>英文名字</span>
+                    <input
+                      type="text"
+                      value={fields.director_given_en || ""}
+                      onChange={(e) =>
+                        setField("director_given_en", e.target.value)
+                      }
+                      disabled={submitting}
+                    />
+                  </label>
+                </div>
+              ) : null}
+              {f.key === "director_address_en" ? (
+                <div className="reg-id-row with-country">
+                  <label className="reg-field">
+                    <span>街道／屋苑／地段／村</span>
+                    <input
+                      type="text"
+                      value={fields.director_address_street || ""}
+                      onChange={(e) =>
+                        setField("director_address_street", e.target.value)
+                      }
+                      disabled={submitting}
+                    />
+                  </label>
+                  <label className="reg-field">
+                    <span>区／市／省／州／邮递区号</span>
+                    <input
+                      type="text"
+                      value={fields.director_address_region || ""}
+                      onChange={(e) =>
+                        setField("director_address_region", e.target.value)
+                      }
+                      disabled={submitting}
+                    />
+                  </label>
+                  <label className="reg-field">
+                    <span>住址国家</span>
+                    <Select
+                      showSearch
+                      allowClear
+                      optionFilterProp="label"
+                      placeholder="搜索国家"
+                      value={fields.address_country || undefined}
+                      onChange={(v) => setField("address_country", v || "")}
+                      disabled={submitting}
+                      options={PASSPORT_COUNTRIES.map((c) => ({
+                        value: c.code,
+                        label: countryLabel(c),
+                      }))}
+                      style={{ width: "100%" }}
+                    />
+                  </label>
+                </div>
+              ) : null}
               {f.key === "director_name" ? (
                 <div
                   className={

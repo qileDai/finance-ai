@@ -245,6 +245,55 @@ def is_taiwan_issuing(raw: str) -> bool:
     return "台湾" in s or "台灣" in s or "臺灣" in s or "中華民國" in s or "中华民国" in s
 
 
+_HK_MO_TW_ISO = frozenset({"HKG", "MAC", "TWN"})
+_MACAU_TOKENS = frozenset(
+    {
+        "MAC",
+        "MACAO",
+        "MACAU",
+        "MO",
+        "澳门",
+        "澳門",
+        "中国澳门",
+        "中國澳門",
+    }
+)
+
+
+def is_macao_address_country(raw: str) -> bool:
+    s = (raw or "").strip()
+    if not s:
+        return False
+    key = s.upper().replace(" ", "")
+    if key in _MACAU_TOKENS or s in _MACAU_TOKENS:
+        return True
+    return "澳门" in s or "澳門" in s or "macao" in s.lower() or "macau" in s.lower()
+
+
+def normalize_address_country(raw: str) -> str:
+    """住址国家 → ISO3。内地/香港/澳门/台湾一律 CHN。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if is_taiwan_issuing(s) or is_macao_address_country(s):
+        return "CHN"
+    key = s.upper().replace(" ", "")
+    if key in _HK_MO_TW_ISO:
+        return "CHN"
+    if "HONGKONG" in key or "HONG KONG" in s.upper() or "香港" in s:
+        # 单独「香港」当住址国 → CHN；整段英文住址另由 is_hk 判定
+        if key in ("HK", "HKG", "HONGKONG") or s.strip() in (
+            "香港",
+            "Hong Kong",
+            "hong kong",
+        ):
+            return "CHN"
+    iso = normalize_issuing_iso(s)
+    if iso in _HK_MO_TW_ISO:
+        return "CHN"
+    return iso
+
+
 def normalize_issuing_iso(raw: str) -> str:
     """签发国 → ISO3。台湾映射 CHN。无法识别返回空。"""
     s = (raw or "").strip()

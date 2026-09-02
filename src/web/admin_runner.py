@@ -35,6 +35,12 @@ TEXT_FIELDS = (
     "id_number",
     "director_address_cn",
     "director_address_en",
+    "director_address_street",
+    "director_address_region",
+    "address_country",
+    "address_is_hk",
+    "director_surname_en",
+    "director_given_en",
     "office_flat_floor",
     "office_building",
     "office_street",
@@ -164,7 +170,20 @@ def parse_paste_text(*, text: str = "") -> tuple[dict[str, Any], int]:
     result = parse_quick_register_text(blob)
     source = result.pop("source", "") if isinstance(result, dict) else ""
     taiwan = bool(result.pop("taiwan_passport", False)) if isinstance(result, dict) else False
-    fields = {k: v for k, v in (result or {}).items() if k != "source" and k != "taiwan_passport"}
+    fields: dict[str, str] = {}
+    for k, v in (result or {}).items():
+        if k in ("source", "taiwan_passport"):
+            continue
+        if v is True:
+            fields[k] = "1"
+        elif v is False:
+            fields[k] = "0"
+        elif v is None:
+            continue
+        else:
+            s = str(v).strip()
+            if s or k == "address_is_hk":
+                fields[k] = s if s else "0"
     if not fields and not taiwan:
         return {
             "ok": False,
@@ -601,6 +620,37 @@ def submit(
     if id_type not in ICRIS_ID_TYPES:
         id_type = normalize_stored_id_type(id_type, id_number)
     fields["id_type"] = id_type
+
+    from src.materials.address_classify import classify_director_address
+    from src.materials.countries import normalize_address_country
+    from src.materials.name_classify import classify_director_name
+
+    addr_en = (fields.get("director_address_en") or "").strip()
+    addr_cn = (fields.get("director_address_cn") or "").strip()
+    need_addr = (addr_en or addr_cn) and (
+        not str(fields.get("director_address_street") or "").strip()
+        or str(fields.get("address_is_hk") or "") not in ("0", "1")
+    )
+    if need_addr:
+        addr = classify_director_address(addr_en, addr_cn)
+        for k, v in addr.items():
+            if k == "address_is_hk" or (v and not str(fields.get(k) or "").strip()):
+                fields[k] = str(v)
+    if fields.get("address_country"):
+        iso = normalize_address_country(fields["address_country"])
+        if iso:
+            fields["address_country"] = iso
+    raw_name = (fields.get("director_name") or "").strip()
+    if raw_name:
+        need_cn = not (fields.get("director_name_cn") or "").strip()
+        need_en = bool(re.search(r"[A-Za-z]", raw_name)) and not (
+            fields.get("director_surname_en") or ""
+        ).strip()
+        if need_cn or need_en:
+            named = classify_director_name(raw_name)
+            for k, v in named.items():
+                if v and not str(fields.get(k) or "").strip():
+                    fields[k] = v
 
     # 空邮箱回退环境变量
     if not (fields.get("contact_email") or "").strip():

@@ -196,6 +196,41 @@ def split_hkid_number(id_number: str) -> tuple[str, str]:
     return s, ""
 
 
+def s04_identity_fill_values(
+    id_type: str, id_number: str, issuing_country: str = ""
+) -> dict[str, str]:
+    """s04：港证拆主体/校验位；护照填号+签发国 ISO；内地证整号单框。"""
+    from src.materials.countries import normalize_issuing_iso
+
+    t = normalize_stored_id_type(id_type, id_number)
+    num = (id_number or "").strip()
+    if t == "HKID":
+        main, check = split_hkid_number(num)
+        return {
+            "id_type": "HKID",
+            "hkid_main": main,
+            "hkid_check": check,
+            "number": "",
+            "passport_country_iso": "",
+        }
+    if t == "PASSPORT":
+        iso = normalize_issuing_iso(issuing_country)
+        return {
+            "id_type": "PASSPORT",
+            "hkid_main": "",
+            "hkid_check": "",
+            "number": num,
+            "passport_country_iso": iso,
+        }
+    return {
+        "id_type": "PRC_ID",
+        "hkid_main": "",
+        "hkid_check": "",
+        "number": num,
+        "passport_country_iso": "",
+    }
+
+
 def nnc1_identity_fill_plan(
     id_type: str, id_number: str, issuing_country: str = ""
 ) -> dict[str, str]:

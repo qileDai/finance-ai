@@ -448,6 +448,50 @@ class LLMClient:
             return {}
         return coerce_parse_result(data, source_text=blob)
 
+    def classify_director_address(self, address_en: str) -> dict:
+        """只根据住址英文拆街道/区省市并判定香港与住址国。"""
+        from src.materials.address_classify import (
+            CLASSIFY_ADDRESS_SYSTEM,
+            classify_address_user_prompt,
+            coerce_address_result,
+        )
+
+        en = (address_en or "").strip()
+        if not en:
+            return coerce_address_result({}, "")
+        try:
+            data = self.chat_json(
+                CLASSIFY_ADDRESS_SYSTEM,
+                classify_address_user_prompt(en),
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("住址英文 LLM 判定失败: %s", e)
+            return coerce_address_result({}, en)
+        return coerce_address_result(data, en)
+
+    def classify_director_name(self, raw_name: str) -> dict:
+        """姓名原文 → 中文姓名 / 英文姓氏 / 英文名字。"""
+        from src.materials.name_classify import (
+            CLASSIFY_NAME_SYSTEM,
+            classify_name_user_prompt,
+            coerce_name_result,
+        )
+
+        name = (raw_name or "").strip()
+        if not name:
+            return coerce_name_result({}, "")
+        try:
+            data = self.chat_json(
+                CLASSIFY_NAME_SYSTEM,
+                classify_name_user_prompt(name),
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("姓名 LLM 拆分失败: %s", e)
+            return coerce_name_result({}, name)
+        return coerce_name_result(data, name)
+
     def solve_captcha_from_image(self, image_base64: str, expected_length: int = 5) -> str:
         """使用视觉模型识别 ICRIS 验证码（区分大小写）"""
         response = self.client.chat.completions.create(
