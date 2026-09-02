@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
@@ -140,6 +140,26 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
     return copy;
   }, [items, sortKey, sortAsc]);
 
+  const tableHoldRef = useRef<HTMLDivElement>(null);
+  const [bodyY, setBodyY] = useState<number>();
+  useLayoutEffect(() => {
+    const el = tableHoldRef.current;
+    if (!el) return;
+    const measure = () => {
+      const pag = el.querySelector(".ant-table-pagination") as HTMLElement | null;
+      const header =
+        (el.querySelector(".ant-table-header") as HTMLElement | null) ||
+        (el.querySelector(".ant-table-thead") as HTMLElement | null);
+      const pagH = pag ? pag.offsetHeight + 12 : 56;
+      const headerH = header?.offsetHeight ?? 40;
+      setBodyY(Math.max(120, el.clientHeight - pagH - headerH - 12));
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, [loading, sorted.length]);
+
   function onSearch() {
     setCompanyName(companyInput.trim());
     setDirectorName(directorInput.trim());
@@ -220,6 +240,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       dataIndex: "id",
       key: "id",
       width: 80,
+      fixed: "left" as const,
       render: (id: number) => (
         <Link to={`/jobs/${id}`} onClick={(e) => e.stopPropagation()}>
           #{id}
@@ -452,7 +473,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
   ];
 
   return (
-    <>
+    <div className="jobs-page">
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space wrap size="middle">
           <Input
@@ -528,17 +549,18 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             : "请先点「选择保存文件夹」，再把截图拖到这里或点保存"}
         </div>
       )}
-      <StateBox loading={loading} error={error} empty={!sorted.length}>
-        <Table
-          dataSource={sorted}
-          columns={columns}
-          rowKey="id"
-          size="small"
-          scroll={{ x: "max-content", y: 500 }}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
-          style={{ marginBottom: 20 }}
-        />
-      </StateBox>
-    </>
+      <div className="jobs-table-hold" ref={tableHoldRef}>
+        <StateBox loading={loading} error={error} empty={!sorted.length}>
+          <Table
+            dataSource={sorted}
+            columns={columns}
+            rowKey="id"
+            size="small"
+            scroll={{ x: "max-content", ...(bodyY ? { y: bodyY } : {}) }}
+            pagination={{ pageSize: 10, showSizeChanger: false }}
+          />
+        </StateBox>
+      </div>
+    </div>
   );
 }

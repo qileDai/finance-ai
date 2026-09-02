@@ -130,13 +130,6 @@ export function DraggableShot({
         className="draggable-shot"
         title="拖到下方保存区，或点保存"
         onPointerDown={onPointerDown}
-        onClick={() => {
-          if (skipPreviewRef.current) {
-            skipPreviewRef.current = false;
-            return;
-          }
-          setPreviewOpen(true);
-        }}
       >
         <Image
           src={src}
@@ -146,7 +139,16 @@ export function DraggableShot({
           preview={{
             ...JOB_SHOT_PREVIEW,
             open: previewOpen,
-            onOpenChange: setPreviewOpen,
+            onOpenChange: (open) => {
+              if (open && skipPreviewRef.current) {
+                skipPreviewRef.current = false;
+                return;
+              }
+              skipPreviewRef.current = false;
+              // Portal close clicks bubble to Image onPreview; ignore that reopen.
+              if (open && previewOpen) return;
+              setPreviewOpen(open);
+            },
           }}
         />
       </div>

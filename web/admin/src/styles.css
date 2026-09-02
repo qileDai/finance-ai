@@ -56,7 +56,9 @@ select {
 .app-shell {
   display: grid;
   grid-template-columns: 220px 1fr;
+  height: 100%;
   min-height: 100%;
+  overflow: hidden;
   animation: shell-in 0.35s ease-out;
 }
 
@@ -153,6 +155,8 @@ select {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .topbar {
@@ -184,7 +188,10 @@ select {
 }
 
 .content {
-  padding: 20px 24px 40px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px 20px;
 }
 
 .btn {
@@ -1085,6 +1092,42 @@ table.data tr.clickable:hover td {
   pointer-events: none;
 }
 
+.jobs-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.jobs-page > .ant-card,
+.jobs-page > .shot-save-zone,
+.jobs-page > .ant-alert {
+  flex-shrink: 0;
+}
+
+.jobs-table-hold {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.jobs-table-hold .ant-table-wrapper,
+.jobs-table-hold .ant-spin-nested-loading,
+.jobs-table-hold .ant-spin-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.jobs-table-hold .ant-table-wrapper .ant-table-pagination {
+  flex-shrink: 0;
+  margin-top: 12px !important;
+  margin-bottom: 0 !important;
+}
+
 .shot-save-zone {
   border: 2px dashed var(--line);
   border-radius: 8px;
@@ -1115,12 +1158,7 @@ table.data tr.clickable:hover td {
   transform: translate(-40px, -25px);
 }
 
-.job-shot-preview .ant-image-preview-img-wrapper {
-  pointer-events: none;
-}
-
 .job-shot-preview .ant-image-preview-img {
-  pointer-events: auto;
   max-height: 80vh !important;
   max-width: 90vw !important;
   width: auto !important;
@@ -1131,5 +1169,6 @@ table.data tr.clickable:hover td {
 .job-shot-preview .ant-image-preview-operations,
 .job-shot-preview .ant-image-preview-operations-wrapper {
   pointer-events: auto;
+  z-index: 2;
 }
 

@@ -18,6 +18,8 @@ export function statusBadge(status: string | undefined): string {
 
 export const JOB_SHOT_PREVIEW = {
   rootClassName: "job-shot-preview",
+  maskClosable: true,
+  closable: true,
 } as const;
 
 export function isJobReviewRejected(
