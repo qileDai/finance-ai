@@ -44,7 +44,7 @@ playwright install chromium
 OPENAI_API_KEY=your-key
 OPENAI_API_BASE=https://ai-yyds.com/v1
 OPENAI_MODEL=gpt-4o-mini
-OPENAI_VISION_MODEL=gpt-4o
+OPENAI_VISION_MODEL=gemini-3.6-flash
 DRY_RUN=true
 BROWSER_HEADLESS=false
 ```
@@ -162,3 +162,5 @@ python main.py feishu-bot
 python main.py --step register
 python main.py wework-external-bot
 ```
+python main.py --step nnc1
+python main.py --step nnc1 --job-id 123 --username YOUR_USER --password YOUR_PASS

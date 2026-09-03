@@ -67,21 +67,21 @@
 
 | 项目 | 规则 | 示例 |
 |---|---|---|
-| 用户名 (username) | `Yingtai` + 当前时间戳后4位 | `Yingtai8492` |
-| 密码 (password) | 用户名 + `@` | `Yingtai8492@` |
+| 用户名 (username) | 英文名首字母（小写）+ 证件号后 5 位 + `yt` + 4 位随机 | `yx84927ytk3m9` |
+| 密码 (password) | 用户名 + `@` | `yx84927ytk3m9@` |
 
 **配置项**（`config/settings.py`）：
 
 ```python
-icris_credential_mode: str = "yingtai"       # "yingtai" 新规则 | "legacy" 旧规则
-icris_username_prefix: str = "Yingtai"       # 用户名前缀
-icris_username_timestamp_digits: int = 4     # 时间戳取后 N 位
-icris_password_suffix: str = "@"             # 密码后缀（仅特色字符）
+icris_credential_mode: str = "yingtai"       # "yingtai" initials+id+yt | "legacy" 旧规则
+icris_password_suffix: str = "@"             # 密码后缀（拼在用户名后）
 ```
 
-**密码合规性**：`Yingtai8492@` 满足 ICRIS 密码规则（≥10位、首字母大写、含字母+数字）。
+**示例推导**：姓名 `YAO Xiaojia`、证件 `440514200003184927` → 首字母 `yx` + 后五位 `84927` + `yt` + 4 位随机 → `yx84927ytk3m9` / `yx84927ytk3m9@`（随机部分每次不同）。
 
-**一致性保证**：同一注册流程内，`derive_icris_credentials` 通过 `_icris_session` 缓存保证用户名/密码一致，不会因多次调用而变化。
+**一致性保证**：同一注册流程内，`derive_icris_credentials` 通过 `_icris_session` 缓存保证用户名/密码一致，不会因多次调用而变化。旧 `Yingtai…` 前缀凭证会按上述规则重算。
+
+**Mock 分离**：`data/mock/company_registration.json` 中 `nnc1_mock_account`（如 `KYAUk13579`）**仅**供 `python main.py --step nnc1` 登录已激活账号填表；`python main.py --step register` 登记注册始终按 yingtai 规则生成新用户名（`yt` + 4 位随机），勿混用。
 
 ---
 
