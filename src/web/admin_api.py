@@ -576,7 +576,7 @@ def _handle_jobs_list(
             or applicant.get("name_en")
             or ""
         )
-        row["id_type"] = (
+        row["id_type"] = _id_type_display(
             applicant.get("id_type")
             or director.get("id_type")
             or proof.get("id_type")
@@ -590,6 +590,17 @@ def _handle_jobs_list(
         )
         row["icris_username"] = str(account.get("username") or "")
         row["icris_password"] = str(account.get("password") or "")
+        contact = payload.get("contact") or {}
+        if not isinstance(contact, dict):
+            contact = {}
+        row["contact_email"] = str(
+            contact.get("email") or applicant.get("email") or ""
+        )
+        row["contact_phone"] = str(
+            contact.get("phone") or applicant.get("phone") or ""
+        )
+        row["fields"] = _flatten_payload_fields(payload) if payload else []
+        row["progress"] = job_pipeline_progress(row)
         slim.append(row)
     return _ok(items=slim, status=status or "all", limit=limit)
 
@@ -599,18 +610,38 @@ _FIELD_LABELS: dict[str, str] = {
     "company_name_en": "公司英文名",
     "registered_capital": "注册资本",
     "business_desc": "经营范围",
+    "br_certificate_years": "商业登记证年期",
+    "office.flat_floor": "办事处室/楼/座",
+    "office.building": "办事处大厦",
+    "office.street": "办事处街道",
+    "office.district": "办事处区",
     "registered_office_cn": "注册地址（中文）",
     "registered_office_en": "注册地址（英文）",
     "contact.email": "联络邮箱",
     "contact.phone": "联络电话",
     "director.name": "董事兼股东姓名",
+    "director.name_cn": "董事中文名",
+    "director.name_en": "董事英文名",
+    "director.surname_en": "英文姓",
+    "director.given_en": "英文名",
     "director.id_type": "证件类型",
     "director.id_number": "证件号码",
+    "director.issuing_country": "证件签发地",
     "director.address_cn": "住址（中文）",
     "director.address_en": "住址（英文）",
+    "director.address_country": "住址国家",
+    "director.address_is_hk": "住址是否香港",
     "applicant.name": "申请人姓名",
+    "applicant.name_cn": "申请人中文名",
+    "applicant.name_en": "申请人英文名",
+    "applicant.email": "申请人电邮",
+    "applicant.phone": "申请人电话",
     "applicant.id_type": "申请人证件类型",
     "applicant.id_number": "申请人证件号码",
+    "secretary.name_en": "秘书名称",
+    "secretary.br_number": "秘书商业登记号",
+    "secretary.license_number": "秘书牌照号",
+    "secretary.company_number": "秘书公司编号",
     "icris_account.username": "ICRIS 用户名",
     "icris_account.password": "ICRIS 密码",
     "identity_proof.id_type": "身份证明类型",
@@ -626,12 +657,135 @@ _FIELD_LABELS: dict[str, str] = {
     "issuing_country": "证件签发地",
 }
 
+_ID_TYPE_LABELS = {
+    "PRC_ID": "内地身份证",
+    "HKID": "香港身份证",
+    "PASSPORT": "护照",
+}
+
+PIPELINE_STEPS: tuple[tuple[str, str], ...] = (
+    ("queued", "排队"),
+    ("registering", "注册中"),
+    ("review", "待审核"),
+    ("registered", "注册完成"),
+    ("activating", "待激活"),
+    ("activated", "已激活"),
+    ("form_pending", "待填表"),
+    ("form_filled", "已填表"),
+)
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _norm_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _id_type_display(raw: Any) -> str:
+    text = _norm_text(raw)
+    if not text:
+        return ""
+    return _ID_TYPE_LABELS.get(text, text)
+
+
+def _country_display(raw: Any) -> str:
+    text = _norm_text(raw)
+    if not text:
+        return ""
+    try:
+        from src.materials.countries import country_names, normalize_issuing_iso
+
+        code = normalize_issuing_iso(text) or text.upper()
+        zh, _en = country_names(code)
+        if zh:
+            return f"{zh} ({code})"
+        return text
+    except Exception:
+        return text
+
+
+def _yes_no(raw: Any) -> str:
+    text = _norm_text(raw).lower()
+    if text in ("1", "true", "yes", "y"):
+        return "是"
+    if text in ("0", "false", "no", "n"):
+        return "否"
+    return _norm_text(raw)
+
+
+def job_pipeline_progress(job: dict[str, Any]) -> dict[str, Any]:
+    """由注册/激活/填表状态推导 ICRIS 流程当前步。"""
+    status = str(job.get("status") or "").lower()
+    review = str(job.get("review_status") or "").lower()
+    act = str(job.get("activation_status") or "").lower()
+    form = str(job.get("form_status") or "").lower()
+    last_error = str(job.get("last_error") or "").strip()
+
+    failed = False
+    detail = ""
+    step = "queued"
+    label = "排队"
+
+    if status == "pending":
+        step, label = "queued", "排队"
+    elif status == "running":
+        step, label = "registering", "注册中"
+    elif status == "awaiting_review":
+        step, label = "review", "待审核"
+    elif review == "rejected":
+        failed = True
+        step, label = "review", "已拒绝"
+        detail = last_error
+    elif status == "failed":
+        failed = True
+        step, label = "registering", "已失败"
+        detail = last_error
+    elif status == "cancelled":
+        failed = True
+        step, label = "registering", "已取消"
+        detail = last_error
+    elif status == "succeeded":
+        if form == "filled":
+            step, label = "form_filled", "已填表"
+        elif form == "failed":
+            failed = True
+            step, label = "form_pending", "填表失败"
+            detail = last_error
+        elif form == "pending":
+            step, label = "form_pending", "待填表"
+        elif act == "pending":
+            step, label = "activating", "待激活"
+        elif act == "failed":
+            failed = True
+            step, label = "activating", "激活失败"
+            detail = last_error
+        elif act == "activated":
+            step, label = "activated", "已激活"
+        else:
+            step, label = "registered", "注册完成"
+    else:
+        step, label = "queued", status or "排队"
+
+    return {
+        "step": step,
+        "label": label,
+        "failed": failed,
+        "detail": detail[:300] if detail else "",
+    }
+
 
 def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
     """将 company_data 展平为详情字段（含中文 label）。"""
     fields: list[dict[str, str]] = []
 
-    def add(key: str, value: Any, label: str | None = None) -> None:
+    def add(
+        key: str,
+        value: Any,
+        label: str | None = None,
+        group: str = "company",
+    ) -> None:
         if value is None:
             return
         if isinstance(value, (list, tuple)):
@@ -645,90 +799,160 @@ def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
                 "key": key,
                 "label": label or _FIELD_LABELS.get(key, key),
                 "value": text,
+                "group": group,
             }
         )
 
-    add("company_name_cn", payload.get("company_name_cn"))
-    add("company_name_en", payload.get("company_name_en"))
+    add("company_name_cn", payload.get("company_name_cn"), group="company")
+    add("company_name_en", payload.get("company_name_en"), group="company")
 
     sc = payload.get("share_capital") or {}
     if isinstance(sc, dict) and sc.get("total_shares") is not None:
         cur = str(sc.get("currency") or "HKD")
-        add("registered_capital", f"{sc.get('total_shares')} {cur}")
+        add("registered_capital", f"{sc.get('total_shares')} {cur}", group="company")
     else:
-        add("registered_capital", payload.get("registered_capital"))
+        add("registered_capital", payload.get("registered_capital"), group="company")
 
     add(
         "business_desc",
         payload.get("business_nature_desc") or payload.get("business_desc"),
+        group="company",
     )
+    years = payload.get("br_certificate_years")
+    if years not in (None, ""):
+        add("br_certificate_years", f"{years} 年", group="company")
 
-    office = payload.get("registered_office") or {}
-    if isinstance(office, dict):
+    office = _as_dict(payload.get("registered_office"))
+    if office:
+        add("office.flat_floor", office.get("flat_floor"), group="office")
+        add("office.building", office.get("building"), group="office")
+        add("office.street", office.get("street"), group="office")
+        add("office.district", office.get("district"), group="office")
         add(
             "registered_office_cn",
             office.get("street_cn") or payload.get("registered_office_cn"),
+            group="office",
         )
         add(
             "registered_office_en",
             office.get("street_en")
             or office.get("street")
             or payload.get("registered_office_en"),
+            group="office",
         )
     else:
-        add("registered_office_cn", payload.get("registered_office_cn"))
-        add("registered_office_en", payload.get("registered_office_en"))
+        add("registered_office_cn", payload.get("registered_office_cn"), group="office")
+        add("registered_office_en", payload.get("registered_office_en"), group="office")
 
-    contact = payload.get("contact") or {}
-    if isinstance(contact, dict):
-        add("contact.email", contact.get("email"))
-        add("contact.phone", contact.get("phone"))
+    contact = _as_dict(payload.get("contact"))
+    add("contact.email", contact.get("email"), group="contact")
+    add("contact.phone", contact.get("phone"), group="contact")
 
     directors = payload.get("directors") or []
     director = directors[0] if isinstance(directors, list) and directors else {}
-    if not isinstance(director, dict):
-        director = {}
-    applicant = payload.get("applicant") or {}
-    if not isinstance(applicant, dict):
-        applicant = {}
+    director = _as_dict(director)
+    applicant = _as_dict(payload.get("applicant"))
 
+    name_cn = director.get("name_cn") or applicant.get("name_cn")
+    name_en = director.get("name_en") or director.get("name") or applicant.get("name_en")
+    add("director.name_cn", name_cn, group="director")
+    add("director.name_en", name_en, group="director")
+    if not name_cn and not name_en:
+        add(
+            "director.name",
+            applicant.get("director_name") or applicant.get("name_cn"),
+            group="director",
+        )
     add(
-        "director.name",
-        director.get("name_en")
-        or director.get("name")
-        or director.get("name_cn")
-        or applicant.get("name_cn")
-        or applicant.get("name_en"),
+        "director.surname_en",
+        director.get("surname_en") or applicant.get("surname_en"),
+        group="director",
+    )
+    add(
+        "director.given_en",
+        director.get("given_en") or applicant.get("given_en"),
+        group="director",
     )
     add(
         "director.id_type",
-        applicant.get("id_type") or director.get("id_type"),
+        _id_type_display(applicant.get("id_type") or director.get("id_type")),
+        group="director",
     )
     add(
         "director.id_number",
         applicant.get("id_number") or director.get("id_number"),
+        group="director",
+    )
+    add(
+        "director.issuing_country",
+        _country_display(
+            applicant.get("issuing_country") or director.get("issuing_country")
+        ),
+        group="director",
     )
     add(
         "director.address_cn",
         director.get("address_cn") or applicant.get("address_cn"),
+        group="director",
     )
     add(
         "director.address_en",
         director.get("address_en") or applicant.get("address_en"),
+        group="director",
     )
+    addr_country = director.get("address_country") or applicant.get("address_country")
+    add(
+        "director.address_country",
+        _country_display(addr_country) if addr_country else "",
+        group="director",
+    )
+    hk_flag = director.get("address_is_hk")
+    if hk_flag in (None, ""):
+        hk_flag = applicant.get("address_is_hk")
+    add("director.address_is_hk", _yes_no(hk_flag) if hk_flag not in (None, "") else "", group="director")
 
-    account = payload.get("icris_account") or {}
-    if isinstance(account, dict):
-        add("icris_account.username", account.get("username"))
-        add("icris_account.password", account.get("password"))
+    def _differs(left: Any, right: Any) -> bool:
+        return _norm_text(left).lower() != _norm_text(right).lower() and bool(
+            _norm_text(left)
+        )
 
-    proof = payload.get("identity_proof") or {}
-    if isinstance(proof, dict):
-        add("identity_proof.id_type", proof.get("id_type"))
-        add("identity_proof.id_number", proof.get("id_number"))
-        docs = proof.get("document_files") or []
-        if docs:
-            add("identity_proof.document_files", docs)
+    app_name = (
+        applicant.get("director_name")
+        or applicant.get("name_cn")
+        or applicant.get("name_en")
+    )
+    dir_name = name_cn or name_en
+    if _differs(app_name, dir_name):
+        add("applicant.name", app_name, group="applicant")
+    if _differs(applicant.get("name_cn"), name_cn):
+        add("applicant.name_cn", applicant.get("name_cn"), group="applicant")
+    if _differs(applicant.get("name_en"), name_en):
+        add("applicant.name_en", applicant.get("name_en"), group="applicant")
+    if _differs(applicant.get("email"), contact.get("email") or director.get("email")):
+        add("applicant.email", applicant.get("email"), group="applicant")
+    if _differs(applicant.get("phone"), contact.get("phone")):
+        add("applicant.phone", applicant.get("phone"), group="applicant")
+
+    secretary = _as_dict(payload.get("company_secretary"))
+    add("secretary.name_en", secretary.get("name_en") or secretary.get("name_cn"), group="secretary")
+    add("secretary.br_number", secretary.get("br_number"), group="secretary")
+    add("secretary.license_number", secretary.get("license_number"), group="secretary")
+    add("secretary.company_number", secretary.get("company_number"), group="secretary")
+
+    account = _as_dict(payload.get("icris_account"))
+    add("icris_account.username", account.get("username"), group="icris")
+    add("icris_account.password", account.get("password"), group="icris")
+
+    proof = _as_dict(payload.get("identity_proof"))
+    add(
+        "identity_proof.id_type",
+        _id_type_display(proof.get("id_type")),
+        group="identity",
+    )
+    add("identity_proof.id_number", proof.get("id_number"), group="identity")
+    docs = proof.get("document_files") or []
+    if docs:
+        add("identity_proof.document_files", docs, group="identity")
 
     return fields
 
@@ -804,14 +1028,16 @@ def _handle_job_detail(
             fpath = str(row.get("file_path") or "").strip()
             label = _FIELD_LABELS.get(key, key)
             if fpath:
-                fields.append({"key": key, "label": label, "value": fpath})
+                fields.append({"key": key, "label": label, "value": fpath, "group": "identity"})
             elif val:
-                fields.append({"key": key, "label": label, "value": val})
+                fields.append({"key": key, "label": label, "value": val, "group": "company"})
+    out["progress"] = job_pipeline_progress(out)
     return _ok(
         job=out,
         payload=payload,
         fields=fields,
         messages=messages,
+        progress=out["progress"],
     )
 
 

@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Image, Tag, Button, Modal } from "antd";
+import { Image, Tag, Button, Modal, Tooltip } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import {
+  JOB_FIELD_GROUP_LABELS,
   JOB_SHOT_PREVIEW,
   StateBox,
   jobCanCancel,
   jobCanRequeue,
+  jobProgressTagColor,
+  jobProgressTooltip,
   jobStatusLabel,
   jobStatusTagColor,
 } from "../components/ui";
@@ -151,6 +154,34 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
   const job = detail?.job;
   const fields: JobField[] = detail?.fields || [];
   const messages = normalizeLogLines(detail?.messages);
+  const progress = job?.progress || detail?.progress;
+
+  const groupedFields: { group: string; label: string; items: JobField[] }[] = [];
+  if (fields.length) {
+    const byGroup = new Map<string, JobField[]>();
+    for (const f of fields) {
+      const g = f.group || "company";
+      const list = byGroup.get(g) || [];
+      list.push(f);
+      byGroup.set(g, list);
+    }
+    const order = Object.keys(JOB_FIELD_GROUP_LABELS);
+    const seen = new Set<string>();
+    for (const g of order) {
+      const items = byGroup.get(g);
+      if (!items?.length) continue;
+      seen.add(g);
+      groupedFields.push({
+        group: g,
+        label: JOB_FIELD_GROUP_LABELS[g] || g,
+        items,
+      });
+    }
+    for (const [g, items] of byGroup) {
+      if (seen.has(g) || !items.length) continue;
+      groupedFields.push({ group: g, label: JOB_FIELD_GROUP_LABELS[g] || g, items });
+    }
+  }
 
   return (
     <>
@@ -189,6 +220,19 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
                 <Tag color={jobStatusTagColor(job.status, job.review_status)}>
                   {jobStatusLabel(job.status, job.review_status)}
                 </Tag>
+                {progress?.label ? (
+                  <Tooltip
+                    title={
+                      <span style={{ whiteSpace: "pre-line" }}>
+                        {jobProgressTooltip(progress)}
+                      </span>
+                    }
+                  >
+                    <Tag color={jobProgressTagColor(progress)} style={{ marginLeft: 4 }}>
+                      {progress.label}
+                    </Tag>
+                  </Tooltip>
+                ) : null}
               </h2>
               <dl className="job-meta">
                 <div>
@@ -351,24 +395,21 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
 
             <section className="reg-card">
               <h2>填写字段</h2>
-              {fields.length ? (
-                <div className="table-wrap">
-                  <table className="data">
-                    <thead>
-                      <tr>
-                        <th>字段</th>
-                        <th>值</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {fields.map((f) => (
-                        <tr key={f.key}>
-                          <td>{f.label || f.key}</td>
-                          <td style={{ wordBreak: "break-all" }}>{f.value}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              {groupedFields.length ? (
+                <div className="job-field-groups">
+                  {groupedFields.map((g) => (
+                    <div key={g.group}>
+                      <h3>{g.label}</h3>
+                      <dl className="job-meta">
+                        {g.items.map((f) => (
+                          <div key={f.key}>
+                            <dt>{f.label || f.key}</dt>
+                            <dd style={{ wordBreak: "break-all" }}>{f.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <p className="muted">无字段快照（旧任务可查看会话材料）</p>

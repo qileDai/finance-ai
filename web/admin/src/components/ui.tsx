@@ -76,6 +76,61 @@ export function jobStatusTagColor(
   return map[(status || "").toLowerCase()] || "default";
 }
 
+export const JOB_PIPELINE_STEPS: { step: string; label: string }[] = [
+  { step: "queued", label: "排队" },
+  { step: "registering", label: "注册中" },
+  { step: "review", label: "待审核" },
+  { step: "registered", label: "注册完成" },
+  { step: "activating", label: "待激活" },
+  { step: "activated", label: "已激活" },
+  { step: "form_pending", label: "待填表" },
+  { step: "form_filled", label: "已填表" },
+];
+
+export const JOB_FIELD_GROUP_LABELS: Record<string, string> = {
+  company: "公司",
+  office: "注册办事处",
+  contact: "联络",
+  director: "董事兼股东",
+  applicant: "申请人",
+  secretary: "公司秘书",
+  icris: "ICRIS 账号",
+  identity: "身份证明",
+};
+
+export type JobProgressView = {
+  step?: string;
+  label?: string;
+  failed?: boolean;
+  detail?: string;
+};
+
+export function jobProgressTagColor(p?: JobProgressView | null): string {
+  if (!p?.label) return "default";
+  if (p.failed) return "error";
+  if (p.step === "form_filled" || p.step === "activated" || p.step === "registered") {
+    return "success";
+  }
+  if (
+    p.step === "queued" ||
+    p.step === "registering" ||
+    p.step === "review" ||
+    p.step === "activating" ||
+    p.step === "form_pending"
+  ) {
+    return "processing";
+  }
+  return "default";
+}
+
+export function jobProgressTooltip(p?: JobProgressView | null): string {
+  const chain = JOB_PIPELINE_STEPS.map((s) => s.label).join(" → ");
+  if (!p?.label) return chain;
+  const lines = [`当前：${p.label}`, chain];
+  if (p.detail) lines.push(p.detail);
+  return lines.join("\n");
+}
+
 export function StateBox({
   loading,
   error,

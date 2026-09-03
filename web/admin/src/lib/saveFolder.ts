@@ -5,7 +5,11 @@ const DIR_KEY = "directory";
 export type ShotDirHandle = FileSystemDirectoryHandle;
 
 export function isDirectoryPickerSupported(): boolean {
-  return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+  return (
+    typeof window !== "undefined" &&
+    window.isSecureContext === true &&
+    typeof window.showDirectoryPicker === "function"
+  );
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -143,4 +147,16 @@ export async function fetchShotBlob(src: string): Promise<Blob> {
   const res = await fetch(src, { credentials: "include" });
   if (!res.ok) throw new Error(`截图下载失败 (${res.status})`);
   return res.blob();
+}
+
+export function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = safeFilename(filename);
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, jobCanCancel, jobCanRequeue, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { StateBox, jobCanCancel, jobCanRequeue, jobProgressTagColor, jobProgressTooltip, jobStatusLabel, jobStatusTagColor } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import {
   Alert,
@@ -269,13 +269,6 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       ),
     },
     {
-      title: "来源",
-      dataIndex: "source",
-      key: "source",
-      width: 80,
-      render: (v: string) => v || "-",
-    },
-    {
       title: "公司中文名",
       key: "company_name_cn",
       width: 160,
@@ -324,6 +317,29 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       render: (v: string) => <span className="mono">{v || "-"}</span>,
     },
     {
+      title: "进度",
+      key: "progress",
+      width: 110,
+      render: (_: unknown, r: JobRow) => (
+        <Tooltip
+          title={<span style={{ whiteSpace: "pre-line" }}>{jobProgressTooltip(r.progress)}</span>}
+        >
+          <Tag color={jobProgressTagColor(r.progress)}>{r.progress?.label || "-"}</Tag>
+        </Tooltip>
+      ),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 100,
+      render: (_: unknown, r: JobRow) => (
+        <Tag color={jobStatusTagColor(r.status, r.review_status)}>
+          {jobStatusLabel(r.status, r.review_status)}
+        </Tag>
+      ),
+    },
+    {
       title: "核对截图",
       key: "esubmit_screenshot",
       width: 160,
@@ -362,55 +378,6 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
         ) : (
           "-"
         ),
-    },
-    {
-      title: "激活/填表",
-      dataIndex: "activation_status",
-      key: "activation_form",
-      width: 100,
-      render: (_: unknown, r: JobRow) => {
-        if (r.status !== "succeeded") return "-";
-        const act = r.activation_status || "";
-        const form = r.form_status || "";
-        if (form === "filled") return <Tag color="success">已填表</Tag>;
-        if (form === "failed") return <Tag color="error">填表失败</Tag>;
-        if (form === "pending") return <Tag color="warning">待填表</Tag>;
-        if (act === "activated") return <Tag color="processing">已激活</Tag>;
-        if (act === "pending") return <Tag color="warning">待激活</Tag>;
-        if (act === "failed") return <Tag color="error">激活失败</Tag>;
-        return <Tag>未激活</Tag>;
-      },
-    },
-    {
-      title: "状态",
-      dataIndex: "status",
-      key: "status",
-      width: 100,
-      render: (_: unknown, r: JobRow) => (
-        <Tag color={jobStatusTagColor(r.status, r.review_status)}>
-          {jobStatusLabel(r.status, r.review_status)}
-        </Tag>
-      ),
-    },
-    {
-      title: "尝试",
-      key: "attempts",
-      width: 80,
-      render: (_: unknown, r: JobRow) => (
-        <span className="mono">
-          {r.attempts ?? 0}/{r.max_attempts ?? 0}
-        </span>
-      ),
-    },
-    {
-      title: "dry/submit",
-      key: "dry_submit",
-      width: 100,
-      render: (_: unknown, r: JobRow) => (
-        <span className="mono">
-          {r.dry_run ? "Y" : "N"}/{r.allow_submit ? "Y" : "N"}
-        </span>
-      ),
     },
     {
       title: "错误",
@@ -558,7 +525,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="当前浏览器不支持保存到本地文件夹，请使用 Chrome 或 Edge"
+          message="当前不是安全连接（公网 http 或非 Chrome）。浏览器禁止选择本地文件夹。点「保存」会下载到浏览器默认下载目录；要拖到指定文件夹请用 https 或本机 http://127.0.0.1"
         />
       ) : (
         <div
@@ -579,6 +546,31 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             size="small"
             scroll={{ x: "max-content", ...(bodyY ? { y: bodyY } : {}) }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
+            expandable={{
+              expandedRowRender: (r: JobRow) => (
+                <div className="job-expand">
+                  <div className="job-expand-meta">
+                    来源 {r.source || "-"}
+                    {" · "}
+                    尝试 {r.attempts ?? 0}/{r.max_attempts ?? 0}
+                    {" · "}
+                    dry/submit {r.dry_run ? "Y" : "N"}/{r.allow_submit ? "Y" : "N"}
+                  </div>
+                  {r.fields?.length ? (
+                    <dl className="job-expand-fields">
+                      {r.fields.map((f) => (
+                        <div key={f.key}>
+                          <dt>{f.label || f.key}</dt>
+                          <dd>{f.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="muted">无字段快照</p>
+                  )}
+                </div>
+              ),
+            }}
           />
         </StateBox>
       </div>

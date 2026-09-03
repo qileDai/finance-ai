@@ -718,6 +718,46 @@ table.data tr.clickable:hover td {
   margin: 2px 0 0;
 }
 
+.job-expand {
+  padding: 4px 8px 8px;
+}
+
+.job-expand-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 10px;
+}
+
+.job-expand-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.job-expand-fields dt {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.job-expand-fields dd {
+  margin: 2px 0 0;
+  word-break: break-all;
+}
+
+.job-field-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.job-field-groups h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
 .job-error {
   margin-top: 14px;
   padding: 10px 12px;

@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Button, Image, Space } from "antd";
 import { JOB_SHOT_PREVIEW } from "./ui";
-import { fetchShotBlob, writePng, type ShotDirHandle } from "../lib/saveFolder";
+import {
+  downloadBlob,
+  fetchShotBlob,
+  isDirectoryPickerSupported,
+  writePng,
+  type ShotDirHandle,
+} from "../lib/saveFolder";
 
 export type JobShotType = "esubmit" | "success";
 
@@ -63,11 +69,21 @@ export function DraggableShot({
     onSaved(filename);
   }
 
+  async function saveAsDownload() {
+    const blob = await fetchShotBlob(src);
+    downloadBlob(filename, blob);
+    onSaved(filename);
+  }
+
   async function onSaveClick(e: MouseEvent) {
     e.stopPropagation();
     e.preventDefault();
     setSaving(true);
     try {
+      if (!isDirectoryPickerSupported()) {
+        await saveAsDownload();
+        return;
+      }
       const handle = dirRef.current || (await ensureFolder());
       if (!handle) return;
       await saveToDir(handle);

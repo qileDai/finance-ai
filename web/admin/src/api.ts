@@ -47,6 +47,15 @@ export type JobsResponse = ApiOk<{
   limit: number;
 }>;
 
+export type JobField = { key: string; label?: string; value: string; group?: string };
+
+export type JobProgress = {
+  step: string;
+  label: string;
+  failed?: boolean;
+  detail?: string;
+};
+
 export type JobRow = {
   id: number;
   roomid: string;
@@ -72,6 +81,10 @@ export type JobRow = {
   id_number?: string;
   icris_username?: string;
   icris_password?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  fields?: JobField[];
+  progress?: JobProgress;
   source?: string;
   updated_at?: string;
   finished_at?: string;
@@ -85,18 +98,18 @@ export type JobLogLine = {
   time?: string;
 };
 
-export type JobField = { key: string; label?: string; value: string };
-
 export type JobDetailResponse = ApiOk<{
   job: JobRow & {
     payload_json?: string;
     result_messages?: string;
     package_dir?: string;
     customer_id?: string;
+    progress?: JobProgress;
   };
   payload: Record<string, unknown>;
   fields: JobField[];
   messages: Array<JobLogLine | string>;
+  progress?: JobProgress;
 }>;
 
 export type QualityResponse = ApiOk<{
