@@ -11,6 +11,33 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 
+def contact_email_from_payload(payload: dict) -> str:
+    """任务登记电邮：S03 填入 ICRIS 的 contact/applicant email。"""
+    if not isinstance(payload, dict):
+        return ""
+    contact = payload.get("contact") or {}
+    if not isinstance(contact, dict):
+        contact = {}
+    email = str(contact.get("email") or "").strip()
+    if not email:
+        applicant = payload.get("applicant") or {}
+        if isinstance(applicant, dict):
+            email = str(applicant.get("email") or "").strip()
+    return email.lower()
+
+
+def icris_credentials_from_payload(payload: dict) -> tuple[str, str]:
+    """任务入库的 ICRIS 用户名/密码。"""
+    if not isinstance(payload, dict):
+        return "", ""
+    account = payload.get("icris_account") or {}
+    if not isinstance(account, dict):
+        return "", ""
+    username = str(account.get("username") or "").strip()
+    password = str(account.get("password") or "").strip()
+    return username, password
+
+
 class IcrisActivationWorker:
     """每小时检查待激活的注册任务邮箱，提取激活链接并用浏览器点击。"""
 
@@ -184,30 +211,30 @@ class IcrisActivationWorker:
         if not job_id:
             return
 
-        # 从 payload_json 取注册邮箱（与 S03 填入 ICRIS 的电邮一致）
+        # 从 payload_json 取登记邮箱与 ICRIS 账号
         payload_str = str(job.get("payload_json") or "")
-        contact_email = ""
+        payload: dict = {}
         if payload_str:
             try:
-                payload = json.loads(payload_str)
-                contact = payload.get("contact") or {}
-                if not isinstance(contact, dict):
-                    contact = {}
-                contact_email = str(contact.get("email") or "").strip()
-                if not contact_email:
-                    applicant = payload.get("applicant") or {}
-                    if isinstance(applicant, dict):
-                        contact_email = str(applicant.get("email") or "").strip()
+                loaded = json.loads(payload_str)
+                if isinstance(loaded, dict):
+                    payload = loaded
             except Exception:
-                pass
-        contact_email = contact_email.lower()
+                payload = {}
+
+        contact_email = contact_email_from_payload(payload)
+        icris_user, icris_pass = icris_credentials_from_payload(payload)
 
         if not contact_email:
             logger.warning("任务 #%s 无注册邮箱，跳过激活", job_id)
             self.store.mark_job_activation_failed(job_id, "无注册邮箱")
             return
 
-        # 按任务电邮查 IMAP 配置
+        if not icris_user:
+            logger.warning("任务 #%s 无 ICRIS 用户名，本轮跳过", job_id)
+            return
+
+        # 按任务电邮查 IMAP 配置（只读该任务自己的邮箱）
         account = self.store.get_email_account_by_address(contact_email)
         if not account:
             logger.warning("任务 #%s 邮箱 %s 未配置 IMAP", job_id, contact_email)
@@ -233,27 +260,36 @@ class IcrisActivationWorker:
                 logger.warning("任务 #%s 激活超时", job_id)
                 return
 
-        # 检查激活邮件
+        # 检查激活邮件：必须用戶名稱与入库账号一致
         from src.email.imap_client import EmailClient
 
         client = EmailClient()
-        link = client.fetch_activation_link(account, since_date)
+        link = client.fetch_activation_link(
+            account, since_date, expected_username=icris_user
+        )
         self.store.mark_job_activation_checked(job_id)
 
         if not link:
-            logger.info("任务 #%s 暂无激活邮件，等下次检查", job_id)
+            logger.info("任务 #%s 暂无匹配 %s 的激活邮件，等下次检查", job_id, icris_user)
             return
 
-        # 浏览器点击激活
-        logger.info("任务 #%s 开始浏览器激活", job_id)
+        # 浏览器打开链接并用该任务密码登录激活
+        logger.info("任务 #%s 开始浏览器激活（账号 %s）", job_id, icris_user)
         from src.browser.icris_activation import activate_icris_account
 
         try:
-            ok, detail = asyncio.run(activate_icris_account(link))
+            ok, detail = asyncio.run(
+                activate_icris_account(link, username=icris_user, password=icris_pass)
+            )
         except RuntimeError as e:
             # 无事件循环环境，用新线程跑
             logger.warning("无事件循环，新线程执行激活: %s", e)
-            ok, detail = self._run_in_thread(activate_icris_account, link)
+            ok, detail = self._run_in_thread(
+                activate_icris_account,
+                link,
+                username=icris_user,
+                password=icris_pass,
+            )
 
         if ok:
             self.store.mark_job_activated(job_id)

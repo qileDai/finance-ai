@@ -29,6 +29,11 @@ _ACTIVATION_URL_KEYWORDS = (
     "启用",
     "激活",
 )
+_USERNAME_IN_MAIL_RE = re.compile(
+    r"(?:用戶名稱|用户名称|用户名|User\s*(?:Name|ID)|Username|Login\s*ID)"
+    r"\s*[:：]?\s*([A-Za-z][A-Za-z0-9._-]{1,64})",
+    re.I,
+)
 _SUBJECT_SEARCH_TERMS = (
     "ICRIS",
     "e-Services",
@@ -78,6 +83,8 @@ def is_activation_url(url: str) -> bool:
     if not raw.lower().startswith("http"):
         return False
     lower = raw.lower()
+    if "e-services.cr.gov.hk" in lower and "s06.do" in lower and "code=" in lower:
+        return True
     if any(k in lower for k in _ACTIVATION_URL_KEYWORDS):
         return True
     if "e-services.cr.gov.hk" in lower:
@@ -87,8 +94,55 @@ def is_activation_url(url: str) -> bool:
     return False
 
 
+def _body_as_text(body: str) -> str:
+    text = html_lib.unescape(body or "")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(?:p|tr|div|li)>", "\n", text)
+    text = re.sub(r"(?i)</t[dh]>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+def extract_activation_username_from_body(body: str) -> str | None:
+    """从激活邮件正文抽取 ICRIS 用戶名稱。"""
+    if not body:
+        return None
+    match = _USERNAME_IN_MAIL_RE.search(_body_as_text(body))
+    if not match:
+        return None
+    return match.group(1).strip().rstrip(".,;）)") or None
+
+
+def parse_activation_email(body: str) -> dict[str, str]:
+    """解析激活邮件：s06 链接与用戶名稱（缺项则省略）。"""
+    result: dict[str, str] = {}
+    url = extract_activation_link_from_body(body)
+    if url:
+        result["url"] = url
+    username = extract_activation_username_from_body(body)
+    if username:
+        result["username"] = username
+    return result
+
+
+def select_activation_link(body: str, expected_username: str) -> str | None:
+    """仅当信里的用戶名稱与任务入库账号一致时返回激活链接。"""
+    expected = (expected_username or "").strip()
+    if not expected:
+        return None
+    parsed = parse_activation_email(body)
+    url = str(parsed.get("url") or "").strip()
+    found = str(parsed.get("username") or "").strip()
+    if not url or not found:
+        return None
+    if found.lower() != expected.lower():
+        return None
+    return url
+
+
 def extract_activation_link_from_body(body: str) -> str | None:
-    """从纯文本/HTML 正文提取 ICRIS 激活链接。"""
+    """从纯文本/HTML 正文提取 ICRIS 激活链接。优先 s06.do?code=。"""
     if not body:
         return None
     text = html_lib.unescape(body)
@@ -97,11 +151,18 @@ def extract_activation_link_from_body(body: str) -> str | None:
         candidates.append(match.group(1))
     for match in _URL_RE.finditer(text):
         candidates.append(match.group(0))
+    found: list[str] = []
     for raw in candidates:
         url = unquote(raw.rstrip(".,;)"))
         if is_activation_url(url):
+            found.append(url)
+    if not found:
+        return None
+    for url in found:
+        lower = url.lower()
+        if "s06.do" in lower and "code=" in lower:
             return url
-    return None
+    return found[0]
 
 
 def imap_search_queries(since_str: str) -> list[tuple[str | None, str]]:
@@ -387,12 +448,16 @@ class EmailClient:
         return []
 
     def fetch_activation_link(
-        self, account: dict, since_date: datetime | None = None
+        self,
+        account: dict,
+        since_date: datetime | None = None,
+        expected_username: str | None = None,
     ) -> str | None:
         """登录指定 IMAP 邮箱，搜索 ICRIS 确认邮件，提取激活链接。
 
         account: {email_address, imap_host, imap_port, username, password}
         since_date: 只搜索此日期之后的邮件（默认 7 天前）
+        expected_username: 任务入库的 ICRIS 用戶名稱；有值时必须与信内用戶名稱一致
         返回: 激活 URL 或 None
         """
         host = str(account.get("imap_host") or "")
@@ -403,6 +468,7 @@ class EmailClient:
             logger.warning("邮箱账号配置不完整，跳过")
             return None
 
+        expected = (expected_username or "").strip()
         since = since_date or (datetime.now() - timedelta(days=7))
         since_str = since.strftime("%d-%b-%Y")
 
@@ -419,11 +485,34 @@ class EmailClient:
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
                 body = collect_message_body(msg)
+                if expected:
+                    link = select_activation_link(body, expected)
+                    if link:
+                        logger.info(
+                            "找到匹配 %s 的激活链接: %s", expected, link[:80]
+                        )
+                        return link
+                    parsed = parse_activation_email(body)
+                    found_user = str(parsed.get("username") or "")
+                    if parsed.get("url") and found_user:
+                        logger.info(
+                            "激活邮件用戶名稱 %s 与任务 %s 不符，跳过",
+                            found_user,
+                            expected,
+                        )
+                    continue
                 link = extract_activation_link_from_body(body)
                 if link:
                     logger.info("找到激活链接: %s", link[:80])
                     return link
-            logger.info("邮件中未找到激活链接: %s", username)
+            if expected:
+                logger.info(
+                    "邮件中未找到用戶名稱匹配 %s 的激活链接: %s",
+                    expected,
+                    username,
+                )
+            else:
+                logger.info("邮件中未找到激活链接: %s", username)
             return None
         except Exception as e:
             logger.error("读取激活邮件失败 %s: %s", username, e)

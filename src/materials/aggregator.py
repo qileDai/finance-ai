@@ -462,3 +462,25 @@ def load_company_data_from_roomid(roomid: str) -> dict[str, Any]:
     if not materials:
         raise ValueError(f"群 {roomid} 尚无材料记录")
     return aggregate_company_data(materials)
+
+
+def load_company_data_from_job_id(
+    job_id: int,
+    *,
+    store: ExternalGroupStore | None = None,
+) -> dict[str, Any]:
+    """从 registration_jobs.payload_json 加载 company_data（供 CLI --step nnc1 --job-id）"""
+    store = store or ExternalGroupStore()
+    job = store.get_registration_job(int(job_id))
+    if not job:
+        raise ValueError(f"任务 #{job_id} 不存在")
+    raw = job.get("payload_json") or ""
+    if not raw or not str(raw).strip():
+        raise ValueError(f"任务 #{job_id} 无 payload_json")
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as e:
+        raise ValueError(f"任务 #{job_id} payload_json 解析失败") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"任务 #{job_id} payload_json 不是对象")
+    return data

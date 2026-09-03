@@ -106,13 +106,24 @@ class TestNormalizeAndFillPlan(unittest.TestCase):
         plan = nnc1_identity_fill_plan("PRC_ID", "44051420000318492X")
         self.assertEqual(plan["hkid"], "無")
         self.assertEqual(plan["passport"], "44051420000318492X")
-        self.assertEqual(plan["passport_country"], "中国")
+        self.assertEqual(plan["passport_country"], "中國")
 
     def test_nnc1_passport_same_as_prc_slot(self):
         plan = nnc1_identity_fill_plan("PASSPORT", "FA0266712")
         self.assertEqual(plan["hkid"], "無")
         self.assertEqual(plan["passport"], "FA0266712")
-        self.assertEqual(plan["passport_country"], "中国")
+        self.assertEqual(plan["passport_country"], "中國")
+
+    def test_nnc1_taiwan_passport_country(self):
+        plan = nnc1_identity_fill_plan("PASSPORT", "FA0266712", "TWN")
+        self.assertEqual(plan["hkid"], "無")
+        self.assertEqual(plan["passport"], "FA0266712")
+        self.assertEqual(plan["passport_country"], "台灣")
+
+    def test_nnc1_macao_passport_country(self):
+        plan = nnc1_identity_fill_plan("PASSPORT", "MA123456", "MAC")
+        self.assertEqual(plan["hkid"], "無")
+        self.assertEqual(plan["passport_country"], "澳門")
 
     def test_split_hkid_fullwidth_parens(self):
         main, check = split_hkid_number("F570235（2）")

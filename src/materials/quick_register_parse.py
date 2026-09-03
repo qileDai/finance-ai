@@ -55,8 +55,9 @@ PARSE_QUICK_REGISTER_SYSTEM = (
     "3) director_name 必须保留括号内英文整串，例如 張慧斌【ZHANG，Huibin】，不要只抽汉字。"
     "4) id_type 只根据证件标签行判定（身份证号码 / 香港身份证 / 护照号码），"
     "不要根据注册地址或住址里的「香港」判断证件类型；id_number 保留原文校验位如（2）。"
-    "5) issuing_country 用 ISO 3166-1 alpha-3（如 UZB、CHN、USA）。"
-    "台湾护照/中華民國/TWN/台灣 → issuing_country 必须是 CHN，且 taiwan_passport=true。"
+    "5) issuing_country 用 ISO 3166-1 alpha-3（如 UZB、CHN、TWN、MAC、USA）。"
+    "台湾护照/中華民國/TWN/台灣 → issuing_country 必须是 TWN，且 taiwan_passport=true。"
+    "澳门护照/澳門/MAC → issuing_country 必须是 MAC。"
     "6) 不要编造原文没有的字段；没有的键省略。taiwan_passport 仅 true/false。"
 )
 
@@ -93,7 +94,7 @@ def coerce_parse_result(data: Any, source_text: str = "") -> dict[str, Any]:
     issuing_raw = str(out.get("issuing_country") or data.get("issuing_country") or "")
     if is_taiwan_issuing(issuing_raw) or taiwan:
         taiwan = True
-        out["issuing_country"] = "CHN"
+        out["issuing_country"] = "TWN"
     else:
         iso = normalize_issuing_iso(issuing_raw)
         if iso:
@@ -103,7 +104,7 @@ def coerce_parse_result(data: Any, source_text: str = "") -> dict[str, Any]:
     if taiwan:
         out["taiwan_passport"] = True
         if not out.get("issuing_country"):
-            out["issuing_country"] = "CHN"
+            out["issuing_country"] = "TWN"
     return out
 
 
@@ -298,7 +299,7 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
         result["id_type"] = refined
     if is_taiwan_issuing(raw) or re.search(r"台湾护照|台灣護照|臺灣護照", raw):
         result["taiwan_passport"] = True
-        result.setdefault("issuing_country", "CHN")
+        result.setdefault("issuing_country", "TWN")
     return result
 
 

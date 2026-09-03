@@ -1,4 +1,4 @@
-"""快速注册粘贴解析：简繁、住址国籍、台湾护照→CHN。"""
+"""快速注册粘贴解析：简繁、住址国籍、台湾护照→TWN。"""
 
 from __future__ import annotations
 
@@ -42,11 +42,11 @@ class TestParseRegexFallback(unittest.TestCase):
         self.assertIn("Zevarsoy", parsed.get("director_address_en") or "")
         self.assertFalse(parsed.get("director_address_cn"))
 
-    def test_taiwan_passport_maps_issuing_to_chn(self):
+    def test_taiwan_passport_maps_issuing_to_twn(self):
         text = "护照号码：FA0266712\n护照签发地：台湾"
         parsed = parse_registration_text_regex(text)
         self.assertTrue(parsed.get("taiwan_passport"))
-        self.assertEqual(parsed.get("issuing_country"), "CHN")
+        self.assertEqual(parsed.get("issuing_country"), "TWN")
 
     def test_hk_office_with_prc_id_number_is_prc_id(self):
         text = (
@@ -104,7 +104,7 @@ class TestParseLlmPrimary(unittest.TestCase):
 
         result = parse_quick_register_text("任意粘贴", llm=Fake())
         self.assertEqual(result.get("source"), "llm")
-        self.assertEqual(result.get("issuing_country"), "CHN")
+        self.assertEqual(result.get("issuing_country"), "TWN")
         self.assertTrue(result.get("taiwan_passport"))
         self.assertEqual(result.get("id_type"), "PASSPORT")
 
@@ -121,9 +121,10 @@ class TestParseLlmPrimary(unittest.TestCase):
 
 class TestIssuingCountry(unittest.TestCase):
     def test_taiwan_normalize(self):
-        self.assertEqual(normalize_issuing_iso("TWN"), "CHN")
-        self.assertEqual(normalize_issuing_iso("台湾"), "CHN")
+        self.assertEqual(normalize_issuing_iso("TWN"), "TWN")
+        self.assertEqual(normalize_issuing_iso("台湾"), "TWN")
         self.assertEqual(normalize_issuing_iso("Uzbekistan"), "UZB")
+        self.assertEqual(normalize_issuing_iso("澳门"), "MAC")
 
     def test_nnc1_uzbekistan_passport_country(self):
         plan = nnc1_identity_fill_plan("PASSPORT", "FA0266712", "UZB")
@@ -133,7 +134,10 @@ class TestIssuingCountry(unittest.TestCase):
         names = passport_country_option_names("UZB")
         self.assertTrue(any("烏茲別克" in n for n in names))
         names_tw = passport_country_option_names("TWN")
-        self.assertIn("中國", names_tw)
+        self.assertEqual(names_tw[0], "台灣")
+        self.assertNotIn("中國", names_tw)
+        names_mo = passport_country_option_names("MAC")
+        self.assertEqual(names_mo[0], "澳門")
 
     def test_aggregator_copies_issuing_country(self):
         from src.materials.aggregator import aggregate_company_data
@@ -154,7 +158,7 @@ class TestIssuingCountry(unittest.TestCase):
         out = coerce_parse_result(
             {"issuing_country": "TWN", "id_type": "PASSPORT", "id_number": "A1"}
         )
-        self.assertEqual(out["issuing_country"], "CHN")
+        self.assertEqual(out["issuing_country"], "TWN")
         self.assertTrue(out.get("taiwan_passport"))
 
     def test_hk_office_plus_prc_id_overrides_llm_hkid(self):

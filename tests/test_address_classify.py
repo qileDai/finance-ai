@@ -1,4 +1,4 @@
-"""住址英文：香港判定、街道/区省市拆分、住址国家 CHN 含港澳台。"""
+"""住址英文：香港判定、街道/区省市拆分、住址国家内地/港/澳/台分开。"""
 
 from __future__ import annotations
 
@@ -33,13 +33,13 @@ TW_EN = "No. 1 Zhongxiao E Rd, Taipei City, Taiwan"
 
 
 class TestNormalizeAddressCountry(unittest.TestCase):
-    def test_greater_china_to_chn(self):
+    def test_greater_china_regions_separate(self):
         self.assertEqual(normalize_address_country("China"), "CHN")
-        self.assertEqual(normalize_address_country("Hong Kong"), "CHN")
-        self.assertEqual(normalize_address_country("HKG"), "CHN")
-        self.assertEqual(normalize_address_country("Macao"), "CHN")
-        self.assertEqual(normalize_address_country("台湾"), "CHN")
-        self.assertEqual(normalize_address_country("TWN"), "CHN")
+        self.assertEqual(normalize_address_country("Hong Kong"), "HKG")
+        self.assertEqual(normalize_address_country("HKG"), "HKG")
+        self.assertEqual(normalize_address_country("Macao"), "MAC")
+        self.assertEqual(normalize_address_country("台湾"), "TWN")
+        self.assertEqual(normalize_address_country("TWN"), "TWN")
 
     def test_foreign_keeps_iso(self):
         self.assertEqual(normalize_address_country("Uzbekistan"), "UZB")
@@ -96,15 +96,15 @@ class TestEnglishSplitAndHk(unittest.TestCase):
         self.assertFalse(english_address_is_hk(UZB_EN))
         hk = weak_fallback_address(HK_EN)
         self.assertEqual(hk["address_is_hk"], "1")
-        self.assertEqual(hk["address_country"], "CHN")
+        self.assertEqual(hk["address_country"], "HKG")
         nt = weak_fallback_address(NT_EN)
         self.assertEqual(nt["address_is_hk"], "1")
-        self.assertEqual(nt["address_country"], "CHN")
+        self.assertEqual(nt["address_country"], "HKG")
 
     def test_taiwan_and_mainland_not_hk(self):
         tw = weak_fallback_address(TW_EN)
         self.assertEqual(tw["address_is_hk"], "0")
-        self.assertEqual(tw["address_country"], "CHN")
+        self.assertEqual(tw["address_country"], "TWN")
         sz = weak_fallback_address(SZ_EN)
         self.assertEqual(sz["address_is_hk"], "0")
         self.assertEqual(sz["address_country"], "CHN")
@@ -143,12 +143,12 @@ class TestEnglishSplitAndHk(unittest.TestCase):
             NT_EN,
         )
         self.assertEqual(out["address_is_hk"], "1")
-        self.assertEqual(out["address_country"], "CHN")
+        self.assertEqual(out["address_country"], "HKG")
 
     def test_chinese_nt_residence_is_hk_without_english(self):
         out = classify_director_address("", "新界天水圍天湖路", llm=object())
         self.assertEqual(out["address_is_hk"], "1")
-        self.assertEqual(out["address_country"], "CHN")
+        self.assertEqual(out["address_country"], "HKG")
 
 
 class TestParseAttachesAddress(unittest.TestCase):
@@ -192,7 +192,7 @@ class TestParseAttachesAddress(unittest.TestCase):
             llm=Fake(),
         )
         self.assertEqual(result.get("address_is_hk"), "1")
-        self.assertEqual(result.get("address_country"), "CHN")
+        self.assertEqual(result.get("address_country"), "HKG")
         self.assertIn("TIN SHUI WAI", result.get("director_address_en") or "")
 
     def test_director_nt_office_mainland_still_hk(self):
@@ -205,7 +205,7 @@ class TestParseAttachesAddress(unittest.TestCase):
 
         result = parse_quick_register_text("x", llm=Fake())
         self.assertEqual(result.get("address_is_hk"), "1")
-        self.assertEqual(result.get("address_country"), "CHN")
+        self.assertEqual(result.get("address_country"), "HKG")
 
     def test_regex_address_label_nt_then_classify(self):
         class Boom:
@@ -220,7 +220,7 @@ class TestParseAttachesAddress(unittest.TestCase):
         self.assertEqual(result.get("source"), "regex")
         self.assertIn("TIN SHUI WAI NT", result.get("director_address_en") or "")
         self.assertEqual(result.get("address_is_hk"), "1")
-        self.assertEqual(result.get("address_country"), "CHN")
+        self.assertEqual(result.get("address_country"), "HKG")
 
 
 class TestHkDistrictPick(unittest.TestCase):

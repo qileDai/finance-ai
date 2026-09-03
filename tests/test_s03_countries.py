@@ -11,6 +11,8 @@ from src.materials.countries import (
 
 FIXTURE = [
     {"label": "中國", "value": "CHN"},
+    {"label": "澳門", "value": "MAC"},
+    {"label": "台灣", "value": "TWN"},
     {"label": "烏茲別克", "value": "UZB"},
     {"label": "美國", "value": "USA"},
 ]
@@ -35,12 +37,20 @@ class TestResolveS03AddressCountry(unittest.TestCase):
             "中國",
         )
 
-    def test_chn_and_hong_kong_to_china(self):
+    def test_chn_taiwan_macao_separate(self):
         self.assertEqual(
             resolve_s03_address_country("CHN", options=FIXTURE),
             "中國",
         )
         self.assertEqual(
+            resolve_s03_address_country("TWN", options=FIXTURE),
+            "台灣",
+        )
+        self.assertEqual(
+            resolve_s03_address_country("MAC", options=FIXTURE),
+            "澳門",
+        )
+        self.assertNotEqual(
             resolve_s03_address_country("HKG", options=FIXTURE),
             "中國",
         )
@@ -51,7 +61,15 @@ class TestResolveS03AddressCountry(unittest.TestCase):
             "UZB",
         )
 
-    def test_s04_candidates_uzbekistan_icris_label_first(self):
+    def test_s04_candidates_taiwan_macao(self):
+        self.assertEqual(
+            icris_country_select_candidates("TWN", options=FIXTURE)[0],
+            "台灣",
+        )
+        self.assertEqual(
+            icris_country_select_candidates("MAC", options=FIXTURE)[0],
+            "澳門",
+        )
         cands = icris_country_select_candidates("UZB", options=FIXTURE)
         self.assertEqual(cands[0], "烏茲別克")
         self.assertIn("UZB", cands)
@@ -65,6 +83,8 @@ class TestResolveS03AddressCountry(unittest.TestCase):
         opts = load_s03_country_options(reload=True)
         self.assertGreaterEqual(len(opts), 50)
         self.assertEqual(resolve_s03_address_country("CHN", options=opts), "中國")
+        self.assertEqual(resolve_s03_address_country("TWN", options=opts), "台灣")
+        self.assertEqual(resolve_s03_address_country("MAC", options=opts), "澳門")
         self.assertEqual(resolve_s03_address_country("UZB", options=opts), "烏茲別克")
         cands = icris_country_select_candidates("UZB", options=opts)
         self.assertEqual(cands[0], "烏茲別克")

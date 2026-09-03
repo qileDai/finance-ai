@@ -1,4 +1,4 @@
-"""护照签发国：ISO 3166-1 alpha-3 + 中英名称。台湾护照映射为中国。"""
+"""护照签发国：ISO 3166-1 alpha-3 + 中英名称。台湾、澳门为独立地区。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import json
 import re
 from pathlib import Path
 
-# (iso3, en, zh-Hans) — 不含台湾作为独立签发国
+# (iso3, en, zh-Hans)
 PASSPORT_COUNTRIES: tuple[tuple[str, str, str], ...] = (
     ("CHN", "China", "中国"),
     ("HKG", "Hong Kong", "中国香港"),
     ("MAC", "Macao", "中国澳门"),
+    ("TWN", "Taiwan", "台湾"),
     ("AFG", "Afghanistan", "阿富汗"),
     ("ALB", "Albania", "阿尔巴尼亚"),
     ("DZA", "Algeria", "阿尔及利亚"),
@@ -249,7 +250,6 @@ def is_taiwan_issuing(raw: str) -> bool:
     return "台湾" in s or "台灣" in s or "臺灣" in s or "中華民國" in s or "中华民国" in s
 
 
-_HK_MO_TW_ISO = frozenset({"HKG", "MAC", "TWN"})
 _MACAU_TOKENS = frozenset(
     {
         "MAC",
@@ -274,37 +274,41 @@ def is_macao_address_country(raw: str) -> bool:
     return "澳门" in s or "澳門" in s or "macao" in s.lower() or "macau" in s.lower()
 
 
-def normalize_address_country(raw: str) -> str:
-    """住址国家 → ISO3。内地/香港/澳门/台湾一律 CHN。"""
+def _is_hong_kong_country(raw: str) -> bool:
     s = (raw or "").strip()
     if not s:
-        return ""
-    if is_taiwan_issuing(s) or is_macao_address_country(s):
-        return "CHN"
+        return False
     key = s.upper().replace(" ", "")
-    if key in _HK_MO_TW_ISO:
-        return "CHN"
-    if "HONGKONG" in key or "HONG KONG" in s.upper() or "香港" in s:
-        # 单独「香港」当住址国 → CHN；整段英文住址另由 is_hk 判定
-        if key in ("HK", "HKG", "HONGKONG") or s.strip() in (
-            "香港",
-            "Hong Kong",
-            "hong kong",
-        ):
-            return "CHN"
-    iso = normalize_issuing_iso(s)
-    if iso in _HK_MO_TW_ISO:
-        return "CHN"
-    return iso
+    if key in ("HK", "HKG", "HONGKONG"):
+        return True
+    return s.strip() in ("香港", "Hong Kong", "hong kong", "中國香港", "中国香港")
 
 
-def normalize_issuing_iso(raw: str) -> str:
-    """签发国 → ISO3。台湾映射 CHN。无法识别返回空。"""
+def normalize_address_country(raw: str) -> str:
+    """住址国家 → ISO3。内地 CHN，香港 HKG，澳门 MAC，台湾 TWN。"""
     s = (raw or "").strip()
     if not s:
         return ""
     if is_taiwan_issuing(s):
-        return "CHN"
+        return "TWN"
+    if is_macao_address_country(s):
+        return "MAC"
+    if _is_hong_kong_country(s):
+        return "HKG"
+    return normalize_issuing_iso(s)
+
+
+def normalize_issuing_iso(raw: str) -> str:
+    """签发国 → ISO3。台湾 TWN、澳门 MAC、香港 HKG。无法识别返回空。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if is_taiwan_issuing(s):
+        return "TWN"
+    if is_macao_address_country(s):
+        return "MAC"
+    if _is_hong_kong_country(s):
+        return "HKG"
     key = s.upper().replace(" ", "")
     if key in _CHINA_TOKENS or s in _CHINA_TOKENS:
         return "CHN"
@@ -340,11 +344,15 @@ def _to_zh_hk(text: str) -> str:
 
 
 def passport_country_option_names(iso3: str) -> list[str]:
-    """护照/住址国家下拉候选：香港繁体优先，再简体/英文。台湾与空/CHN 均选中国。"""
+    """护照/住址国家下拉候选：ICRIS 繁体优先。台湾/澳门独立，空或 CHN 选中国。"""
     code = normalize_issuing_iso(iso3) if iso3 else ""
     names: list[str] = []
     if not code or code == "CHN":
         names = ["中國", "中国", "China", "中華人民共和國", "中华人民共和国"]
+    elif code == "TWN":
+        names = ["台灣", "台湾", "臺灣", "Taiwan", "中華民國", "中华民国"]
+    elif code == "MAC":
+        names = ["澳門", "澳门", "Macao", "Macau", "中國澳門", "中国澳门"]
     else:
         cn, en = country_names(code)
         trad = _to_zh_hk(cn)

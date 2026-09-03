@@ -4,6 +4,7 @@ export const PASSPORT_COUNTRIES: PassportCountry[] = [
   { code: "CHN", en: "China", cn: "中国" },
   { code: "HKG", en: "Hong Kong", cn: "中国香港" },
   { code: "MAC", en: "Macao", cn: "中国澳门" },
+  { code: "TWN", en: "Taiwan", cn: "台湾" },
   { code: "AFG", en: "Afghanistan", cn: "阿富汗" },
   { code: "ALB", en: "Albania", cn: "阿尔巴尼亚" },
   { code: "DZA", en: "Algeria", cn: "阿尔及利亚" },

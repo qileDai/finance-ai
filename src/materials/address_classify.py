@@ -64,7 +64,7 @@ CLASSIFY_ADDRESS_SYSTEM = (
     'street="Room 110, No. 8, Xili South Road", '
     'region="Nanshan District, Shenzhen City, Guangdong Province"。'
     "4) address_country 用 ISO 3166-1 alpha-3。"
-    "内地、香港、澳门、台湾一律 CHN；国外用对应国家（如 UZB）。"
+    "内地 CHN，香港 HKG，澳门 MAC，台湾 TWN；国外用对应国家（如 UZB）。"
     "5) 无英文住址则各键空/false。不要输出其它键或解释。"
 )
 
@@ -300,14 +300,17 @@ def coerce_address_result(
 
     country = normalize_address_country(str(data.get("address_country") or ""))
     if is_hk:
-        country = "CHN"
+        country = "HKG"
     if not country and en:
         country = _guess_country_from_en(en)
-    if is_hk or english_address_looks_greater_china(en):
-        if not country:
-            country = "CHN"
-        elif country in ("HKG", "MAC", "TWN"):
-            country = "CHN"
+    if is_hk:
+        country = country or "HKG"
+    elif english_address_looks_non_hk(en):
+        guessed = _guess_country_from_en(en)
+        if guessed:
+            country = guessed
+    elif not country and english_address_looks_greater_china(en):
+        country = _guess_country_from_en(en) or "CHN"
 
     if en and (not street and not region):
         street, region = split_english_street_region(en)
@@ -366,10 +369,10 @@ def weak_fallback_address(address_en: str) -> dict[str, str]:
     street, region = split_english_street_region(en)
     is_hk = english_address_is_hk(en)
     country = _guess_country_from_en(en)
-    if is_hk or english_address_looks_greater_china(en):
-        country = country or "CHN"
-        if country in ("HKG", "MAC", "TWN"):
-            country = "CHN"
+    if is_hk:
+        country = "HKG"
+    elif not country and english_address_looks_greater_china(en):
+        country = "CHN"
     region = _strip_country_token(region, country)
     return {
         "director_address_street": street,
@@ -392,7 +395,7 @@ def classify_director_address(
         fb = weak_fallback_address("")
         if chinese_address_is_hk(cn):
             fb["address_is_hk"] = "1"
-            fb["address_country"] = fb.get("address_country") or "CHN"
+            fb["address_country"] = fb.get("address_country") or "HKG"
         return fb
     try:
         client = llm
@@ -420,5 +423,5 @@ def classify_director_address(
     fb = weak_fallback_address(en)
     if chinese_address_is_hk(cn):
         fb["address_is_hk"] = "1"
-        fb["address_country"] = fb.get("address_country") or "CHN"
+        fb["address_country"] = fb.get("address_country") or "HKG"
     return fb

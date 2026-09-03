@@ -338,7 +338,6 @@ export function RegisterPage({ onToast }: Props) {
         parsed = { ...(r.fields || {}) };
         taiwan = Boolean(r.taiwan_passport);
         if ((parsed.issuing_country || "").toUpperCase() === "TWN") {
-          parsed.issuing_country = "CHN";
           taiwan = true;
         }
       } catch {
@@ -713,7 +712,7 @@ export function RegisterPage({ onToast }: Props) {
                         style={{ width: "100%" }}
                       />
                       {taiwanPassport ? (
-                        <small className="muted">台湾护照按中国签发；可另传台证</small>
+                        <small className="muted">台湾护照签发地为台湾；可另传台证抽住址</small>
                       ) : null}
                     </label>
                   ) : null}
