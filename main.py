@@ -163,7 +163,24 @@ def cmd_run(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         ctx = WorkflowContext(chat_id=roomid or args.chat_id)
-        if args.step in ("register", "login", "nnc1", "package", "confirm", "notify", "email"):
+        job_id = getattr(args, "job_id", None)
+        if args.step == "nnc1" and job_id:
+            from src.email.imap_client import IcrisAccount
+            from src.materials.aggregator import load_company_data_from_job_id
+
+            username = (getattr(args, "username", None) or "").strip()
+            password = (getattr(args, "password", None) or "").strip()
+            if not username or not password:
+                print("[错误] --step nnc1 --job-id 必须同时指定 --username 和 --password（仅用于 NNC1 登录）")
+                sys.exit(1)
+            try:
+                ctx.company_data = load_company_data_from_job_id(int(job_id))
+            except ValueError as e:
+                print(f"[错误] {e}")
+                sys.exit(1)
+            ctx.icris_account = IcrisAccount(username=username, password=password)
+            print(f"[数据] 已从任务 #{int(job_id)} 加载 payload，NNC1 登录账号={username}")
+        elif args.step in ("register", "login", "nnc1", "package", "confirm", "notify", "email"):
             _apply_company_data(ctx, for_steps=("register", "login", "nnc1", "package", "confirm", "notify", "email"))
 
         ctx = agent.workflow.run_step(step_enum, ctx)
@@ -1044,6 +1061,25 @@ def main() -> None:
         help="外部客户群 roomid；指定时从 wework_external.db 加载真实材料（用于 register/package 等）",
     )
     run_parser.add_argument("--full", action="store_true", help="运行完整流程")
+    run_parser.add_argument(
+        "--job-id",
+        type=int,
+        default=None,
+        dest="job_id",
+        help="仅 --step nnc1：从 registration_jobs.payload_json 加载该公司数据",
+    )
+    run_parser.add_argument(
+        "--username",
+        default="",
+        dest="username",
+        help="仅 --step nnc1 --job-id：NNC1 登录账号",
+    )
+    run_parser.add_argument(
+        "--password",
+        default="",
+        dest="password",
+        help="仅 --step nnc1 --job-id：NNC1 登录密码",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     steps_parser = sub.add_parser("steps", help="列出所有可用步骤")
@@ -1178,6 +1214,25 @@ def main() -> None:
     parser.add_argument("--chat-id", default="mock_chat_001", dest="_chat_id")
     parser.add_argument("--roomid", default="", dest="_roomid", help="外部群 roomid，加载 DB 材料")
     parser.add_argument("--full", action="store_true", dest="_full")
+    parser.add_argument(
+        "--job-id",
+        type=int,
+        default=None,
+        dest="_job_id",
+        help="仅 --step nnc1：从任务 payload 加载数据",
+    )
+    parser.add_argument(
+        "--username",
+        default="",
+        dest="_username",
+        help="仅 --step nnc1 --job-id：NNC1 登录账号",
+    )
+    parser.add_argument(
+        "--password",
+        default="",
+        dest="_password",
+        help="仅 --step nnc1 --job-id：NNC1 登录密码",
+    )
 
     args = parser.parse_args()
 
@@ -1216,6 +1271,9 @@ def main() -> None:
             chat_id=args._chat_id,
             roomid=getattr(args, "_roomid", "") or "",
             full=args._full,
+            job_id=getattr(args, "_job_id", None),
+            username=getattr(args, "_username", "") or "",
+            password=getattr(args, "_password", "") or "",
         )
         cmd_run(run_args)
     else:
