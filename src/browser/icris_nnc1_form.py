@@ -46,6 +46,7 @@ from src.browser.icris_ui_common import (
 )
 from src.browser.launcher import create_browser_context, launch_browser
 from src.email.imap_client import IcrisAccount
+from src.materials.countries import icris_country_select_candidates
 from src.materials.id_type_classify import (
     nnc1_identity_fill_plan,
     normalize_stored_id_type,
@@ -70,6 +71,54 @@ NNC1_SAVE_CONTINUE_PAT = re.compile(
 
 class Nnc1CountryDropdownEmpty(RuntimeError):
     """步驟3 國家／地區 下拉没有选项，无法选中国。"""
+
+
+def resolve_nnc1_step3_names(
+    person: dict[str, Any],
+    data: dict[str, Any] | None = None,
+) -> tuple[str, str, str]:
+    """NNC1-3.1 姓名三栏，规则与 s03 相同。返回 (中文姓名, 英文姓氏, 英文名字)。"""
+    from src.browser.icris_registration import (
+        latin_english_given_surname,
+        s03_skip_english_name,
+    )
+
+    payload = data if isinstance(data, dict) else {}
+    applicant = payload.get("applicant") or {}
+    if not isinstance(applicant, dict):
+        applicant = {}
+    row = person if isinstance(person, dict) else {}
+    name_cn = "".join(
+        ch for ch in str(row.get("name_cn") or "") if "\u4e00" <= ch <= "\u9fff"
+    )
+    name_en = str(row.get("name_en") or "").strip()
+    raw_person = str(
+        row.get("director_name") or applicant.get("director_name") or ""
+    )
+    surname_stored = str(
+        row.get("surname_en") or applicant.get("surname_en") or ""
+    ).strip()
+    given_stored = str(
+        row.get("given_en") or applicant.get("given_en") or ""
+    ).strip()
+    skip_en = s03_skip_english_name(raw_person, name_cn, name_en)
+    if skip_en:
+        surname, given = "", ""
+    elif surname_stored or given_stored:
+        surname, given = surname_stored, given_stored
+    else:
+        given, surname = latin_english_given_surname(name_en, name_cn)
+    return name_cn, surname, given
+
+
+def first_real_signatory_index(option_texts: list[str]) -> int | None:
+    """下拉选项中第一项真实簽署人（跳过请选择），按顺序不按姓名。"""
+    for i, raw in enumerate(option_texts):
+        text = (raw or "").strip()
+        if not text or re.search(r"請選擇|请选择|^Select$", text, re.I):
+            continue
+        return i
+    return None
 
 
 class IcrisNnc1FormBot:
@@ -159,67 +208,78 @@ class IcrisNnc1FormBot:
         往往更晚才到；过早 `_select_first_signatory` 会点在空控件上。
         """
         logger.info("等待创办成员表簽署人下拉选项加载")
-        await wait_spin_clear(page, timeout_ms=90000)
+        await wait_spin_clear(page, timeout_ms=20000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=25000)
+            await page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             logger.debug("簽署人页 networkidle 超时，继续等下拉")
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 1200) {
-                        return false;
-                    }
                     if (!/請選擇創辦成員|请选择创办成员/.test(body)) return false;
                     const placeholder = /請選擇|请选择|^Select$/i;
-                    const headingRe = /請選擇創辦成員.*簽署人|请选择创办成员.*签署人/;
+                    const controlReady = (node) => {
+                        if (!node) return false;
+                        const r = node.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) return false;
+                        if (node.tagName === 'SELECT') {
+                            for (const opt of node.options) {
+                                const ot = (opt.textContent || '').trim();
+                                if (ot && !placeholder.test(ot)) return true;
+                            }
+                            return false;
+                        }
+                        const shown = (node.innerText || '').trim();
+                        if (shown && !placeholder.test(shown)) return true;
+                        const item = node.querySelector('.ant-select-selection-item');
+                        const it = (item?.innerText || '').trim();
+                        return !!(it && !placeholder.test(it));
+                    };
+                    const afterLabel = (el) => {
+                        let n = el.nextElementSibling;
+                        while (n) {
+                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
+                                return n;
+                            }
+                            const inner = n.querySelector('.ant-select, select');
+                            if (inner) return inner;
+                            n = n.nextElementSibling;
+                        }
+                        const parent = el.parentElement;
+                        n = parent?.nextElementSibling || null;
+                        while (n) {
+                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
+                                return n;
+                            }
+                            const inner = n.querySelector('.ant-select, select');
+                            if (inner) return inner;
+                            n = n.nextElementSibling;
+                        }
+                        return null;
+                    };
                     const norm = (s) => (s || '').replace(/\\s+/g, '').trim();
                     for (const el of document.querySelectorAll(
                         'label, span, td, th, div, p'
                     )) {
-                        const raw = (el.innerText || '').trim();
-                        const t = norm(raw);
-                        if (t.length > 80) continue;
-                        if (t !== '簽署人' && t !== '签署人' && !headingRe.test(raw)) continue;
-                        const row = el.closest('tr')
-                            || el.closest('.ant-row,.ant-form-item,fieldset')
-                            || el.parentElement;
-                        if (!row) continue;
-                        const sel = row.querySelector('select');
-                        if (sel) {
-                            let n = 0;
-                            for (const opt of sel.options) {
-                                const ot = (opt.textContent || '').trim();
-                                if (ot && !placeholder.test(ot)) n += 1;
-                            }
-                            if (n > 0) return true;
-                        }
-                        const ant = row.querySelector('.ant-select');
-                        if (!ant) continue;
-                        if (ant.classList.contains('ant-select-disabled')) continue;
-                        if (ant.classList.contains('ant-select-loading')) continue;
-                        const r = ant.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) continue;
-                        for (const item of document.querySelectorAll(
-                            '.ant-select-item-option'
-                        )) {
-                            const ot = (item.innerText || '').trim();
-                            if (ot && !placeholder.test(ot)) return true;
-                        }
-                        const shown = (ant.innerText || '').trim();
-                        if (placeholder.test(shown)) return true;
+                        const t = norm(el.innerText || '');
+                        if (t !== '簽署人' && t !== '签署人') continue;
+                        if (controlReady(afterLabel(el))) return true;
                     }
-                    return false;
+                    const visible = [...document.querySelectorAll('.ant-select, select')].filter(n => {
+                        const r = n.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+                    if (visible.length >= 2 && controlReady(visible[1])) return true;
+                    return visible.some(controlReady);
                 }""",
-                timeout=90000,
+                timeout=12000,
             )
             logger.info("创办成员表簽署人下拉已就绪")
         except Exception as e:
+            logger.warning("簽署人下拉等待超时，仍尝试选第一项: %s", e)
             await self._maybe_screenshot(page, "step3_form_signatory_wait_fail")
-            raise RuntimeError(f"创办成员表簽署人下拉加载超时: {e}")
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(500)
 
     async def _wait_nnc1_save_continue_ready(self, page) -> None:
         """等待步骤底栏「储存/存储及继续」按钮渲染完成。"""
@@ -2571,39 +2631,45 @@ class IcrisNnc1FormBot:
         return False
 
     async def _fill_step3_person_names(
-        self, page, name_cn: str, name_en: str
+        self, page, person: dict[str, Any], data: dict[str, Any] | None = None
     ) -> None:
-        """有中文姓名只填中文；无中文则填英文姓氏+英文名字。"""
-        surname, given = self._split_english_name(name_en)
+        """与 s03 相同：有值才填；仅中文则不填英文；中英都有则三栏都填。"""
+        name_cn, surname, given = resolve_nnc1_step3_names(person, data)
         if name_cn:
             await self._fill_step3_name_field(page, r"^中文姓名$|^中文名稱$", name_cn)
-            logger.info("已有中文姓名，跳过英文姓氏/英文名字")
-            return
         if surname:
             await self._fill_step3_name_field(page, r"^英文姓氏$|^英文姓$", surname)
         if given:
             await self._fill_step3_name_field(page, r"^英文名字$|^英文名$", given)
+        logger.info(
+            "NNC1-3.1 姓名 cn=%s surname=%s given=%s",
+            name_cn[:20],
+            surname[:20],
+            given[:20],
+        )
 
     async def _wait_step3_shell_ready(self, page) -> None:
         """等待步骤3：类型/身分区块渲染完成。"""
         logger.info("等待 NNC1 步骤3 页面加载: %s", page.url[:120])
-        await wait_spin_clear(page, timeout_ms=90000)
+        await wait_spin_clear(page, timeout_ms=180000)
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=45000)
         except Exception:
             pass
         try:
-            await page.wait_for_load_state("networkidle", timeout=45000)
+            await page.wait_for_load_state("networkidle", timeout=60000)
         except Exception:
             logger.debug("步骤3 networkidle 超时，继续等待 DOM")
 
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) return false;
                     if (!/步驟\\s*3|步骤\\s*3|輸入創辦成員|输入创办成员/.test(body)) {
+                        return false;
+                    }
+                    const spinning = !!document.querySelector('.ant-spin-spinning');
+                    if (spinning && /載入中|加载中/.test(body) && body.length < 800) {
                         return false;
                     }
                     let natural = false;
@@ -2624,7 +2690,7 @@ class IcrisNnc1FormBot:
                     }
                     return natural && founder;
                 }""",
-                timeout=120000,
+                timeout=180000,
             )
             logger.info("NNC1 步骤3 身分区块已就绪")
         except Exception as e:
@@ -3093,10 +3159,17 @@ class IcrisNnc1FormBot:
         return normalize_stored_id_type(raw, id_number)
 
     def _split_non_hk_address_en(self, address_en: str) -> dict[str, str]:
-        """英文非香港地址拆分（室/街道/区省市）。"""
+        """英文非香港地址拆分（室/街道/区省市）。country 为 ISO3，不默认 China。"""
+        from src.materials.countries import normalize_address_country
+
         parts = [p.strip() for p in re.split(r",\s*", (address_en or "").strip()) if p.strip()]
+        country = ""
+        for token in reversed(parts):
+            country = normalize_address_country(token)
+            if country:
+                break
         if not parts:
-            return {"flat": "", "building": "", "street": "", "region": "", "country": "China"}
+            return {"flat": "", "building": "", "street": "", "region": "", "country": country}
         if len(parts) >= 2:
             region = ", ".join(parts[-2:])
             body = parts[:-2]
@@ -3122,17 +3195,27 @@ class IcrisNnc1FormBot:
             "building": "",
             "street": street,
             "region": region,
-            "country": "China",
+            "country": country,
         }
 
     def _resolve_person_address(self, person: dict[str, Any], data: dict[str, Any]) -> dict[str, str]:
+        from src.materials.countries import normalize_address_country
+
         address_en = (
             (person.get("address_en") or person.get("address") or "").strip()
         )
         if not address_en:
             applicant = data.get("applicant") or {}
             address_en = (applicant.get("address_en") or applicant.get("address") or "").strip()
-        return self._split_non_hk_address_en(address_en)
+        parsed = self._split_non_hk_address_en(address_en)
+        raw_iso = str(
+            person.get("address_country")
+            or data.get("address_country")
+            or parsed.get("country")
+            or ""
+        ).strip()
+        parsed["country"] = normalize_address_country(raw_iso) or parsed.get("country") or ""
+        return parsed
 
     def _resolve_person_id(self, person: dict[str, Any], data: dict[str, Any]) -> tuple[str, str]:
         identity = dict(data.get("identity_proof") or {})
@@ -3150,6 +3233,21 @@ class IcrisNnc1FormBot:
             or ""
         )
         return id_number, self._normalize_id_type(id_type, id_number)
+
+    def _resolve_issuing_country(
+        self, person: dict[str, Any], data: dict[str, Any]
+    ) -> str:
+        from src.materials.countries import normalize_issuing_iso
+
+        identity = dict(data.get("identity_proof") or {})
+        applicant = dict(data.get("applicant") or {})
+        raw = str(
+            person.get("issuing_country")
+            or identity.get("issuing_country")
+            or applicant.get("issuing_country")
+            or ""
+        )
+        return normalize_issuing_iso(raw)
 
     async def _locate_address_block(
         self,
@@ -3407,10 +3505,14 @@ class IcrisNnc1FormBot:
         logger.warning("國家／地區 选项不足 count=%s", n)
         return n >= 8
 
-    async def _pick_country_china(self, page, block) -> bool:
+    async def _pick_country_in_block(
+        self, page, block, option_names: list[str]
+    ) -> bool:
+        opts = [n for n in option_names if (n or "").strip()]
+        if not opts:
+            return False
         hit = await block.evaluate(
-            """(root) => {
-                const opts = ['中国', '中國', 'China', '中華人民共和國'];
+            """(root, opts) => {
                 const isCountry = (t) => /國家|国家/.test((t || '').replace(/\\s+/g, ''));
                 for (const el of root.querySelectorAll(
                     'label, th, .rowTitle, span, div, td'
@@ -3448,7 +3550,8 @@ class IcrisNnc1FormBot:
                     }
                 }
                 return '';
-            }"""
+            }""",
+            opts,
         )
         if hit == "__ant__":
             try:
@@ -3458,7 +3561,7 @@ class IcrisNnc1FormBot:
                 )
             except Exception:
                 pass
-            for opt_text in ("中国", "中國", "China", "中華人民共和國"):
+            for opt_text in opts:
                 opt = page.locator(".ant-select-item-option").filter(
                     has_text=re.compile(re.escape(opt_text), re.I)
                 ).first
@@ -3474,16 +3577,27 @@ class IcrisNnc1FormBot:
             return True
         return False
 
-    async def _select_country_in_block(self, page, block) -> bool:
-        """选國家／地區=中国；失败则再点非香港、关掉后重开下拉。"""
+    async def _select_country_in_block(self, page, block, iso: str = "") -> bool:
+        """选國家／地區：按住址 ISO 对应 ICRIS 原文。香港不硬选中国。"""
+        from src.materials.countries import icris_country_select_candidates
+
+        code = (iso or "").strip().upper()
+        if code == "HKG":
+            names = icris_country_select_candidates("HKG")
+            logger.info("香港住址不默认中国，尝试选项 %s", names[:4])
+        else:
+            names = icris_country_select_candidates(code or "CHN")
 
         async def _try_pick() -> bool:
             await self._wait_country_region_options(page, block)
-            return await self._pick_country_china(page, block)
+            return await self._pick_country_in_block(page, block, names)
 
         if await _try_pick():
             return True
-        logger.warning("國家／地區 选中国失败，再点非香港以重新加载")
+        if code == "HKG":
+            logger.warning("國家／地區 香港不在下拉中，跳过（不选中国）")
+            return False
+        logger.warning("國家／地區 选 %s 失败，再点非香港以重新加载", code or "CHN")
         try:
             await page.keyboard.press("Escape")
         except Exception:
@@ -3540,11 +3654,14 @@ class IcrisNnc1FormBot:
             filled += 1
         order_filled = await self._fill_address_fields_by_order(block, addr)
         filled += order_filled
-        if await self._select_country_in_block(page, block):
+        iso = str(addr.get("country") or "").strip()
+        if await self._select_country_in_block(page, block, iso):
             filled += 1
+        elif iso == "HKG":
+            logger.info("地址区块 [%s] 香港住址不选中國", block_key)
         else:
             raise Nnc1CountryDropdownEmpty(
-                f"地址区块 [{block_key}] 未能选择國家／地區=中国"
+                f"地址区块 [{block_key}] 未能选择國家／地區={iso or 'CHN'}"
             )
         logger.info(
             "地址区块 [%s] 填写完成 filled=%s street=%s region=%s",
@@ -3602,29 +3719,86 @@ class IcrisNnc1FormBot:
         return False
 
     async def _fill_hkid_number(self, page, id_number: str) -> bool:
-        """填写完整香港身分證號碼（含括号校验位）。"""
+        """完整香港身分證號碼：第一框主体、括号内第二框校验位（同 s04）。"""
         if not id_number or id_number.strip() == "無":
             return False
         main, check = split_hkid_number(id_number)
-        ok = await self._fill_field_by_label(
-            page,
-            ["完整香港身分證號碼", "完整香港身份证号码"],
-            main,
+        if not main or main == "無":
+            return False
+        ok = await page.evaluate(
+            """({ main, check }) => {
+                const setNative = (el, v) => {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        HTMLInputElement.prototype, 'value'
+                    ).set;
+                    el.focus();
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                };
+                const vis = (el) => {
+                    if (!el || el.disabled) return false;
+                    const t = (el.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden','radio','checkbox','file','submit','button'].includes(t))
+                        return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const textInputs = (root) => [...(root || document).querySelectorAll(
+                    'input:not([disabled])'
+                )].filter(vis);
+
+                const markers = [...document.querySelectorAll(
+                    'label, span, div, td, th, p, li'
+                )];
+                let block = null;
+                for (const el of markers) {
+                    const t = (el.innerText || '').replace(/\\s+/g, '');
+                    if (!t || t.length > 60) continue;
+                    if (!/完整香港身分[證证]號碼|完整香港身份[證证]号码/.test(t)) continue;
+                    let n = el;
+                    for (let i = 0; i < 10 && n; i++) {
+                        const found = textInputs(n);
+                        if (found.length >= 2) { block = n; break; }
+                        if (found.length >= 1 && !block) block = n;
+                        n = n.parentElement;
+                    }
+                    if (block && textInputs(block).length >= 1) break;
+                }
+                const inputs = textInputs(block || document.body);
+                if (!inputs.length) return false;
+                const pair = inputs.length >= 2 ? inputs.slice(0, 2) : [inputs[0]];
+                setNative(pair[0], main);
+                if (check && pair[1]) setNative(pair[1], check);
+                return pair[0].value === main && (
+                    !check || !pair[1] || pair[1].value === check
+                );
+            }""",
+            {"main": main, "check": check},
         )
-        if not ok:
-            ok = await self._fill_nnc1_identity_slot(
-                page,
-                ["完整香港身分證號碼", "完整香港身份证号码", "完整香港身分證"],
-                main,
-            )
-        if check:
-            bracket = page.locator(
-                "xpath=//*[contains(.,'完整香港身分證') or contains(.,'完整香港身份证')]"
-                "//following::input[not(@type='hidden')][2]"
-            ).first
-            if await bracket.count() > 0:
-                await bracket.fill(check)
-        return ok
+        if ok:
+            logger.info("NNC1 港证已拆填 main=%s check=%s", main, check)
+            return True
+        loc = page.locator(
+            "xpath=//*[contains(.,'完整香港身分證') or contains(.,'完整香港身份证')]"
+            "/following::input[not(@type='hidden') and not(@type='radio')"
+            " and not(@type='checkbox') and not(@type='file')]"
+        )
+        try:
+            n = await loc.count()
+            if n >= 1:
+                await loc.nth(0).fill(main)
+                await loc.nth(0).dispatch_event("input")
+                await loc.nth(0).dispatch_event("change")
+                if check and n >= 2:
+                    await loc.nth(1).fill(check)
+                    await loc.nth(1).dispatch_event("input")
+                    await loc.nth(1).dispatch_event("change")
+                logger.info("NNC1 港证 xpath 已拆填 main=%s check=%s", main, check)
+                return True
+        except Exception:
+            logger.debug("NNC1 港证 xpath 拆填失败", exc_info=True)
+        return False
 
     async def _fill_nnc1_identity_slot(
         self, page, labels: list[str], value: str
@@ -3683,7 +3857,8 @@ class IcrisNnc1FormBot:
     ) -> None:
         """身分識別：两个栏都要写；未用一侧显式填「無」。"""
         id_number, id_type = self._resolve_person_id(person, data)
-        plan = nnc1_identity_fill_plan(id_type, id_number)
+        issuing = self._resolve_issuing_country(person, data)
+        plan = nnc1_identity_fill_plan(id_type, id_number, issuing)
         await self._scroll_to_section(page, ["身分識別", "身份识别", "Identification"])
         logger.info(
             "NNC1-3.1 身分識別 type=%s hkid=%s passport=%s",
@@ -3710,7 +3885,7 @@ class IcrisNnc1FormBot:
                 "護照簽發國家/地區",
             ]
             await self._wait_labeled_dropdown_options(page, country_labels)
-            for country in ("中国", "中國", "China", "中華人民共和國"):
+            for country in icris_country_select_candidates(issuing or plan["passport_country"]):
                 if await self._select_option_by_label(
                     page,
                     country_labels,
@@ -3841,38 +4016,45 @@ class IcrisNnc1FormBot:
                         ant.setAttribute('data-nnc1-signatory-select', '1');
                         return true;
                     };
+                    const afterLabel = (el) => {
+                        let n = el.nextElementSibling;
+                        while (n) {
+                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
+                                return n;
+                            }
+                            const inner = n.querySelector('.ant-select, select');
+                            if (inner) return inner;
+                            n = n.nextElementSibling;
+                        }
+                        n = el.parentElement?.nextElementSibling || null;
+                        while (n) {
+                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
+                                return n;
+                            }
+                            const inner = n.querySelector('.ant-select, select');
+                            if (inner) return inner;
+                            n = n.nextElementSibling;
+                        }
+                        return null;
+                    };
                     const norm = s => (s || '').replace(/\\s+/g, '').trim();
-                    const headingRe = /請選擇創辦成員.*簽署人|请选择创办成员.*签署人/;
 
+                    // 只认短标签「簽署人」后面的下拉，不要标到上面的创办成员姓名框
                     for (const el of document.querySelectorAll(
                         'label, span, td, th, div, p'
                     )) {
-                        const raw = (el.innerText || '').trim();
-                        const t = norm(raw);
-                        if (t.length > 80) continue;
-                        if (t !== '簽署人' && t !== '签署人' && !headingRe.test(raw)) continue;
-                        const row = el.closest('tr')
-                            || el.closest('.ant-row,.ant-form-item,fieldset');
-                        if (row) {
-                            const ant = row.querySelector('.ant-select');
-                            const sel = row.querySelector('select');
-                            if (mark(ant)) return true;
-                            if (sel) {
-                                sel.setAttribute('data-nnc1-signatory-select', '1');
-                                return true;
-                            }
-                        }
-                        const parent = el.parentElement;
-                        const siblingAnt = parent?.querySelector('.ant-select')
-                            || parent?.nextElementSibling?.querySelector('.ant-select');
-                        if (mark(siblingAnt)) return true;
-                        const siblingSel = parent?.querySelector('select')
-                            || parent?.nextElementSibling?.querySelector('select');
-                        if (siblingSel) {
-                            siblingSel.setAttribute('data-nnc1-signatory-select', '1');
-                            return true;
-                        }
+                        const t = norm(el.innerText || '');
+                        if (t !== '簽署人' && t !== '签署人') continue;
+                        const node = afterLabel(el);
+                        if (mark(node)) return true;
                     }
+
+                    const visible = [...document.querySelectorAll('.ant-select, select')].filter(n => {
+                        const r = n.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+                    if (visible.length >= 2) return mark(visible[1]);
+                    if (visible.length === 1) return mark(visible[0]);
 
                     for (const el of document.querySelectorAll(
                         'legend, label, span, div, th, p, td'
@@ -3936,14 +4118,20 @@ class IcrisNnc1FormBot:
         ).strip()
 
     async def _select_first_signatory(self, page) -> bool:
-        """簽署人下拉选第一项（跳过請選擇）。"""
+        """簽署人下拉按顺序选第一项真实选项，不按姓名匹配。
+
+        只操作已标记的簽署人控件及其当前打开的下拉面板，避免扫到页面上
+        其它 ant-select（国家/证件等）的选项。
+        """
         await self._mark_signatory_select(page)
         cur = await self._get_signatory_display_text(page)
         if cur and not re.search(r"請選擇|请选择|^Select$", cur, re.I):
             logger.info("簽署人已选中: %s", cur[:50])
             return True
 
-        # native select：选第一项非 placeholder
+        placeholder = r"請選擇|请选择|^Select$"
+
+        # native <select>：按 index 选第一项非 placeholder
         picked_native = await page.evaluate(
             """() => {
                 const sel = document.querySelector('[data-nnc1-signatory-select]');
@@ -3960,21 +4148,25 @@ class IcrisNnc1FormBot:
             }"""
         )
         if picked_native:
-            logger.info("已选簽署人(select/JS): %s", picked_native)
+            logger.info("已选簽署人(select/JS index): %s", picked_native)
             await page.wait_for_timeout(500)
             return True
 
         sel_loc = page.locator("[data-nnc1-signatory-select]").first
         if await sel_loc.count() > 0 and await sel_loc.evaluate("el => el.tagName === 'SELECT'"):
-            opts = sel_loc.locator("option")
-            count = await opts.count()
+            count = await sel_loc.locator("option").count()
+            texts: list[str] = []
             for i in range(count):
-                text = (await opts.nth(i).inner_text() or "").strip()
-                if not text or re.search(r"請選擇|请选择|Select", text, re.I):
-                    continue
+                texts.append(
+                    (await sel_loc.locator("option").nth(i).inner_text() or "").strip()
+                )
+            idx = first_real_signatory_index(texts)
+            if idx is not None:
                 try:
-                    await sel_loc.select_option(index=i)
-                    logger.info("已选簽署人(select): %s", text[:50])
+                    await sel_loc.select_option(index=idx)
+                    logger.info(
+                        "已选簽署人(select index=%s): %s", idx, texts[idx][:50]
+                    )
                     await page.wait_for_timeout(500)
                     return True
                 except Exception:
@@ -3985,99 +4177,82 @@ class IcrisNnc1FormBot:
         ).first
         if await trigger.count() == 0:
             trigger = page.locator("[data-nnc1-signatory-select]").first
-        if await trigger.count() > 0:
-            await trigger.scroll_into_view_if_needed()
-            try:
-                await trigger.click(timeout=10000)
-            except Exception:
-                await page.evaluate(
-                    """() => {
-                        const t = document.querySelector(
-                            '[data-nnc1-signatory-select] .ant-select-selector,'
-                            + '[data-nnc1-signatory-select]'
-                        );
-                        if (t) t.click();
-                    }"""
-                )
-            try:
-                await page.wait_for_selector(
-                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
-                    ".ant-select-item-option",
-                    timeout=15000,
-                )
-            except Exception:
-                await page.wait_for_timeout(800)
-            opts = page.locator(
-                ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
-                ".ant-select-item-option"
+        if await trigger.count() == 0:
+            logger.warning("未找到簽署人下拉控件")
+            return False
+
+        await trigger.scroll_into_view_if_needed()
+        try:
+            await trigger.click(timeout=10000)
+        except Exception:
+            await page.evaluate(
+                """() => {
+                    const t = document.querySelector(
+                        '[data-nnc1-signatory-select] .ant-select-selector,'
+                        + '[data-nnc1-signatory-select]'
+                    );
+                    if (t) t.click();
+                }"""
             )
-            if await opts.count() == 0:
-                opts = page.locator(".ant-select-item-option")
-            count = await opts.count()
-            for i in range(count):
-                text = (await opts.nth(i).inner_text() or "").strip()
-                if not text or re.search(r"請選擇|请选择|^Select$", text, re.I):
-                    continue
-                try:
-                    await opts.nth(i).click(timeout=8000)
-                    await page.wait_for_timeout(500)
-                    new_val = await self._get_signatory_display_text(page)
-                    logger.info("已选簽署人(ant): %s", (new_val or text)[:50])
-                    return True
-                except Exception:
-                    pass
-            await page.keyboard.press("Escape")
+        try:
+            await page.wait_for_selector(
+                ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                ".ant-select-item-option",
+                timeout=15000,
+            )
+        except Exception:
+            await page.wait_for_timeout(800)
 
-        # 键盘兜底：打开下拉 → 下箭头 → 回车
-        trigger = page.locator(
-            "[data-nnc1-signatory-select] .ant-select-selector"
-        ).first
-        if await trigger.count() > 0:
-            try:
-                await trigger.click(timeout=5000)
-                await page.wait_for_timeout(400)
-                await page.keyboard.press("ArrowDown")
-                await page.wait_for_timeout(300)
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(500)
-                final_kb = await self._get_signatory_display_text(page)
-                if final_kb and not re.search(r"請選擇|请选择", final_kb, re.I):
-                    logger.info("已选簽署人(键盘): %s", final_kb[:50])
-                    return True
-            except Exception as e:
-                logger.debug("簽署人键盘选择失败: %s", e)
-
-        # JS 兜底：先点开再点第一项
-        hit = await page.evaluate(
+        # 只点当前打开面板里、按 DOM 顺序的第一项（跳过 placeholder / disabled）
+        picked = await page.evaluate(
             """() => {
                 const skip = t => !t || /請選擇|请选择|^Select$/i.test(t.trim());
-                const root = document.querySelector('[data-nnc1-signatory-select]');
-                if (!root) return '';
-                const trigger = root.querySelector('.ant-select-selector') || root;
-                if (trigger) trigger.click();
-                const opts = [...document.querySelectorAll(
-                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option,'
-                    + '.ant-select-item-option'
+                const panels = [...document.querySelectorAll(
+                    '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
                 )];
-                for (const opt of opts) {
+                const panel = panels.length ? panels[panels.length - 1] : null;
+                const items = panel
+                    ? panel.querySelectorAll('.ant-select-item-option')
+                    : [];
+                for (const opt of items) {
+                    if (opt.classList.contains('ant-select-item-option-disabled')) {
+                        continue;
+                    }
                     const tx = (opt.innerText || '').trim();
                     if (skip(tx)) continue;
+                    opt.scrollIntoView({ block: 'nearest' });
                     opt.click();
                     return tx.slice(0, 50);
                 }
                 return '';
             }"""
         )
-        if hit:
-            logger.info("已选簽署人(JS): %s", hit)
+        if picked:
             await page.wait_for_timeout(500)
+            new_val = await self._get_signatory_display_text(page)
+            logger.info("已选簽署人(第一项): %s", (new_val or picked)[:50])
             return True
 
+        # 键盘：打开后下箭头选第一项，不读姓名
+        try:
+            await trigger.click(timeout=5000)
+            await page.wait_for_timeout(400)
+            await page.keyboard.press("ArrowDown")
+            await page.wait_for_timeout(200)
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(500)
+            final_kb = await self._get_signatory_display_text(page)
+            if final_kb and not re.search(placeholder, final_kb, re.I):
+                logger.info("已选簽署人(键盘第一项): %s", final_kb[:50])
+                return True
+        except Exception as e:
+            logger.debug("簽署人键盘选择失败: %s", e)
+
         final = await self._get_signatory_display_text(page)
-        if final and not re.search(r"請選擇|请选择", final, re.I):
+        if final and not re.search(placeholder, final, re.I):
             logger.info("簽署人已选中(校验): %s", final[:50])
             return True
-        logger.warning("未选到簽署人，当前显示: %s", final[:40] if final else "空")
+        logger.warning("未选到簽署人第一项，当前显示: %s", final[:40] if final else "空")
         return False
 
     async def _wait_signatory_confirm_ready(self, page) -> None:
@@ -5002,9 +5177,7 @@ class IcrisNnc1FormBot:
 
         # --- NNC1-3.1.3 姓名 ---
         person = self._resolve_step3_person(data)
-        name_cn = (person.get("name_cn") or "").strip()
-        name_en = (person.get("name_en") or "").strip()
-        await self._fill_step3_person_names(page, name_cn, name_en)
+        await self._fill_step3_person_names(page, person, data)
 
         # --- NNC1-3.1.4 认购股本 ---
         sc = self._resolve_share_capital(data)
@@ -5431,6 +5604,86 @@ class IcrisNnc1FormBot:
             raise RuntimeError(f"董事同意书预览页加载超时: {e}")
         await page.wait_for_timeout(600)
 
+    async def _click_sign_modal_continue(self, page) -> str:
+        """只点签署弹窗页脚的「繼續」，避开页面底栏同名按钮。"""
+        scopes = [
+            page.locator(".ant-modal:visible .ant-modal-footer").last,
+            page.locator("[role=dialog]:visible").last,
+            page.locator(".modal:visible .modal-footer").last,
+        ]
+        for scope in scopes:
+            try:
+                if await scope.count() == 0:
+                    continue
+            except Exception:
+                continue
+            btns = scope.locator(
+                "button, a, [role=button], .ant-btn, .btn, input[type=button], input[type=submit]"
+            )
+            try:
+                count = await btns.count()
+            except Exception:
+                continue
+            for i in range(count):
+                el = btns.nth(i)
+                try:
+                    if not await el.is_visible():
+                        continue
+                    raw = (
+                        (await el.inner_text())
+                        or (await el.get_attribute("value"))
+                        or ""
+                    ).strip()
+                    compact = re.sub(r"\s+", "", raw)
+                    if re.search(r"取消|Cancel|返回|Back", compact, re.I):
+                        continue
+                    if NNC1_SAVE_CONTINUE_PAT.search(compact):
+                        continue
+                    if not re.search(r"繼續|继续|Continue", compact, re.I):
+                        continue
+                    try:
+                        await el.click(timeout=8000)
+                    except Exception:
+                        await el.click(force=True, timeout=8000)
+                    return raw or compact
+                except Exception:
+                    continue
+        hit = await self._eval_in_frames(
+            page,
+            """() => {
+                const vis = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const roots = [...document.querySelectorAll(
+                    '.ant-modal, .ant-modal-content, [role=dialog], .modal'
+                )].filter(vis);
+                const root = roots.find(el =>
+                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立/.test(el.innerText || '')
+                ) || roots[0];
+                if (!root) return '';
+                const savePat = /(储存|存储|儲存)及(继续|繼續)/;
+                const footer = root.querySelector('.ant-modal-footer, .modal-footer') || root;
+                const nodes = [...footer.querySelectorAll(
+                    'button, a, [role=button], .ant-btn, .btn, input[type=button], input[type=submit]'
+                )];
+                for (const el of nodes.reverse()) {
+                    const raw = (el.innerText || el.value || el.textContent || '').trim();
+                    const compact = raw.replace(/\\s+/g, '');
+                    if (savePat.test(compact)) continue;
+                    if (/取消|Cancel|返回/i.test(compact)) continue;
+                    if (!/(繼續|继续|Continue)/i.test(compact)) continue;
+                    if (!vis(el)) continue;
+                    el.removeAttribute('disabled');
+                    el.setAttribute('aria-disabled', 'false');
+                    el.click();
+                    return compact || '繼續';
+                }
+                return '';
+            }""",
+        )
+        return str(hit or "")
+
     async def _check_director_consent_and_username(self, page) -> None:
         """弹窗第一屏：勾选年满18岁同意 + 用戶名稱，再點彈窗內繼續。"""
         ok = await self._eval_in_frames(
@@ -5441,9 +5694,12 @@ class IcrisNnc1FormBot:
                     return r.width > 0 && r.height > 0;
                 };
                 const roots = [...document.querySelectorAll(
-                    '.ant-modal, .ant-modal-wrap, [role=dialog], .modal'
+                    '.ant-modal, .ant-modal-content, [role=dialog], .modal'
                 )].filter(vis);
-                const root = roots[0] || document;
+                const root = roots.find(el =>
+                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立/.test(el.innerText || '')
+                ) || roots[0];
+                if (!root) return null;
 
                 const consentRe = /本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事|已年滿18歲|已年满18岁/;
                 let checked = false;
@@ -5456,12 +5712,19 @@ class IcrisNnc1FormBot:
                         || el.closest('label')?.querySelector('input[type=checkbox]');
                     if (box) {
                         if (!box.checked) box.click();
-                        checked = true;
+                        checked = !!box.checked || true;
                         break;
                     }
                     el.click();
                     checked = true;
                     break;
+                }
+                if (!checked) {
+                    const box = [...root.querySelectorAll('input[type=checkbox]')].find(vis);
+                    if (box) {
+                        if (!box.checked) box.click();
+                        checked = true;
+                    }
                 }
 
                 let userPicked = false;
@@ -5484,25 +5747,7 @@ class IcrisNnc1FormBot:
                     userPicked = true;
                     break;
                 }
-
-                const savePat = /(储存|存储|儲存)及(继续|繼續)/;
-                let continued = '';
-                for (const el of root.querySelectorAll(
-                    'button, a, [role=button], .ant-btn, input[type=button]'
-                )) {
-                    const raw = (el.innerText || el.value || '').trim();
-                    const compact = raw.replace(/\\s+/g, '');
-                    if (savePat.test(compact)) continue;
-                    if (!/^(繼續|继续|Continue)$/i.test(compact)) continue;
-                    if (!vis(el)) continue;
-                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') {
-                        continue;
-                    }
-                    el.click();
-                    continued = compact;
-                    break;
-                }
-                return { checked, userPicked, continued };
+                return { checked, userPicked };
             }""",
         )
         if not isinstance(ok, dict) or not ok.get("checked"):
@@ -5511,14 +5756,22 @@ class IcrisNnc1FormBot:
         if not ok.get("userPicked"):
             await self._maybe_screenshot(page, "step6_username_radio_fail")
             raise RuntimeError("未能选择签署方式「用戶名稱」")
-        if not ok.get("continued"):
+        await page.wait_for_timeout(600)
+
+        continued = ""
+        for attempt in range(4):
+            continued = await self._click_sign_modal_continue(page)
+            if continued:
+                break
+            await page.wait_for_timeout(700)
+        if not continued:
             await self._maybe_screenshot(page, "step6_modal_continue_fail")
             raise RuntimeError("未能点击签署弹窗「繼續」")
         logger.info(
             "签署弹窗第一屏: checked=%s user=%s continue=%s",
             ok.get("checked"),
             ok.get("userPicked"),
-            ok.get("continued"),
+            continued,
         )
         await wait_spin_clear(page, timeout_ms=30000)
         await page.wait_for_timeout(800)
