@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Tooltip } from "antd";
 
 export function pct(rate: unknown): string {
   const n = Number(rate);
@@ -129,6 +130,53 @@ export function jobProgressTooltip(p?: JobProgressView | null): string {
   const lines = [`当前：${p.label}`, chain];
   if (p.detail) lines.push(p.detail);
   return lines.join("\n");
+}
+
+const PIPELINE_DONE_STEPS = new Set(["registered", "activated", "form_filled"]);
+
+export function JobPipelineLights({ progress }: { progress?: JobProgressView | null }) {
+  const current = progress?.step || "";
+  const failed = Boolean(progress?.failed);
+  const detail = (progress?.detail || "").trim();
+  const currentIndex = JOB_PIPELINE_STEPS.findIndex((s) => s.step === current);
+
+  return (
+    <div className="job-pipeline-lights" role="list">
+      {JOB_PIPELINE_STEPS.map((s, i) => {
+        const isCurrent = i === currentIndex;
+        let tone: "green" | "yellow" | "red" = "yellow";
+        if (currentIndex >= 0 && i < currentIndex) {
+          tone = "green";
+        } else if (isCurrent) {
+          tone = failed ? "red" : PIPELINE_DONE_STEPS.has(s.step) ? "green" : "yellow";
+        }
+        const stepEl = (
+          <div className="job-pipeline-step" role="listitem">
+            <span className={`job-pipeline-dot is-${tone}`} aria-hidden="true" />
+            <span className={isCurrent ? "job-pipeline-label is-current" : "job-pipeline-label"}>
+              {s.label}
+            </span>
+          </div>
+        );
+        return (
+          <div key={s.step} className="job-pipeline-item">
+            {i > 0 ? (
+              <span className="job-pipeline-arrow" aria-hidden="true">
+                →
+              </span>
+            ) : null}
+            {isCurrent && failed && detail ? (
+              <Tooltip title={<span style={{ whiteSpace: "pre-wrap" }}>{detail}</span>}>
+                {stepEl}
+              </Tooltip>
+            ) : (
+              stepEl
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export function StateBox({

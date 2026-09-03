@@ -187,6 +187,15 @@ select {
   gap: 10px;
 }
 
+.topbar-user {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 16px;
+  border-radius: 50%;
+  color: var(--text);
+}
+
 .content {
   flex: 1;
   min-height: 0;
@@ -720,6 +729,63 @@ table.data tr.clickable:hover td {
 
 .job-expand {
   padding: 4px 8px 8px;
+}
+
+.job-pipeline-lights {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin-bottom: 10px;
+}
+
+.job-pipeline-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.job-pipeline-arrow {
+  margin: 0 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.job-pipeline-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+.job-pipeline-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.04);
+}
+
+.job-pipeline-dot.is-green {
+  background: #52c41a;
+}
+
+.job-pipeline-dot.is-yellow {
+  background: #faad14;
+}
+
+.job-pipeline-dot.is-red {
+  background: #ff4d4f;
+}
+
+.job-pipeline-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.job-pipeline-label.is-current {
+  color: inherit;
+  font-weight: 600;
 }
 
 .job-expand-meta {

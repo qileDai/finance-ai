@@ -49,7 +49,7 @@ export default function App() {
           <Route
             element={
               <RequireAuth>
-                <Layout onRefresh={onRefresh} toast={toast} />
+                <Layout toast={toast} />
               </RequireAuth>
             }
           >

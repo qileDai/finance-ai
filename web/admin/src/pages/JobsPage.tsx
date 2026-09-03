@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, jobCanCancel, jobCanRequeue, jobProgressTagColor, jobProgressTooltip, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { StateBox, JobPipelineLights, jobCanCancel, jobCanRequeue, jobProgressTagColor, jobStatusLabel, jobStatusTagColor } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import {
   Alert,
@@ -321,11 +321,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       key: "progress",
       width: 110,
       render: (_: unknown, r: JobRow) => (
-        <Tooltip
-          title={<span style={{ whiteSpace: "pre-line" }}>{jobProgressTooltip(r.progress)}</span>}
-        >
-          <Tag color={jobProgressTagColor(r.progress)}>{r.progress?.label || "-"}</Tag>
-        </Tooltip>
+        <Tag color={jobProgressTagColor(r.progress)}>{r.progress?.label || "-"}</Tag>
       ),
     },
     {
@@ -549,6 +545,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             expandable={{
               expandedRowRender: (r: JobRow) => (
                 <div className="job-expand">
+                  <JobPipelineLights progress={r.progress} />
                   <div className="job-expand-meta">
                     来源 {r.source || "-"}
                     {" · "}

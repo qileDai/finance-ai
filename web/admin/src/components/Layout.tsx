@@ -1,17 +1,19 @@
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
-import { Menu, Button } from "antd";
+import { Menu, Button, Dropdown } from "antd";
 import {
   AppstoreOutlined,
   BarChartOutlined,
   FormOutlined,
   IdcardOutlined,
+  LogoutOutlined,
   MailOutlined,
   ScheduleOutlined,
   SendOutlined,
   SettingOutlined,
   TeamOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 
 const TITLES: Record<string, string> = {
@@ -59,11 +61,10 @@ const NAV_GROUPS: NavGroup[] = [
 ];
 
 type Props = {
-  onRefresh: () => void;
   toast: string;
 };
 
-export function Layout({ onRefresh, toast }: Props) {
+export function Layout({ toast }: Props) {
   const loc = useLocation();
   const nav = useNavigate();
   const { user, logout } = useAuth();
@@ -120,18 +121,38 @@ export function Layout({ onRefresh, toast }: Props) {
         <header className="topbar">
           <div>
             <h1>{title}</h1>
-            <div className="topbar-meta">
-              近 24h 指标 · {user ? `已登录 ${user}` : ""}
-            </div>
           </div>
           <div className="topbar-actions">
-            <a href="/health" target="_blank" rel="noreferrer">
-              /health
-            </a>
-            <Button onClick={onRefresh}>刷新</Button>
-            <Button type="primary" onClick={onLogout}>
-              退出
-            </Button>
+            <Dropdown
+              trigger={["hover"]}
+              placement="bottomRight"
+              menu={{
+                items: [
+                  {
+                    key: "user",
+                    label: user || "未登录",
+                    disabled: true,
+                  },
+                  { type: "divider" },
+                  {
+                    key: "logout",
+                    label: "退出",
+                    icon: <LogoutOutlined />,
+                    danger: true,
+                  },
+                ],
+                onClick: ({ key }) => {
+                  if (key === "logout") void onLogout();
+                },
+              }}
+            >
+              <Button
+                type="text"
+                className="topbar-user"
+                icon={<UserOutlined />}
+                aria-label="用户菜单"
+              />
+            </Dropdown>
           </div>
         </header>
         <main className="content" key={tick}>
