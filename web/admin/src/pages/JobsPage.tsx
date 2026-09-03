@@ -22,6 +22,7 @@ import dayjs from "dayjs";
 import {
   clearStoredDirectory,
   directoryName,
+  ensureWritePermission,
   isDirectoryPickerSupported,
   loadStoredDirectory,
   pickDirectory,
@@ -100,6 +101,15 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       alive = false;
     };
   }, [folderOk]);
+
+  useEffect(() => {
+    if (!saveDir) return;
+    const grant = () => {
+      void ensureWritePermission(saveDir);
+    };
+    window.addEventListener("pointerdown", grant, { capture: true, once: true });
+    return () => window.removeEventListener("pointerdown", grant, { capture: true });
+  }, [saveDir]);
 
   const pickSaveFolder = useCallback(async (): Promise<ShotDirHandle | null> => {
     try {
@@ -229,7 +239,18 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       });
       return;
     }
-    const label = kind === "cancel" ? "取消" : "重跑";
+    if (kind === "cancel") {
+      Modal.confirm({
+        title: "确认取消？",
+        content: `确认取消任务 #${id}？进行中的浏览器填表会立即停止。`,
+        okText: "取消任务",
+        okButtonProps: { danger: true },
+        cancelText: "返回",
+        onOk: () => runAct(id, "cancel"),
+      });
+      return;
+    }
+    const label = "重跑";
     if (!window.confirm(`确认${label}任务 #${id}？`)) return;
     void runAct(id, kind);
   }
@@ -546,7 +567,7 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
         >
           {saveDir
             ? `把核对/成功截图拖到这里，保存到「${directoryName(saveDir)}」；也可点缩略图旁的保存`
-            : "请先点「选择保存文件夹」，再把截图拖到这里或点保存"}
+            : "点「保存」可选文件夹（选过一次后会记住，刷新不用再点同意）；也可先选文件夹再拖到这里"}
         </div>
       )}
       <div className="jobs-table-hold" ref={tableHoldRef}>

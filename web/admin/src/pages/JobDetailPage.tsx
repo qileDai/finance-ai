@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Image, Tag, Button } from "antd";
+import { Image, Tag, Button, Modal } from "antd";
 import { api, type JobDetailResponse, type JobField } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -103,9 +103,24 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
     };
   }, [jobId, jobStatus]);
 
-  async function act(kind: "cancel" | "requeue") {
+  function act(kind: "cancel" | "requeue") {
+    if (kind === "cancel") {
+      Modal.confirm({
+        title: "确认取消？",
+        content: `确认取消任务 #${jobId}？进行中的浏览器填表会立即停止。`,
+        okText: "取消任务",
+        okButtonProps: { danger: true },
+        cancelText: "返回",
+        onOk: () => runJobAct("cancel"),
+      });
+      return;
+    }
+    if (!window.confirm(`确认重跑任务 #${jobId}？`)) return;
+    void runJobAct("requeue");
+  }
+
+  async function runJobAct(kind: "cancel" | "requeue") {
     const label = kind === "cancel" ? "取消" : "重跑";
-    if (!window.confirm(`确认${label}任务 #${jobId}？`)) return;
     setBusy(true);
     try {
       const res =

@@ -139,6 +139,9 @@ class IcrisJobWorker:
         )
         flush_thread.start()
         try:
+            if self.store.get_job_status(job_id) == "cancelled":
+                logger.warning("ICRIS job 开始前已被取消 id=%s", job_id)
+                return
             # 与 python main.py --step register 一致：走 Chrome CDP + stealth，避免 s02 指纹卡加载
             ctx = self.workflow.run_icris_job(job, force_isolated_browser=False)
             package_dir = str(ctx.package_dir or package_dir)

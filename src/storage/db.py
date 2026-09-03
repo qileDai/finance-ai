@@ -1436,14 +1436,17 @@ class ExternalGroupStore:
             )
 
     def mark_job_awaiting_review(self, job_id: int) -> None:
-        """标记 job 进入待审核状态（bot 在 s03a 等待人工确认）。"""
+        """标记 job 进入待审核状态（bot 在 s03a 等待人工确认）。
+
+        只从 running 进入，避免覆盖管理员已取消的任务。
+        """
         now = _utc_now()
         with self._conn() as conn:
             conn.execute(
                 """UPDATE registration_jobs
                    SET status='awaiting_review', review_status='awaiting_review',
                        updated_at=?
-                   WHERE id=?""",
+                   WHERE id=? AND status='running'""",
                 (now, job_id),
             )
 

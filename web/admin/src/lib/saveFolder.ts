@@ -96,8 +96,14 @@ export async function loadStoredDirectory(): Promise<ShotDirHandle | null> {
   try {
     const handle = await idbGet();
     if (!handle) return null;
-    const ok = await ensureWritePermission(handle);
-    if (!ok) return null;
+    const opts = { mode: "readwrite" as const };
+    const q = await handle.queryPermission(opts);
+    // 刷新后不要在这里 requestPermission：没有用户手势会被拒，文件夹看起来像没选过。
+    // granted：直接用。prompt：先挂上，点保存/拖拽/页面点击时再授权。denied：丢掉。
+    if (q === "denied") {
+      await idbClear();
+      return null;
+    }
     return handle;
   } catch {
     return null;

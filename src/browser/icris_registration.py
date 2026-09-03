@@ -497,6 +497,7 @@ class IcrisRegistrationBot:
         self.job_id: int = 0
         self.on_review_needed: Any = None  # Callable[[int, str], None] | None
         self._company_data: dict[str, Any] = {}
+        self._active_page: "Page | None" = None
 
     def _persist_s02_account_to_job(self, data: dict[str, Any]) -> None:
         """s02 填表后将最终 icris_account 写回 job payload（供真实 NNC1 登录）。"""
@@ -524,6 +525,34 @@ class IcrisRegistrationBot:
         self._user_info_filled = False
         self._identity_proof_filled = False
         self._locale = None
+
+    def _job_is_cancelled(self) -> bool:
+        if not self.job_id:
+            return False
+        try:
+            from src.storage.db import ExternalGroupStore
+
+            return ExternalGroupStore().get_job_status(self.job_id) == "cancelled"
+        except Exception:
+            return False
+
+    def _raise_if_cancelled(self) -> None:
+        if self._job_is_cancelled():
+            raise IcrisFlowError("任务已被取消", no_requeue=True)
+
+    async def _abort_page_if_cancelled(self) -> None:
+        """管理员取消后关掉本任务标签页，打断 Playwright 等待。不关整窗 Chrome。"""
+        while True:
+            if self._job_is_cancelled():
+                page = self._active_page
+                logger.warning("任务已取消，关闭页面 job #%s", self.job_id)
+                try:
+                    if page is not None and not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+                return
+            await asyncio.sleep(1.0)
 
     async def _log_page(self, page: "Page", label: str) -> None:
         logger.info("[%s] URL: %s", label, page.url)
@@ -621,9 +650,18 @@ class IcrisRegistrationBot:
         from src.storage.db import ExternalGroupStore
 
         store = ExternalGroupStore()
+        self._raise_if_cancelled()
 
         # 1) 标记 awaiting_review
         store.mark_job_awaiting_review(self.job_id)
+        if store.get_job_status(self.job_id) != "awaiting_review":
+            self._raise_if_cancelled()
+            logger.warning(
+                "s03a job #%s 未能进入 awaiting_review（status=%s）",
+                self.job_id,
+                store.get_job_status(self.job_id),
+            )
+            return False
         logger.info(
             "s03a job #%s 已标记 awaiting_review，等待人工确认",
             self.job_id,
@@ -642,6 +680,7 @@ class IcrisRegistrationBot:
         poll_interval = 5.0
         elapsed = 0.0
         while elapsed < timeout_s:
+            self._raise_if_cancelled()
             await page.wait_for_timeout(int(poll_interval * 1000))
             elapsed += poll_interval
             # 优先检查任务是否被取消
@@ -709,6 +748,7 @@ class IcrisRegistrationBot:
 
     async def _wait_spin_clear(self, page: "Page", timeout_ms: int | None = None) -> bool:
         """等待全页 loading 结束；超时则 Esc 尝试恢复（防卡死）"""
+        self._raise_if_cancelled()
         if page.is_closed():
             return False
         limit = timeout_ms or _SPIN_TIMEOUT_MS
@@ -753,6 +793,7 @@ class IcrisRegistrationBot:
         deadline = time.time() + max(0.5, timeout_ms / 1000)
         tag = label or "步骤"
         while time.time() < deadline:
+            self._raise_if_cancelled()
             if page.is_closed():
                 return False
             remain_ms = max(200, int((deadline - time.time()) * 1000))
@@ -812,6 +853,7 @@ class IcrisRegistrationBot:
         except Exception:
             logger.debug("关闭旧页失败", exc_info=True)
         new_page = await context.new_page()
+        self._active_page = new_page
         logger.info("已关闭旧页并打开新标签，准备重新进入注册")
         return new_page
 
@@ -6094,7 +6136,10 @@ class IcrisRegistrationBot:
         self, page: "Page", data: dict[str, Any]
     ) -> "Page":
         """单次注册尝试（从导航到填完）。元素不出现时抛 IcrisStepLoadError。"""
+        self._raise_if_cancelled()
         page = await self._navigate_to_registration(page)
+        if page:
+            self._active_page = page
         if not page:
             raise IcrisStepLoadError(
                 "无法进入 ICRIS 注册页（网络或门户会话）"
@@ -6130,6 +6175,7 @@ class IcrisRegistrationBot:
                     if not new_page:
                         break
                     page = new_page
+                    self._active_page = page
                     await self._ensure_on_registration(page, "重新进入条款页")
 
         if not terms_ok:
@@ -6341,15 +6387,27 @@ class IcrisRegistrationBot:
             )
             context = await create_browser_context(browser)
             page = await context.new_page()
+            self._active_page = page
             run_error: Exception | None = None
+            cancel_watch = (
+                asyncio.create_task(self._abort_page_if_cancelled())
+                if self.job_id
+                else None
+            )
 
             try:
                 for outer in range(1, 3):
+                    self._raise_if_cancelled()
                     self._reset_flow_flags()
                     try:
                         page = await self._run_registration_attempt(page, data)
+                        self._active_page = page
                         break
                     except IcrisStepLoadError as e:
+                        if self._job_is_cancelled():
+                            raise IcrisFlowError(
+                                "任务已被取消", no_requeue=True
+                            ) from e
                         logger.error(
                             "步骤加载失败，将关页重开 outer=%d/2: %s",
                             outer,
@@ -6360,38 +6418,62 @@ class IcrisRegistrationBot:
                         page = await self._reopen_fresh_page(page, context)
 
             except Exception as e:
-                run_error = e
-                logger.exception("注册流程异常: %s", e)
-                screenshot_path = ""
-                try:
-                    from config.settings import PROJECT_ROOT
-
-                    shot_dir = PROJECT_ROOT / "data" / "icris_failures"
-                    shot_dir.mkdir(parents=True, exist_ok=True)
-                    from datetime import datetime, timezone
-
-                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                    shot_file = shot_dir / f"job_fail_{stamp}.png"
-                    if not page.is_closed():
-                        await page.screenshot(path=str(shot_file), full_page=True)
-                        screenshot_path = str(shot_file)
-                        logger.warning("ICRIS 失败截图已保存: %s", screenshot_path)
-                except Exception as shot_err:
-                    logger.warning("保存失败截图失败: %s", shot_err)
-                if screenshot_path:
-                    run_error = IcrisFlowError(str(e), screenshot_path=screenshot_path)
+                if self._job_is_cancelled():
+                    run_error = IcrisFlowError("任务已被取消", no_requeue=True)
                     run_error.__cause__ = e
+                    logger.warning("注册流程因取消中止 job #%s: %s", self.job_id, e)
+                else:
+                    run_error = e
+                    logger.exception("注册流程异常: %s", e)
+                    screenshot_path = ""
+                    try:
+                        from config.settings import PROJECT_ROOT
+
+                        shot_dir = PROJECT_ROOT / "data" / "icris_failures"
+                        shot_dir.mkdir(parents=True, exist_ok=True)
+                        from datetime import datetime, timezone
+
+                        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        shot_file = shot_dir / f"job_fail_{stamp}.png"
+                        if not page.is_closed():
+                            await page.screenshot(path=str(shot_file), full_page=True)
+                            screenshot_path = str(shot_file)
+                            logger.warning("ICRIS 失败截图已保存: %s", screenshot_path)
+                    except Exception as shot_err:
+                        logger.warning("保存失败截图失败: %s", shot_err)
+                    if screenshot_path:
+                        if isinstance(e, IcrisFlowError):
+                            if not e.screenshot_path:
+                                e.screenshot_path = screenshot_path
+                            run_error = e
+                        else:
+                            run_error = IcrisFlowError(
+                                str(e), screenshot_path=screenshot_path
+                            )
+                            run_error.__cause__ = e
             finally:
-                # 审核拒绝/超时：立即关闭浏览器，不再保持
-                skip_keep_open = isinstance(run_error, IcrisFlowError) and run_error.no_requeue
+                if cancel_watch:
+                    cancel_watch.cancel()
+                    try:
+                        await cancel_watch
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                # 审核拒绝/超时/取消：立即关闭，不再保持
+                skip_keep_open = (
+                    isinstance(run_error, IcrisFlowError) and run_error.no_requeue
+                ) or self._job_is_cancelled()
                 if skip_keep_open:
-                    logger.info("审核拒绝/超时，立即关闭浏览器")
+                    logger.info("审核拒绝/超时/取消，立即关闭浏览器")
                 else:
                     logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
-                    try:
-                        await page.wait_for_timeout(keep_open * 1000)
-                    except Exception:
-                        pass
+                    remaining = float(keep_open)
+                    while remaining > 0 and not self._job_is_cancelled():
+                        step = min(1.0, remaining)
+                        try:
+                            await page.wait_for_timeout(int(step * 1000))
+                        except Exception:
+                            break
+                        remaining -= step
                 await close_browser_session(browser, external_cdp=via_cdp)
 
             if run_error:
