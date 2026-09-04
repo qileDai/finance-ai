@@ -157,5 +157,88 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertEqual(fields["director_given_en"], "Huibin")
 
 
+class TestS02UsernamePinyin(unittest.TestCase):
+    def test_person_en_helper_pinyin_vs_latin(self):
+        from src.materials.aggregator import person_en_for_icris_username
+
+        self.assertEqual(person_en_for_icris_username("", "胡丹东"), "Hu Dandong")
+        self.assertEqual(
+            person_en_for_icris_username("CHAN Tai Man", "陳大文"),
+            "CHAN Tai Man",
+        )
+        self.assertEqual(
+            person_en_for_icris_username("ZHANG Huibin", "張慧斌"),
+            "ZHANG Huibin",
+        )
+
+    def test_derive_hudandong_username_has_pinyin_not_written_back(self):
+        from src.browser.icris_registration import derive_icris_credentials
+
+        data = {
+            "applicant": {
+                "name_cn": "胡丹东",
+                "name_en": "",
+                "id_number": "340421198611163846",
+                "director_name": "胡丹东",
+            },
+            "identity_proof": {"id_number": "340421198611163846"},
+            "icris_account": {},
+        }
+        user, _pwd = derive_icris_credentials(data)
+        self.assertRegex(user, r"^[Hh]d63846yt")
+        self.assertEqual(data["applicant"].get("name_en") or "", "")
+        self.assertEqual(data["applicant"].get("surname_en") or "", "")
+
+    def test_derive_uses_english_initials_not_pinyin(self):
+        from src.browser.icris_registration import derive_icris_credentials
+
+        data = {
+            "applicant": {
+                "name_cn": "陳大文",
+                "name_en": "CHAN Tai Man",
+                "surname_en": "CHAN",
+                "given_en": "Tai Man",
+                "id_number": "A1234567",
+            },
+            "identity_proof": {"id_number": "A1234567"},
+            "icris_account": {},
+        }
+        user, _pwd = derive_icris_credentials(data)
+        self.assertRegex(user.lower(), r"^ctm")
+        self.assertEqual(data["applicant"]["name_en"], "CHAN Tai Man")
+
+    def test_retry_path_hudandong_has_pinyin(self):
+        from src.browser.icris_registration import _person_en_and_id_from_data
+        from src.materials.aggregator import _generate_icris_credentials
+
+        data = {
+            "applicant": {"name_cn": "胡丹东", "name_en": ""},
+            "identity_proof": {"id_number": "340421198611163846"},
+        }
+        person_en, id_number = _person_en_and_id_from_data(data)
+        user, _pwd = _generate_icris_credentials(person_en, id_number, retry=True)
+        self.assertRegex(user.lower(), r"^hd63846yt")
+        self.assertEqual(data["applicant"].get("name_en") or "", "")
+
+    def test_bracket_english_username_zhang_huibin(self):
+        materials = {
+            "company_name_cn": {"field_value": "撼世全球有限公司"},
+            "company_name_en": {"field_value": "Humsienk Global Limited"},
+            "director_name": {"field_value": "張慧斌【ZHANG，Huibin】"},
+            "director_name_cn": {"field_value": "張慧斌"},
+            "director_surname_en": {"field_value": "ZHANG"},
+            "director_given_en": {"field_value": "Huibin"},
+            "id_type": {"field_value": "PRC_ID"},
+            "id_number": {"field_value": "44051420000318492X"},
+        }
+        data = aggregate_company_data(materials)
+        applicant = data.get("applicant") or {}
+        self.assertEqual(applicant.get("surname_en"), "ZHANG")
+        self.assertEqual(applicant.get("given_en"), "Huibin")
+        username = str((data.get("icris_account") or {}).get("username") or "")
+        self.assertRegex(username.lower(), r"^zh")
+        self.assertIn("yt", username.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

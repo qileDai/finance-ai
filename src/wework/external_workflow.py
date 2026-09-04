@@ -82,15 +82,17 @@ class ExternalGroupWorkflow:
         重跑（attempts>1）时前一次的用户名已在 ICRIS 被占用，
         按新规则重新 roll 末尾 4 位随机字符生成新用户名，同步写入 DB 供前端展示。
         """
-        person_en = str(
-            (company_data.get("applicant") or {}).get("name_en") or ""
-        )
-        id_number = str(
-            (company_data.get("identity_proof") or {}).get("id_number") or ""
+        from src.browser.icris_registration import (
+            _person_en_and_id_from_data,
+            finalize_s02_icris_credentials,
         )
         from src.materials.aggregator import _generate_icris_credentials
-        from src.browser.icris_registration import finalize_s02_icris_credentials
 
+        person_en, id_number = _person_en_and_id_from_data(company_data)
+        if not id_number:
+            id_number = str(
+                (company_data.get("identity_proof") or {}).get("id_number") or ""
+            )
         raw_user, raw_pwd = _generate_icris_credentials(
             person_en, id_number, retry=True
         )

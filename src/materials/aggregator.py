@@ -173,6 +173,27 @@ def _yingtai_username_has_random_suffix(username: str, rand_len: int | None = No
     return u[:-rand_len].endswith("yt")
 
 
+def person_en_for_icris_username(name_en: str = "", name_cn: str = "") -> str:
+    """s02 用户名用的英文/拼音。有拉丁 name_en 用英文；否则中文转拼音。不写回表单。"""
+    en = (name_en or "").strip()
+    if en and re.search(r"[A-Za-z]", en):
+        return en
+    cn = "".join(ch for ch in (name_cn or "") if "\u4e00" <= ch <= "\u9fff")
+    if not cn:
+        return en
+    try:
+        from pypinyin import lazy_pinyin
+
+        pinyins = lazy_pinyin(cn)
+        if pinyins:
+            family = pinyins[0].capitalize()
+            given = "".join(pinyins[1:]).capitalize() if len(pinyins) > 1 else ""
+            return f"{family} {given}".strip()
+    except Exception:
+        pass
+    return en
+
+
 def _generate_icris_credentials(
     person_en: str = "", id_number: str = "", *, retry: bool = False
 ) -> tuple[str, str]:
@@ -276,17 +297,7 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
     address_country = _get_val(materials, "address_country")
     address_is_hk = _get_val(materials, "address_is_hk")
     # 纯中文名 → 拼音只用于生成用户名，不写入 name_en（S03 不应填英文姓/名）
-    username_en = person_en
-    if not username_en and person_cn:
-        try:
-            from pypinyin import lazy_pinyin
-            pinyins = lazy_pinyin(person_cn)
-            if pinyins:
-                family = pinyins[0].capitalize()
-                given = "".join(pinyins[1:]).capitalize() if len(pinyins) > 1 else ""
-                username_en = f"{family} {given}".strip()
-        except Exception:
-            pass
+    username_en = person_en_for_icris_username(person_en, person_cn)
     applicant_name_raw = _get_val(materials, "applicant_name")
     if applicant_name_raw:
         am_cn, am_en = _split_cjk_latin_name(applicant_name_raw)

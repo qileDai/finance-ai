@@ -68,7 +68,7 @@ def append_random_username_suffix(username: str, length: int = 2) -> str:
 
 
 def _person_en_and_id_from_data(data: dict[str, Any]) -> tuple[str, str]:
-    """从 company_data 提取英文名与证件号（申请人 / 身份证明 / 董事 / 创办成员）。"""
+    """从 company_data 提取用户名用英文/拼音与证件号。不写回 name_en。"""
     applicant = data.get("applicant") or {}
     identity = data.get("identity_proof") or {}
     directors = data.get("directors") or []
@@ -81,6 +81,14 @@ def _person_en_and_id_from_data(data: dict[str, Any]) -> tuple[str, str]:
         or str(director0.get("name_en") or "").strip()
         or str(founder0.get("name_en") or "").strip()
     )
+    person_cn = (
+        str(applicant.get("name_cn") or "").strip()
+        or str(director0.get("name_cn") or "").strip()
+        or str(founder0.get("name_cn") or "").strip()
+    )
+    from src.materials.aggregator import person_en_for_icris_username
+
+    person_en = person_en_for_icris_username(person_en, person_cn)
     id_number = (
         str(identity.get("id_number") or "").strip()
         or str(applicant.get("id_number") or "").strip()
