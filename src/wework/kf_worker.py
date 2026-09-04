@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from config.settings import settings
 from src.storage.db import ExternalGroupStore
-from src.wework.external_client import WeWorkExternalClient
+from src.wework.external_client import WeWorkExternalClient, is_wework_invalid_credential
 from src.wework.group_state_machine import GroupStateMachine
 from src.wework.kf_session import build_kf_roomid
 
@@ -32,6 +32,8 @@ class KfSyncWorker:
     _thread: threading.Thread | None = None
     _recover_thread: threading.Thread | None = None
     _sync_lock: threading.Lock = field(default_factory=threading.Lock)
+    _auth_failed: bool = False
+    _auth_logged: bool = False
 
     def __post_init__(self) -> None:
         if self.state_machine is None:
@@ -50,10 +52,29 @@ class KfSyncWorker:
             name=f"kf-callback-{open_kfid[:8]}",
         ).start()
 
+    def _note_auth_failure(self, open_kfid: str, exc: BaseException) -> bool:
+        if not is_wework_invalid_credential(exc):
+            return False
+        if not self._auth_logged:
+            logger.error(
+                "kf 获取 token 失败 40001（open_kfid=%s）。请把 WEWORK_KF_SECRET "
+                "换成企业微信「微信客服」Secret（不是应用 Secret），并确认与 "
+                "WEWORK_CORP_ID 属同一企业。轮询已暂停直至进程重启。详情: %s",
+                open_kfid,
+                exc,
+            )
+            self._auth_logged = True
+        self._auth_failed = True
+        return True
+
     def _safe_sync_for_account(self, open_kfid: str, token: str = "") -> None:
+        if self._auth_failed:
+            return
         try:
             self.sync_for_account(open_kfid, token=token)
         except Exception as e:
+            if self._note_auth_failure(open_kfid, e):
+                return
             logger.exception("kf 回调 sync 失败 open_kfid=%s: %s", open_kfid, e)
 
     def sync_for_account(self, open_kfid: str, *, token: str = "") -> int:
@@ -119,11 +140,21 @@ class KfSyncWorker:
             except Exception as e:
                 logger.exception("kf 启动 inbox 恢复失败: %s", e)
             while self._running:
+                if self._auth_failed:
+                    logger.error("kf 轮询因 40001 已停止，请修正 WEWORK_KF_SECRET 后重启进程")
+                    self._running = False
+                    return
                 for open_kfid in accounts:
+                    if self._auth_failed:
+                        break
                     try:
                         self.sync_for_account(open_kfid)
                     except Exception as e:
+                        if self._note_auth_failure(open_kfid, e):
+                            break
                         logger.exception("kf 轮询 sync 异常 %s: %s", open_kfid, e)
+                if self._auth_failed:
+                    continue
                 try:
                     self.recover_stale_inbox()
                 except Exception as e:

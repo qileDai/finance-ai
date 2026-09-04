@@ -1,15 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Button, Select, Spin, message } from "antd";
+import { Button, Select, Spin } from "antd";
 import { api, type RunnerFile, type RunnerStatus } from "../api";
 import { PASSPORT_COUNTRIES, countryLabel } from "../countries";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
 import { statusBadge } from "../components/ui";
-
-type Props = {
-  onToast: (msg: string) => void;
-};
+import { useMessageApi } from "../useMessageApi";
 
 type TextField = {
   key: string;
@@ -207,7 +204,8 @@ function parseRegistrationText(raw: string): Record<string, string> {
   return result;
 }
 
-export function RegisterPage({ onToast }: Props) {
+export function RegisterPage() {
+  const messageApi = useMessageApi();
   const [fields, setFields] = useState<Record<string, string>>({
     registered_capital: "1万港币",
   });
@@ -224,7 +222,6 @@ export function RegisterPage({ onToast }: Props) {
   const [defaultEmail, setDefaultEmail] = useState("");
   const [parsing, setParsing] = useState(false);
   const [s03Countries, setS03Countries] = useState<string[]>([]);
-  const [messageApi, contextHolder] = message.useMessage();
   const logRef = useRef<HTMLDivElement>(null);
 
   // 预填默认邮箱 + 默认办事处地址 + 恢复运行中任务状态
@@ -455,7 +452,7 @@ export function RegisterPage({ onToast }: Props) {
   async function onSubmit() {
     const err = validate();
     if (err) {
-      onToast(err);
+      messageApi.warning(err);
       return;
     }
     setSubmitting(true);
@@ -478,7 +475,7 @@ export function RegisterPage({ onToast }: Props) {
         taiwan_passport: taiwanPassport ? "1" : "0",
       };
       const res = await api.registerRunner.submit(payload, files, false);
-      onToast(
+      messageApi.success(
         res.job_id
           ? `已入队任务 #${res.job_id}：${res.company_name}`
           : `已提交注册：${res.company_name}`
@@ -501,7 +498,7 @@ export function RegisterPage({ onToast }: Props) {
       setPolling(true);
       resetFormForNext();
     } catch (e) {
-      onToast((e as Error).message || "提交失败");
+      messageApi.error((e as Error).message || "提交失败");
     } finally {
       setSubmitting(false);
     }
@@ -509,7 +506,6 @@ export function RegisterPage({ onToast }: Props) {
 
   return (
     <>
-      {contextHolder}
       <Spin spinning={parsing}>
         <div className="register-page">
       <section className="reg-card reg-paste-card">

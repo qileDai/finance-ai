@@ -3,13 +3,14 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { Button } from "antd";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import { useMessageApi } from "../useMessageApi";
 
 export function LoginPage() {
+  const message = useMessageApi();
   const { user, loading, setUser } = useAuth();
   const nav = useNavigate();
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   if (!loading && user) {
@@ -18,14 +19,13 @@ export function LoginPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    setError("");
     setBusy(true);
     try {
       const res = await api.login(username, password);
       setUser(res.username);
       nav("/", { replace: true });
     } catch (err) {
-      setError((err as Error).message || "登录失败");
+      message.error((err as Error).message || "登录失败");
     } finally {
       setBusy(false);
     }
@@ -61,7 +61,6 @@ export function LoginPage() {
               required
             />
           </label>
-          {error ? <div className="login-error">{error}</div> : null}
           <Button
             type="primary"
             htmlType="submit"

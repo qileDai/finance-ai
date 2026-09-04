@@ -29,6 +29,11 @@ body,
   margin: 0;
 }
 
+#root .ant-app {
+  height: 100%;
+  min-height: 100%;
+}
+
 body {
   font-family: var(--font);
   color: var(--ink);
@@ -113,10 +118,12 @@ select {
 
 .nav {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
 .nav .ant-menu {
+  width: 100%;
   background: transparent;
   color: var(--sidebar-ink);
   font-size: 13px;
@@ -125,7 +132,19 @@ select {
 .nav .ant-menu-inline .ant-menu-item {
   color: var(--sidebar-ink);
   margin: 2px 0;
+  width: calc(100% - 8px) !important;
+  height: auto !important;
+  line-height: 1.35 !important;
+  padding-inline: 12px !important;
+  padding-block: 8px !important;
   border-radius: var(--radius);
+  white-space: normal;
+}
+
+.nav .ant-menu-title-content {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
 }
 
 .nav .ant-menu-inline .ant-menu-item:hover {
@@ -427,19 +446,6 @@ table.data tr.clickable:hover td {
   color: var(--danger);
 }
 
-.toast {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  background: var(--sidebar);
-  color: #fff;
-  padding: 10px 14px;
-  border-radius: var(--radius);
-  z-index: 50;
-  max-width: 360px;
-  animation: kpi-in 0.25s ease-out;
-}
-
 .detail-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -532,11 +538,6 @@ table.data tr.clickable:hover td {
   margin-top: 4px;
   width: 100%;
   padding: 10px 12px;
-}
-
-.login-error {
-  color: var(--danger);
-  font-size: 0.88rem;
 }
 
 .login-hint {

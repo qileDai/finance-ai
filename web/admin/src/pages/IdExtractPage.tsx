@@ -2,10 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "antd";
 import { api } from "../api";
 import { ImageModal } from "../components/ImageModal";
-
-type Props = {
-  onToast: (msg: string) => void;
-};
+import { useMessageApi } from "../useMessageApi";
 
 type DisplayRow = { key: string; label: string; value: string };
 
@@ -78,7 +75,8 @@ function launchWindowsSnip() {
   }
 }
 
-export function IdExtractPage({ onToast }: Props) {
+export function IdExtractPage() {
+  const message = useMessageApi();
   const [file, setFile] = useState<File | undefined>();
   const [previewUrl, setPreviewUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -92,8 +90,6 @@ export function IdExtractPage({ onToast }: Props) {
   const previewUrlRef = useRef("");
   const snipWaitingRef = useRef(false);
   const beforeClipSigRef = useRef("");
-  const onToastRef = useRef(onToast);
-  onToastRef.current = onToast;
 
   const copyBlock = useMemo(() => {
     return display
@@ -125,13 +121,13 @@ export function IdExtractPage({ onToast }: Props) {
 
   function applyImageOnly(f: File, toast: string) {
     pickRef.current(f);
-    onToastRef.current(toast);
+    message.success(toast);
   }
 
   async function recognizeFile(f: File) {
     const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
     if (!f.type.startsWith("image/") && !isPdf) {
-      onToastRef.current("仅支持图片（JPG/PNG/WEBP）或 PDF");
+      message.warning("仅支持图片（JPG/PNG/WEBP）或 PDF");
       return;
     }
     loadingRef.current = true;
@@ -161,13 +157,15 @@ export function IdExtractPage({ onToast }: Props) {
           .filter(Boolean)
           .join(" · ")
       );
-      onToastRef.current(
-        rows.length ? `识别成功：${rows.length} 项` : "识别完成，未得到字段"
-      );
+      if (rows.length) {
+        message.success(`识别成功：${rows.length} 项`);
+      } else {
+        message.warning("识别完成，未得到字段");
+      }
     } catch (e) {
       setDisplay([]);
       setFields({});
-      onToastRef.current((e as Error).message || "识别失败");
+      message.error((e as Error).message || "识别失败");
     } finally {
       loadingRef.current = false;
       setLoading(false);
@@ -176,7 +174,7 @@ export function IdExtractPage({ onToast }: Props) {
 
   async function onRecognize() {
     if (!file) {
-      onToastRef.current("请先上传或粘贴证件图片");
+      message.warning("请先上传或粘贴证件图片");
       return;
     }
     await recognizeFile(file);
@@ -254,12 +252,14 @@ export function IdExtractPage({ onToast }: Props) {
 
   async function onCopyAll() {
     const ok = await copyText(copyBlock);
-    onToast(ok ? "已复制全部识别结果" : "复制失败，请手动全选下方文本框");
+    if (ok) message.success("已复制全部识别结果");
+    else message.error("复制失败，请手动全选下方文本框");
   }
 
   async function onCopyOne(label: string, value: string) {
     const ok = await copyText(value);
-    onToast(ok ? `已复制「${label}」` : "复制失败，请手动选择");
+    if (ok) message.success(`已复制「${label}」`);
+    else message.error("复制失败，请手动选择");
   }
 
   return (

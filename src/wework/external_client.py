@@ -15,6 +15,13 @@ from config.settings import PROJECT_ROOT, settings
 logger = logging.getLogger(__name__)
 
 
+def is_wework_invalid_credential(exc: BaseException | str) -> bool:
+    """企业微信 40001：Secret/corpid 无效。"""
+    text = str(exc or "")
+    low = text.lower()
+    return "40001" in text or "invalid credential" in low
+
+
 @dataclass
 class WeWorkExternalClient:
     """客户群消息收发（外部群）"""

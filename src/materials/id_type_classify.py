@@ -6,16 +6,18 @@ import logging
 import re
 from typing import Any
 
+from src.materials.zh_norm import to_hans
+
 logger = logging.getLogger(__name__)
 
 ICRIS_ID_TYPES = ("HKID", "PRC_ID", "PASSPORT")
 
-# 证件标签行（不含住址、注册地址）
+# 证件标签行（匹配用简体；原文经 to_hans 后再搜）
 _ID_LABEL_LINE_RE = re.compile(
-    r"香港身份证|香港身分證|香港身分证|"
-    r"身份证号码|身分證號碼|身份证号|身分证号码|身分證號|"
-    r"护照号码|護照號碼|护照号|護照號|"
-    r"证件号|證件號"
+    r"香港身份证|"
+    r"身份证号码|身份证号|"
+    r"护照号码|护照号|"
+    r"证件号"
 )
 
 CLASSIFY_ID_SYSTEM = (
@@ -24,7 +26,7 @@ CLASSIFY_ID_SYSTEM = (
     "规则："
     "1) 标签「香港身份证号码」「香港身分證號碼」「香港身份证」等 → HKID。"
     "港证校验位可能写成（2）或 (2)，id_number 须保留校验位。"
-    "2) 标签「护照号码」「護照號碼」「护照号」→ PASSPORT。"
+    "2) 标签「护照号码」「護照號碼」「護照号码」「护照号」→ PASSPORT。"
     "3) 标签「身份证号码」「居民身份证」且不是香港身份证 → PRC_ID（内地证）。"
     "4) 有多条时：香港身份证 / 护照优先于笼统的「身份证」。"
     "5) 注册地址或住址里出现「香港」不能当作港证。"
@@ -57,7 +59,7 @@ def extract_id_label_lines(text: str) -> str:
         line = raw.strip()
         if not line:
             continue
-        if _ID_LABEL_LINE_RE.search(line):
+        if _ID_LABEL_LINE_RE.search(to_hans(line)):
             lines.append(line)
     return "\n".join(lines)
 
@@ -92,11 +94,12 @@ def alias_id_type(raw: str) -> str:
 def refine_id_type(text: str, id_number: str = "", llm_type: str = "") -> str:
     """主判据：证件标签行。住址/注册地址不参与。"""
     snippet = extract_id_label_lines(text)
-    if re.search(r"香港身份证|香港身分證|香港身分证", snippet):
+    hans = to_hans(snippet)
+    if re.search(r"香港身份证", hans):
         return "HKID"
-    if re.search(r"护照号码|護照號碼|护照号|護照號", snippet):
+    if re.search(r"护照号码|护照号", hans):
         return "PASSPORT"
-    if re.search(r"身份证号码|身分證號碼|身份证号|身分证号码|身分證號", snippet):
+    if re.search(r"身份证号码|身份证号", hans):
         return "PRC_ID"
     aliased = alias_id_type(llm_type)
     if aliased in ICRIS_ID_TYPES:
@@ -125,9 +128,8 @@ def weak_fallback_id_type(text: str, id_number: str = "") -> dict[str, str]:
     extracted = num
     if not extracted:
         m = re.search(
-            r"(?:香港身份证号码|香港身分證號碼|护照号码|護照號碼|身份证号码|身分證號碼)"
-            r"\s*[:：]\s*(\S+)",
-            snippet,
+            r"(?:香港身份证号码|护照号码|身份证号码)\s*[:：]\s*(\S+)",
+            to_hans(snippet),
         )
         if m:
             extracted = m.group(1).strip()

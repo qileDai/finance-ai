@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { ConfigProvider } from "antd";
+import { App as AntdApp, ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import { AuthProvider, RequireAuth } from "./auth";
 import { Layout } from "./components/Layout";
@@ -15,22 +15,26 @@ import { DefaultOfficePage } from "./pages/DefaultOfficePage";
 import { IdExtractPage } from "./pages/IdExtractPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
 import { WeworkSendPage } from "./pages/WeworkSendPage";
+import { MessageCtx } from "./useMessageApi";
+
+function MessageApiProvider({ children }: { children: ReactNode }) {
+  const [api, holder] = message.useMessage({
+    duration: 3,
+    maxCount: 3,
+    getContainer: () => document.body,
+  });
+  return (
+    <MessageCtx.Provider value={api}>
+      {holder}
+      {children}
+    </MessageCtx.Provider>
+  );
+}
 
 export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
-  const [toast, setToast] = useState("");
 
   const onRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
-
-  const onToast = useCallback((msg: string) => {
-    setToast(msg);
-  }, []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const t = window.setTimeout(() => setToast(""), 3200);
-    return () => window.clearTimeout(t);
-  }, [toast]);
 
   return (
     <ConfigProvider
@@ -42,70 +46,51 @@ export default function App() {
         },
       }}
     >
-      <BrowserRouter basename="/admin">
-        <AuthProvider>
-          <Routes>
-          <Route path="login" element={<LoginPage />} />
-          <Route
-            element={
-              <RequireAuth>
-                <Layout toast={toast} />
-              </RequireAuth>
-            }
-          >
-            <Route index element={<OverviewPage refreshKey={refreshKey} />} />
-            <Route path="sessions" element={<SessionsPage refreshKey={refreshKey} />} />
-            <Route
-              path="sessions/:roomid"
-              element={<SessionDetailPage refreshKey={refreshKey} />}
-            />
-            <Route
-              path="jobs"
-              element={
-                <JobsPage
-                  refreshKey={refreshKey}
-                  onToast={onToast}
-                  onRefresh={onRefresh}
-                />
-              }
-            />
-            <Route
-              path="jobs/:id"
-              element={
-                <JobDetailPage
-                  refreshKey={refreshKey}
-                  onToast={onToast}
-                  onRefresh={onRefresh}
-                />
-              }
-            />
-            <Route
-              path="register"
-              element={<RegisterPage onToast={onToast} />}
-            />
-            <Route
-              path="email-config"
-              element={<EmailConfigPage onToast={onToast} />}
-            />
-            <Route
-              path="default-office"
-              element={<DefaultOfficePage onToast={onToast} />}
-            />
-            <Route
-              path="id-extract"
-              element={<IdExtractPage onToast={onToast} />}
-            />
-            <Route
-              path="wework-send"
-              element={<WeworkSendPage onToast={onToast} />}
-            />
-            <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />
-            <Route path="groups" element={<Navigate to="/sessions" replace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-        </AuthProvider>
-      </BrowserRouter>
+      <AntdApp style={{ height: "100%" }}>
+        <MessageApiProvider>
+          <BrowserRouter basename="/admin">
+            <AuthProvider>
+              <Routes>
+                <Route path="login" element={<LoginPage />} />
+                <Route
+                  element={
+                    <RequireAuth>
+                      <Layout />
+                    </RequireAuth>
+                  }
+                >
+                  <Route index element={<OverviewPage refreshKey={refreshKey} />} />
+                  <Route path="sessions" element={<SessionsPage refreshKey={refreshKey} />} />
+                  <Route
+                    path="sessions/:roomid"
+                    element={<SessionDetailPage refreshKey={refreshKey} />}
+                  />
+                  <Route
+                    path="jobs"
+                    element={
+                      <JobsPage refreshKey={refreshKey} onRefresh={onRefresh} />
+                    }
+                  />
+                  <Route
+                    path="jobs/:id"
+                    element={
+                      <JobDetailPage refreshKey={refreshKey} onRefresh={onRefresh} />
+                    }
+                  />
+                  <Route path="register" element={<RegisterPage />} />
+                  <Route path="email-config" element={<EmailConfigPage />} />
+                  <Route path="default-office" element={<DefaultOfficePage />} />
+                  <Route path="id-extract" element={<IdExtractPage />} />
+                  <Route path="wework-send" element={<WeworkSendPage />} />
+                  <Route path="quality" element={<QualityPage refreshKey={refreshKey} />} />
+                  <Route path="groups" element={<Navigate to="/sessions" replace />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Route>
+              </Routes>
+            </AuthProvider>
+          </BrowserRouter>
+        </MessageApiProvider>
+      </AntdApp>
     </ConfigProvider>
   );
 }

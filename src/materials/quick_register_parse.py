@@ -19,6 +19,7 @@ from src.materials.name_classify import (
     director_raw_is_cjk_only,
     sanitize_director_name_source,
 )
+from src.materials.zh_norm import to_hans
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,15 @@ PARSE_QUICK_REGISTER_SYSTEM = (
     "director_address_en, office_flat_floor, office_building, office_street, "
     "office_district, taiwan_passport。"
     "规则："
-    "1) 简繁同等：注册地址/註冊地址、经营范围/經營範圍、身份证/身分證、护照/護照。"
+    "1) 简繁及混写同等：注册地址/註冊地址、经营范围/經營範圍、身份证/身分證、"
+    "护照号码/護照號碼/護照号码 都是同一标签。"
     "2) 董事+股东下面的「住址」或「地址」都是个人住址（含 住址英文/地址英文/英文地址，"
     "标签后可跟括号国籍）。按正文分栏：含汉字→ director_address_cn；拉丁字母为主 → "
     "director_address_en。禁止因为标签是「住址/地址」就放进中文栏。"
     "注册地址/註冊地址/注册办事处/建议地址/办事处地址 才是 registered_office_*，不要和个人住址混用。"
     "3) director_name：原文有括号英文则整串保留，例如 張慧斌【ZHANG，Huibin】；"
     "纯中文（如胡丹东）只填汉字，不要编拼音或英文姓/名。"
-    "4) id_type 只根据证件标签行判定（身份证号码 / 香港身份证 / 护照号码），"
+    "4) id_type 只根据证件标签行判定（身份证号码 / 香港身份证 / 护照号码 / 護照号码），"
     "不要根据注册地址或住址里的「香港」判断证件类型；id_number 保留原文校验位如（2）。"
     "5) issuing_country 用 ISO 3166-1 alpha-3（如 UZB、CHN、TWN、MAC、USA）。"
     "台湾护照/中華民國/TWN/台灣 → issuing_country 必须是 TWN，且 taiwan_passport=true。"
@@ -193,36 +195,35 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
         ),
         ("company_name_cn", re.compile(r"^(公司中文名|公司中文名称|中文名)")),
         ("company_name_en", re.compile(r"^(公司英文名|公司英文名称|英文名)")),
-        ("registered_capital", re.compile(r"^(注册资本|註冊資本)")),
-        ("business_desc", re.compile(r"^(经营范围|經營範圍|业务范围|業務範圍)")),
+        ("registered_capital", re.compile(r"^注册资本")),
+        ("business_desc", re.compile(r"^(经营范围|业务范围)")),
         (
             "director_name",
             re.compile(
                 r"^董事\s*[+＋、,，&＆]?\s*股东|^股东\s*[+＋、,，&＆]?\s*董事|"
-                r"^董事兼股东|^董事|^股东|^董事兼股東|^股東"
+                r"^董事兼股东|^董事|^股东"
             ),
         ),
         (
             "id_number",
             re.compile(
-                r"^(香港身份证号?码?|香港身分證號?碼?|香港身分证号?码?|"
-                r"身份证号?码?|身分證號?碼?|证件号|證件號|护照号|護照號)"
+                r"^(香港身份证号?码?|身份证号?码?|证件号|护照号)"
             ),
         ),
         (
             "contact_email",
-            re.compile(r"^(联络邮箱|聯絡郵箱|邮箱|電郵|电邮|电子邮件|電子郵件)"),
+            re.compile(r"^(联络邮箱|邮箱|电邮|电子邮件)"),
         ),
         (
             "office_flat_floor",
-            re.compile(r"^室[／/]楼[／/]座|^室[／/]樓[／/]座|^楼层|^樓層"),
+            re.compile(r"^室[／/]楼[／/]座|^楼层"),
         ),
-        ("office_building", re.compile(r"^(大厦|大廈|大楼|大樓)")),
+        ("office_building", re.compile(r"^(大厦|大楼)")),
         (
             "office_street",
             re.compile(r"^街道[／/]屋苑[／/]地段[／/]村|^街道"),
         ),
-        ("office_district", re.compile(r"^区|^區")),
+        ("office_district", re.compile(r"^区")),
     ]
 
     known_key_re = re.compile(
@@ -230,15 +231,14 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
         r"地址中文|地址英文|地址（中文|地址（英文|中文地址|英文地址|"
         r"住址|居住地址|地址|"
         r"公司中文名|公司中文名称|中文名|公司英文名|公司英文名称|英文名|"
-        r"注册资本|註冊資本|经营范围|經營範圍|业务范围|業務範圍|董事|股东|股東|"
-        r"香港身份证|香港身分證|香港身分证|身份证|身分證|证件号|證件號|护照号|護照號|"
-        r"注册地址|註冊地址|公司名称|公司名稱|联络邮箱|聯絡郵箱|邮箱|電郵|"
-        r"注册办事处|註冊辦事處|建议地址|建議地址|办事处地址|辦事處地址|"
-        r"室[／/]楼|室[／/]樓|大厦|大廈|大楼|大樓|街道|区|區)"
+        r"注册资本|经营范围|业务范围|董事|股东|"
+        r"香港身份证|身份证|证件号|护照号|"
+        r"注册地址|公司名称|联络邮箱|邮箱|电邮|"
+        r"注册办事处|建议地址|办事处地址|"
+        r"室[／/]楼|大厦|大楼|街道|区)"
     )
     _office_label_re = re.compile(
-        r"^(注册地址|註冊地址|注册办事处|註冊辦事處|"
-        r"建议地址|建議地址|办事处地址|辦事處地址)"
+        r"^(注册地址|注册办事处|建议地址|办事处地址)"
     )
     _director_addr_line_re = re.compile(
         r"^(?:"
@@ -253,17 +253,16 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
         if not line:
             continue
         stripped = _strip_leading_number(line)
+        hans = to_hans(stripped)
 
-        company_name_match = re.match(r"^公司名称\s*[:：]\s*(\S.*)$", stripped)
-        if not company_name_match:
-            company_name_match = re.match(r"^公司名稱\s*[:：]\s*(\S.*)$", stripped)
+        company_name_match = re.match(r"^公司名称\s*[:：]\s*(\S.*)$", hans)
         if company_name_match:
-            after = company_name_match.group(1).strip()
+            after = _value_after_label(stripped)
             next_key = re.search(
-                r"\s+(中文名|英文名|公司中文名|公司英文名|注册资本|註冊資本|"
-                r"经营范围|經營範圍|董事|股东|股東|身份证|身分證|注册地址|註冊地址|"
-                r"联络邮箱|聯絡郵箱|邮箱|住址)",
-                after,
+                r"\s+(中文名|英文名|公司中文名|公司英文名|注册资本|"
+                r"经营范围|董事|股东|身份证|注册地址|"
+                r"联络邮箱|邮箱|住址)",
+                to_hans(after),
             )
             val = after[: next_key.start()].strip() if next_key else after
             if val:
@@ -273,9 +272,15 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
                     result["company_name_en"] = val
             continue
 
-        if _office_label_re.match(stripped):
-            after = _office_label_re.sub("", stripped).strip()
-            after = re.sub(r"^[:：]\s*", "", after).strip()
+        if _office_label_re.match(hans):
+            after = _value_after_label(stripped)
+            if not after:
+                after = re.sub(
+                    r"^(注册地址|註冊地址|注册办事处|註冊辦事處|"
+                    r"建议地址|建議地址|办事处地址|辦事處地址)\s*[:：]?\s*",
+                    "",
+                    stripped,
+                ).strip()
             if after:
                 if looks_like_english_address(after):
                     result["registered_office_en"] = after
@@ -286,15 +291,15 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
                 if (
                     nxt
                     and not re.match(r"^\s*\d+\s*[、.）)]", nxt)
-                    and not known_key_re.match(_strip_leading_number(nxt))
+                    and not known_key_re.match(to_hans(_strip_leading_number(nxt)))
                     and looks_like_english_address(nxt)
                 ):
                     result["registered_office_en"] = nxt
             continue
 
-        addr_line = _director_addr_line_re.match(stripped)
-        if addr_line and not _office_label_re.match(stripped):
-            val = (addr_line.group(1) or "").strip()
+        addr_line = _director_addr_line_re.match(hans)
+        if addr_line and not _office_label_re.match(hans):
+            val = _value_after_label(stripped) or (addr_line.group(1) or "").strip()
             if val:
                 if looks_like_english_address(val):
                     result["director_address_en"] = val
@@ -303,7 +308,7 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
             continue
 
         for field, pat in rules:
-            if pat.match(stripped):
+            if pat.match(hans):
                 val = _value_after_label(stripped)
                 if val:
                     result[field] = val
@@ -317,7 +322,7 @@ def parse_registration_text_regex(raw: str) -> dict[str, Any]:
     )
     if refined:
         result["id_type"] = refined
-    if is_taiwan_issuing(raw) or re.search(r"台湾护照|台灣護照|臺灣護照", raw):
+    if is_taiwan_issuing(raw) or re.search(r"台湾护照", to_hans(raw)):
         result["taiwan_passport"] = True
         result.setdefault("issuing_country", "TWN")
     return result

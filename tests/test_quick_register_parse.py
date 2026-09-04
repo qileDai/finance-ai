@@ -26,6 +26,7 @@ class TestParsePromptContract(unittest.TestCase):
         self.assertIn("張慧斌【ZHANG，Huibin】", PARSE_QUICK_REGISTER_SYSTEM)
         self.assertIn("不要编拼音", PARSE_QUICK_REGISTER_SYSTEM)
         self.assertIn("办事处地址", PARSE_QUICK_REGISTER_SYSTEM)
+        self.assertIn("護照号码", PARSE_QUICK_REGISTER_SYSTEM)
 
 
 class TestParseRegexFallback(unittest.TestCase):
@@ -196,6 +197,28 @@ class TestIssuingCountry(unittest.TestCase):
             source_text="护照号码：FA0266712",
         )
         self.assertEqual(ppt["id_type"], "PASSPORT")
+
+    def test_mixed_traditional_passport_label_is_passport(self):
+        mixed = parse_registration_text_regex("護照号码：FA0266712")
+        self.assertEqual(mixed.get("id_type"), "PASSPORT")
+        self.assertEqual(mixed.get("id_number"), "FA0266712")
+        trad = parse_registration_text_regex("護照號碼：FA0266712")
+        self.assertEqual(trad.get("id_type"), "PASSPORT")
+        simp = parse_registration_text_regex("护照号码：FA0266712")
+        self.assertEqual(simp.get("id_type"), "PASSPORT")
+        prc = parse_registration_text_regex("身分證號碼：44051420000318492X")
+        self.assertEqual(prc.get("id_type"), "PRC_ID")
+        hkid = parse_registration_text_regex("香港身分證號碼：F570235（2）")
+        self.assertEqual(hkid.get("id_type"), "HKID")
+
+    def test_llm_prc_overridden_by_mixed_passport_label(self):
+        class Fake:
+            def parse_quick_register_text(self, text: str) -> dict:
+                return {"id_type": "PRC_ID", "id_number": "FA0266712"}
+
+        result = parse_quick_register_text("護照号码：FA0266712", llm=Fake())
+        self.assertEqual(result.get("id_type"), "PASSPORT")
+        self.assertEqual(result.get("id_number"), "FA0266712")
 
 
 if __name__ == "__main__":

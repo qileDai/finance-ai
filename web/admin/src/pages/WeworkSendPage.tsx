@@ -1,17 +1,15 @@
 import { useEffect, useState } from "react";
 import { Button } from "antd";
 import { api, type WeworkSendModes } from "../api";
-
-type Props = {
-  onToast: (msg: string) => void;
-};
+import { useMessageApi } from "../useMessageApi";
 
 type SendResult = {
   plan: string;
   result: Record<string, unknown>;
 };
 
-export function WeworkSendPage({ onToast }: Props) {
+export function WeworkSendPage() {
+  const message = useMessageApi();
   const [chatId, setChatId] = useState("");
   const [toExternalUserid, setToExternalUserid] = useState("");
   const [content, setContent] = useState("");
@@ -37,15 +35,15 @@ export function WeworkSendPage({ onToast }: Props) {
 
   async function onSend() {
     if (!chatId.trim()) {
-      onToast("请输入 chat_id（外部群 ID 形如 wrXXXX）");
+      message.warning("请输入 chat_id（外部群 ID 形如 wrXXXX）");
       return;
     }
     if (!content.trim()) {
-      onToast("请输入消息内容");
+      message.warning("请输入消息内容");
       return;
     }
     if (new TextEncoder().encode(content).length > 2000) {
-      onToast("消息内容超过 2000 字节");
+      message.warning("消息内容超过 2000 字节");
       return;
     }
     setSending(true);
@@ -57,9 +55,9 @@ export function WeworkSendPage({ onToast }: Props) {
         toExternalUserid.trim() || undefined
       );
       setLastResult(res);
-      onToast("发送成功");
+      message.success("发送成功");
     } catch (e) {
-      onToast((e as Error).message || "发送失败");
+      message.error((e as Error).message || "发送失败");
     } finally {
       setSending(false);
     }

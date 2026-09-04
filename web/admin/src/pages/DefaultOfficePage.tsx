@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Button, Card, Divider, Input, Space } from "antd";
-
-type Props = { onToast: (msg: string) => void };
+import { useMessageApi } from "../useMessageApi";
 
 const emptyForm = {
   flat_floor: "",
@@ -14,7 +13,8 @@ const emptyForm = {
   secretary_company_no: "",
 };
 
-export function DefaultOfficePage({ onToast }: Props) {
+export function DefaultOfficePage() {
+  const message = useMessageApi();
   const [form, setForm] = useState({ ...emptyForm });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -33,7 +33,7 @@ export function DefaultOfficePage({ onToast }: Props) {
           secretary_company_no: d.secretary_company_no || "",
         }),
       )
-      .catch(() => onToast("加载失败"))
+      .catch(() => message.error("加载失败"))
       .finally(() => setLoading(false));
   }, []);
 
@@ -41,8 +41,8 @@ export function DefaultOfficePage({ onToast }: Props) {
     setSaving(true);
     api.defaultOffice
       .update(form)
-      .then(() => onToast("已保存"))
-      .catch((e: Error) => onToast(`保存失败: ${e.message}`))
+      .then(() => message.success("已保存"))
+      .catch((e: Error) => message.error(`保存失败: ${e.message}`))
       .finally(() => setSaving(false));
   }
 

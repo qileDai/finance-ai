@@ -60,11 +60,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-type Props = {
-  toast: string;
-};
-
-export function Layout({ toast }: Props) {
+export function Layout() {
   const loc = useLocation();
   const nav = useNavigate();
   const { user, logout } = useAuth();
@@ -112,6 +108,7 @@ export function Layout({ toast }: Props) {
               })),
             }))}
             onClick={({ key }) => nav(key)}
+            inlineIndent={12}
             style={{ border: "none", background: "transparent", fontSize: 13 }}
             theme="dark"
           />
@@ -159,7 +156,6 @@ export function Layout({ toast }: Props) {
           <Outlet />
         </main>
       </div>
-      {toast ? <div className="toast">{toast}</div> : null}
     </div>
   );
 }

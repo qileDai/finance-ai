@@ -13,8 +13,7 @@ import {
   Table,
   Tag,
 } from "antd";
-
-type Props = { onToast: (msg: string) => void };
+import { useMessageApi } from "../useMessageApi";
 
 const IMAP_PRESETS = [
   { label: "163 邮箱 (imap.163.com:993)", value: "imap.163.com|993" },
@@ -45,7 +44,8 @@ const EMPTY: FormState = {
   enabled: true,
 };
 
-export function EmailConfigPage({ onToast }: Props) {
+export function EmailConfigPage() {
+  const message = useMessageApi();
   const [items, setItems] = useState<EmailAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -60,7 +60,7 @@ export function EmailConfigPage({ onToast }: Props) {
     api.emailAccounts
       .list()
       .then((d) => setItems(d.items || []))
-      .catch((e: Error) => onToast(e.message))
+      .catch((e: Error) => message.error(e.message))
       .finally(() => setLoading(false));
   }
 
@@ -90,11 +90,11 @@ export function EmailConfigPage({ onToast }: Props) {
 
   async function save() {
     if (!form.email_address || !form.imap_host || !form.username) {
-      onToast("邮箱地址、IMAP主机、账号必填");
+      message.warning("邮箱地址、IMAP主机、账号必填");
       return;
     }
     if (!editingId && !form.password) {
-      onToast("新增时密码/授权码必填");
+      message.warning("新增时密码/授权码必填");
       return;
     }
     setSaving(true);
@@ -109,11 +109,11 @@ export function EmailConfigPage({ onToast }: Props) {
         label: form.label,
         enabled: form.enabled,
       });
-      onToast("保存成功");
+      message.success("保存成功");
       setModalOpen(false);
       load();
     } catch (e: unknown) {
-      onToast((e as Error).message);
+      message.error((e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -122,10 +122,10 @@ export function EmailConfigPage({ onToast }: Props) {
   async function remove(id: number) {
     try {
       await api.emailAccounts.remove(id);
-      onToast("删除成功");
+      message.success("删除成功");
       load();
     } catch (e: unknown) {
-      onToast((e as Error).message);
+      message.error((e as Error).message);
     }
   }
 
@@ -133,9 +133,9 @@ export function EmailConfigPage({ onToast }: Props) {
     setTestingId(id);
     try {
       const res = await api.emailAccounts.test(id);
-      onToast(res.message || "IMAP 登录成功，已打开收件箱");
+      message.success(res.message || "IMAP 登录成功，已打开收件箱");
     } catch (e: unknown) {
-      onToast((e as Error).message);
+      message.error((e as Error).message);
     } finally {
       setTestingId(null);
     }
@@ -154,10 +154,10 @@ export function EmailConfigPage({ onToast }: Props) {
         label: r.label || "",
         enabled,
       });
-      onToast(enabled ? "已启用" : "已禁用");
+      message.success(enabled ? "已启用" : "已禁用");
       load();
     } catch (e: unknown) {
-      onToast((e as Error).message);
+      message.error((e as Error).message);
     } finally {
       setTogglingId(null);
     }

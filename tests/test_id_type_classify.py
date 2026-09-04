@@ -12,6 +12,7 @@ from src.materials.id_type_classify import (
     classify_id_user_prompt,
     nnc1_identity_fill_plan,
     normalize_stored_id_type,
+    refine_id_type,
     split_hkid_number,
     weak_fallback_id_type,
 )
@@ -44,6 +45,7 @@ class TestClassifyPromptContract(unittest.TestCase):
         self.assertIn("香港身份证号码", CLASSIFY_ID_SYSTEM)
         self.assertIn("身份证号码", CLASSIFY_ID_SYSTEM)
         self.assertIn("护照号码", CLASSIFY_ID_SYSTEM)
+        self.assertIn("護照号码", CLASSIFY_ID_SYSTEM)
         self.assertIn("HKID", CLASSIFY_ID_SYSTEM)
         self.assertIn("PRC_ID", CLASSIFY_ID_SYSTEM)
         self.assertIn("PASSPORT", CLASSIFY_ID_SYSTEM)
@@ -82,6 +84,22 @@ class TestClassifyIdFromText(unittest.TestCase):
         llm.classify_id_document_text.return_value = {"id_type": "UNKNOWN"}
         result = classify_id_from_text(PASTE_PRC, "44051420000318492X", llm=llm)
         self.assertEqual(result["id_type"], "PRC_ID")
+
+    def test_mixed_passport_label_overrides_llm_prc(self):
+        llm = MagicMock()
+        llm.classify_id_document_text.return_value = {
+            "id_type": "PRC_ID",
+            "id_number": "FA0266712",
+        }
+        result = classify_id_from_text("護照号码：FA0266712", "FA0266712", llm=llm)
+        self.assertEqual(result["id_type"], "PASSPORT")
+
+    def test_refine_passport_simplified_traditional_mixed(self):
+        self.assertEqual(refine_id_type("护照号码：FA0266712"), "PASSPORT")
+        self.assertEqual(refine_id_type("護照號碼：FA0266712"), "PASSPORT")
+        self.assertEqual(refine_id_type("護照号码：FA0266712"), "PASSPORT")
+        self.assertEqual(refine_id_type("身分證號碼：44051420000318492X"), "PRC_ID")
+        self.assertEqual(refine_id_type("香港身分證號碼：F570235（2）"), "HKID")
 
 
 class TestNormalizeAndFillPlan(unittest.TestCase):

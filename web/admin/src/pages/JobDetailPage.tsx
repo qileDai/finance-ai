@@ -15,6 +15,7 @@ import {
   jobStatusLabel,
   jobStatusTagColor,
 } from "../components/ui";
+import { useMessageApi } from "../useMessageApi";
 
 const ACTIVATION_TAG_COLOR: Record<string, string> = {
   "": "default",
@@ -46,11 +47,11 @@ const FORM_LABEL: Record<string, string> = {
 
 type Props = {
   refreshKey: number;
-  onToast: (msg: string) => void;
   onRefresh: () => void;
 };
 
-export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
+export function JobDetailPage({ refreshKey, onRefresh }: Props) {
+  const message = useMessageApi();
   const { id } = useParams();
   const jobId = Number(id);
   const [loading, setLoading] = useState(true);
@@ -128,10 +129,10 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
     try {
       const res =
         kind === "cancel" ? await api.cancelJob(jobId) : await api.requeueJob(jobId);
-      onToast(res.message || `${label}成功`);
+      message.success(res.message || `${label}成功`);
       onRefresh();
     } catch (e) {
-      onToast((e as Error).message || `${label}失败`);
+      message.error((e as Error).message || `${label}失败`);
     } finally {
       setBusy(false);
     }
@@ -142,10 +143,10 @@ export function JobDetailPage({ refreshKey, onToast, onRefresh }: Props) {
     setFormRetrying(true);
     try {
       const res = await api.formRetryJob(jobId);
-      onToast(res.message || "已重跑填表");
+      message.success(res.message || "已重跑填表");
       onRefresh();
     } catch (e) {
-      onToast((e as Error).message || "重跑填表失败");
+      message.error((e as Error).message || "重跑填表失败");
     } finally {
       setFormRetrying(false);
     }

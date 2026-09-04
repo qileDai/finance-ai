@@ -28,10 +28,10 @@ import {
   pickDirectory,
   type ShotDirHandle,
 } from "../lib/saveFolder";
+import { useMessageApi } from "../useMessageApi";
 
 type Props = {
   refreshKey: number;
-  onToast: (msg: string) => void;
   onRefresh: () => void;
 };
 
@@ -45,7 +45,8 @@ const STATUS_OPTIONS = [
   { value: "cancelled", label: "已取消" },
 ];
 
-export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
+export function JobsPage({ refreshKey, onRefresh }: Props) {
+  const message = useMessageApi();
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -117,16 +118,16 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       if (handle) setSaveDir(handle);
       return handle;
     } catch (e) {
-      onToast(e instanceof Error ? e.message : "选择文件夹失败");
+      message.error(e instanceof Error ? e.message : "选择文件夹失败");
       return null;
     }
-  }, [onToast]);
+  }, []);
 
   const clearSaveFolder = useCallback(() => {
     setSaveDir(null);
     void clearStoredDirectory();
-    onToast("已清除保存文件夹");
-  }, [onToast]);
+    message.success("已清除保存文件夹");
+  }, []);
 
   const onHoverZone = useCallback((hover: boolean) => {
     setZoneHover(hover);
@@ -205,10 +206,10 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
       else if (kind === "requeue") res = await api.requeueJob(id);
       else if (kind === "approve") res = await api.approveJob(id);
       else if (kind === "reject") res = await api.rejectJob(id);
-      onToast(res?.message || `${label}成功`);
+      message.success(res?.message || `${label}成功`);
       onRefresh();
     } catch (e) {
-      onToast((e as Error).message || `${label}失败`);
+      message.error((e as Error).message || `${label}失败`);
     } finally {
       setBusyId(null);
     }
@@ -347,8 +348,8 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             dir={saveDir}
             zoneEl={zoneEl}
             ensureFolder={pickSaveFolder}
-            onSaved={(name) => onToast(`已保存 ${name}`)}
-            onError={onToast}
+            onSaved={(name) => message.success(`已保存 ${name}`)}
+            onError={(msg) => message.error(msg)}
             onHoverZone={onHoverZone}
           />
         ) : (
@@ -367,8 +368,8 @@ export function JobsPage({ refreshKey, onToast, onRefresh }: Props) {
             dir={saveDir}
             zoneEl={zoneEl}
             ensureFolder={pickSaveFolder}
-            onSaved={(name) => onToast(`已保存 ${name}`)}
-            onError={onToast}
+            onSaved={(name) => message.success(`已保存 ${name}`)}
+            onError={(msg) => message.error(msg)}
             onHoverZone={onHoverZone}
           />
         ) : (
