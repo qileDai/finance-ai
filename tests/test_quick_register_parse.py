@@ -22,7 +22,9 @@ class TestParsePromptContract(unittest.TestCase):
         self.assertIn("issuing_country", PARSE_QUICK_REGISTER_SYSTEM)
         self.assertIn("CHN", PARSE_QUICK_REGISTER_SYSTEM)
         self.assertIn("不要根据注册地址或住址里的「香港」判断", PARSE_QUICK_REGISTER_SYSTEM)
-        self.assertIn("必须保留括号内英文", PARSE_QUICK_REGISTER_SYSTEM)
+        self.assertIn("director_name", PARSE_QUICK_REGISTER_SYSTEM)
+        self.assertIn("張慧斌【ZHANG，Huibin】", PARSE_QUICK_REGISTER_SYSTEM)
+        self.assertIn("不要编拼音", PARSE_QUICK_REGISTER_SYSTEM)
         self.assertIn("办事处地址", PARSE_QUICK_REGISTER_SYSTEM)
 
 

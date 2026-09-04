@@ -13,7 +13,12 @@ from src.materials.id_type_classify import (
     refine_id_type,
     weak_fallback_id_type,
 )
-from src.materials.name_classify import classify_director_name
+from src.materials.name_classify import (
+    cjk_only_director_name,
+    classify_director_name,
+    director_raw_is_cjk_only,
+    sanitize_director_name_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,8 @@ PARSE_QUICK_REGISTER_SYSTEM = (
     "标签后可跟括号国籍）。按正文分栏：含汉字→ director_address_cn；拉丁字母为主 → "
     "director_address_en。禁止因为标签是「住址/地址」就放进中文栏。"
     "注册地址/註冊地址/注册办事处/建议地址/办事处地址 才是 registered_office_*，不要和个人住址混用。"
-    "3) director_name 必须保留括号内英文整串，例如 張慧斌【ZHANG，Huibin】，不要只抽汉字。"
+    "3) director_name：原文有括号英文则整串保留，例如 張慧斌【ZHANG，Huibin】；"
+    "纯中文（如胡丹东）只填汉字，不要编拼音或英文姓/名。"
     "4) id_type 只根据证件标签行判定（身份证号码 / 香港身份证 / 护照号码），"
     "不要根据注册地址或住址里的「香港」判断证件类型；id_number 保留原文校验位如（2）。"
     "5) issuing_country 用 ISO 3166-1 alpha-3（如 UZB、CHN、TWN、MAC、USA）。"
@@ -109,9 +115,9 @@ def coerce_parse_result(data: Any, source_text: str = "") -> dict[str, Any]:
 
 
 def attach_director_structure(
-    result: dict[str, Any], *, llm: Any | None = None
+    result: dict[str, Any], *, llm: Any | None = None, source_text: str = ""
 ) -> dict[str, Any]:
-    """用住址英文 / 姓名原文做结构化拆分，不覆盖 issuing_country 与姓名原文。"""
+    """用住址英文 / 姓名原文做结构化拆分，不覆盖 issuing_country。"""
     if not result:
         return result
     en = str(result.get("director_address_en") or "").strip()
@@ -127,15 +133,29 @@ def attach_director_structure(
         if addr.get("address_country"):
             result["address_country"] = str(addr.get("address_country") or "")
         result["address_is_hk"] = str(addr.get("address_is_hk") or "0")
-    raw_name = str(result.get("director_name") or "").strip()
+    raw_name = sanitize_director_name_source(
+        str(result.get("director_name") or "").strip(),
+        source_text,
+    )
+    if raw_name:
+        result["director_name"] = raw_name
+    if raw_name and director_raw_is_cjk_only(raw_name):
+        result["director_name"] = cjk_only_director_name(raw_name)
+        result["director_name_cn"] = cjk_only_director_name(raw_name)
+        for k in ("director_surname_en", "director_given_en", "director_name_en"):
+            result.pop(k, None)
+        return result
     if raw_name:
         named = classify_director_name(raw_name, llm=llm)
-        if named.get("director_name_cn"):
-            result["director_name_cn"] = named["director_name_cn"]
-        if named.get("director_surname_en"):
-            result["director_surname_en"] = named["director_surname_en"]
-        if named.get("director_given_en"):
-            result["director_given_en"] = named["director_given_en"]
+        result["director_name_cn"] = named.get("director_name_cn") or ""
+        surname = named.get("director_surname_en") or ""
+        given = named.get("director_given_en") or ""
+        if surname or given:
+            result["director_surname_en"] = surname
+            result["director_given_en"] = given
+        else:
+            for k in ("director_surname_en", "director_given_en", "director_name_en"):
+                result.pop(k, None)
     return result
 
 
@@ -325,7 +345,7 @@ def parse_quick_register_text(text: str, *, llm: Any | None = None) -> dict[str,
         result = coerce_parse_result(data, source_text=blob)
         if result:
             result["source"] = "llm"
-            return attach_director_structure(result, llm=client)
+            return attach_director_structure(result, llm=client, source_text=blob)
         logger.warning("快速注册 LLM 解析结果为空，改用正则兜底")
     except Exception as exc:
         logger.warning("快速注册 LLM 解析失败: %s", exc)
@@ -333,5 +353,5 @@ def parse_quick_register_text(text: str, *, llm: Any | None = None) -> dict[str,
     fb = parse_registration_text_regex(blob)
     if fb:
         fb["source"] = "regex"
-        attach_director_structure(fb, llm=llm)
+        attach_director_structure(fb, llm=llm, source_text=blob)
     return fb

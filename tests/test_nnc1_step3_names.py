@@ -66,6 +66,20 @@ class TestResolveNnc1Step3Names(unittest.TestCase):
         self.assertEqual(surname, "ZHANG")
         self.assertEqual(given, "Huibin")
 
+    def test_hudandong_skips_parsed_pinyin(self):
+        cn, surname, given = resolve_nnc1_step3_names(
+            {
+                "name_cn": "胡丹东",
+                "name_en": "HU Dandong",
+                "surname_en": "HU",
+                "given_en": "Dandong",
+                "director_name": "胡丹东",
+            }
+        )
+        self.assertEqual(cn, "胡丹东")
+        self.assertEqual(surname, "")
+        self.assertEqual(given, "")
+
 
 if __name__ == "__main__":
     unittest.main()

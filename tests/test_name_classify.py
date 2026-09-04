@@ -62,6 +62,15 @@ class TestNameFallback(unittest.TestCase):
         self.assertEqual(out["director_name_cn"], "姚曉佳")
         self.assertEqual(out["director_surname_en"], "")
         self.assertEqual(out["director_given_en"], "")
+        llm.classify_director_name.assert_not_called()
+
+    def test_hudandong_skips_llm_no_pinyin(self):
+        llm = MagicMock()
+        out = classify_director_name("胡丹东", llm=llm)
+        llm.classify_director_name.assert_not_called()
+        self.assertEqual(out["director_name_cn"], "胡丹东")
+        self.assertEqual(out["director_surname_en"], "")
+        self.assertEqual(out["director_given_en"], "")
 
     def test_comma_english_name_not_chinese(self):
         out = weak_fallback_name("KHALILOV，AKHTAM")
@@ -81,6 +90,25 @@ class TestParseAndAggregateName(unittest.TestCase):
         self.assertEqual(result.get("director_name_cn"), "張慧斌")
         self.assertEqual(result.get("director_surname_en"), "ZHANG")
         self.assertEqual(result.get("director_given_en"), "Huibin")
+
+    def test_parse_chinese_only_no_english_name(self):
+        class Fake:
+            def parse_quick_register_text(self, text: str) -> dict:
+                return {
+                    "director_name": "胡丹东 [HU, Dandong]",
+                    "company_name_en": "Astro Ltd",
+                }
+
+        paste = (
+            "公司英文名：Hong Kong Battle Flag Sports Culture Communication Limited\n"
+            "董事+股东：胡丹东\n"
+            "身份证号码：340421198611163844"
+        )
+        result = parse_quick_register_text(paste, llm=Fake())
+        self.assertEqual(result.get("director_name"), "胡丹东")
+        self.assertEqual(result.get("director_name_cn"), "胡丹东")
+        self.assertFalse(result.get("director_surname_en"))
+        self.assertFalse(result.get("director_given_en"))
 
     def test_aggregator_s03_fields(self):
         data = aggregate_company_data(

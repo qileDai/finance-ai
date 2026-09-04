@@ -47,6 +47,41 @@ def _cjk_only(s: str) -> str:
     return "".join(ch for ch in (s or "") if _CJK_RE.match(ch)).strip()
 
 
+def director_raw_is_cjk_only(raw_name: str) -> bool:
+    """原文有汉字且无拉丁字母（不含解析编造的拼音）。"""
+    s = (raw_name or "").strip()
+    return bool(_CJK_RE.search(s)) and not bool(re.search(r"[A-Za-z]", s))
+
+
+def cjk_only_director_name(raw_name: str) -> str:
+    return _cjk_only(raw_name) or (raw_name or "").strip()
+
+
+def sanitize_director_name_source(raw_name: str, source_text: str = "") -> str:
+    """原文无拉丁字母则只留汉字；粘贴正文里找不到的英文视为编造，丢掉。"""
+    raw = (raw_name or "").strip()
+    if not raw:
+        return ""
+    if director_raw_is_cjk_only(raw):
+        return cjk_only_director_name(raw)
+    cjk = _cjk_only(raw)
+    if not cjk:
+        return raw
+    src = (source_text or "").strip()
+    if len(src) < 20:
+        return raw
+    outer, inner = _extract_wrapped_latin(raw)
+    latin = inner or re.sub(r"[^\x00-\x7F]+", " ", raw)
+    tokens = [
+        t
+        for t in re.split(r"[,，\s]+", latin)
+        if re.search(r"[A-Za-z]", t) and len(t) >= 2
+    ]
+    if tokens and all(re.search(re.escape(t), src, re.I) for t in tokens):
+        return raw
+    return cjk
+
+
 def _split_latin_surname_given(latin: str) -> tuple[str, str]:
     text = (latin or "").replace("，", ",").strip()
     text = re.sub(r"\s+", " ", text)
@@ -154,10 +189,16 @@ def classify_director_name(
     *,
     llm: Any | None = None,
 ) -> dict[str, str]:
-    """只把姓名原文交给 LLM；director_name 原文由调用方另行保存。"""
+    """只把姓名原文交给 LLM；纯中文不编拼音。director_name 原文由调用方另行保存。"""
     name = (raw_name or "").strip()
     if not name:
         return weak_fallback_name("")
+    if director_raw_is_cjk_only(name):
+        return {
+            "director_name_cn": cjk_only_director_name(name),
+            "director_surname_en": "",
+            "director_given_en": "",
+        }
     try:
         client = llm
         data: Any = None

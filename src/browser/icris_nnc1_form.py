@@ -39,8 +39,9 @@ from src.browser.icris_ui_common import (
     dismiss_cookie_banner,
     dismiss_google_translate,
     dismiss_portal_modals,
-    ensure_simplified_chinese,
     is_cr_public_site,
+    is_simplified_chinese_active,
+    page_language_state,
     wait_portal_ready,
     wait_spin_clear,
 )
@@ -1298,6 +1299,21 @@ class IcrisNnc1FormBot:
             return False
         return bool(re.search(r"NNC\s*1", text, re.I))
 
+    async def _after_nnc1_menu_click(self, page, current_url: str) -> None:
+        """点完 NNC1 后等离开仪表盘；条款页由 _accept_efiling_terms 接着等。"""
+        url = (page.url or "").lower()
+        already = "e-filing" in url or "/nnc1/" in url or "nnc1init" in url
+        if not already and page.url == current_url:
+            try:
+                await page.wait_for_function(
+                    "(url) => window.location.href !== url",
+                    current_url,
+                    timeout=15000,
+                )
+            except Exception:
+                pass
+        await wait_spin_clear(page, timeout_ms=15000)
+
     async def _click_menu_item(
         self, page, label_pat: re.Pattern[str], *, max_y: float = 450, tag: str = ""
     ) -> bool:
@@ -1321,20 +1337,10 @@ class IcrisNnc1FormBot:
                 click_el = loc.locator("xpath=ancestor-or-self::a[1]").first
                 target = click_el if await click_el.count() > 0 else loc
                 try:
-                    await target.scroll_into_view_if_needed()
                     await target.click(force=True, timeout=10000)
                 except Exception:
                     await loc.evaluate("el => (el.closest('a') || el).click()")
-                try:
-                    await page.wait_for_function(
-                        "(url) => window.location.href !== url",
-                        current_url,
-                        timeout=20000,
-                    )
-                except Exception:
-                    pass
-                await wait_spin_clear(page, timeout_ms=60000)
-                await page.wait_for_timeout(2000)
+                await self._after_nnc1_menu_click(page, current_url)
                 text = ((await loc.inner_text()) or "").strip()
                 logger.info("已点击菜单项%s: %s → %s", tag, text[:60], page.url[:120])
                 return True
@@ -1465,14 +1471,17 @@ class IcrisNnc1FormBot:
                 if compact != "本地公司":
                     continue
                 box = await local.bounding_box()
-                if not box or box["y"] < 85 or box["y"] > 480:
+                if not box or box["width"] <= 0 or box["height"] <= 0:
                     continue
-                await local.scroll_into_view_if_needed()
-                await local.hover()
-                await page.wait_for_timeout(400)
-                cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-                await page.mouse.move(cx, cy)
-                await page.wait_for_timeout(300)
+                if box["y"] < 85 or box["y"] > 480:
+                    continue
+                try:
+                    await page.mouse.move(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2,
+                    )
+                except Exception:
+                    continue
                 if click:
                     click_target = local.locator("xpath=ancestor-or-self::a[1]").first
                     try:
@@ -1482,10 +1491,8 @@ class IcrisNnc1FormBot:
                             await local.click(force=True, timeout=5000)
                     except Exception:
                         pass
-                    await page.wait_for_timeout(900)
-                else:
-                    await page.wait_for_timeout(700)
-                    await self._wait_nnc1_dropdown_item(page, timeout_ms=4000)
+                if not await self._wait_nnc1_dropdown_item(page, timeout_ms=4000):
+                    continue
                 logger.info(
                     "已展开「本地公司」子菜单 (y=%.0f, click=%s)",
                     box["y"],
@@ -1499,16 +1506,17 @@ class IcrisNnc1FormBot:
         if raw:
             info = json.loads(raw)
             await page.mouse.move(info["x"], info["y"])
-            await page.wait_for_timeout(500)
             if click:
                 await self._hdr_menu_js_action(
                     page, label_re=r"^本地公司$", action="click"
                 )
-                await page.wait_for_timeout(900)
-            else:
-                await self._wait_nnc1_dropdown_item(page, timeout_ms=4000)
-            logger.info("已展开「本地公司」子菜单 (JS y=%.0f, click=%s)", info["y"], click)
-            return True
+            if await self._wait_nnc1_dropdown_item(page, timeout_ms=4000):
+                logger.info(
+                    "已展开「本地公司」子菜单 (JS y=%.0f, click=%s)",
+                    info["y"],
+                    click,
+                )
+                return True
 
         logger.warning("未找到可见的「本地公司」菜单项")
         return False
@@ -1536,19 +1544,11 @@ class IcrisNnc1FormBot:
             click_el = loc.locator("xpath=ancestor-or-self::a[1]").first
             target = click_el if await click_el.count() > 0 else loc
             await target.click(force=True, timeout=10000)
-            try:
-                await page.wait_for_function(
-                    "(url) => window.location.href !== url",
-                    current_url,
-                    timeout=20000,
-                )
-            except Exception:
-                pass
-            await wait_spin_clear(page, timeout_ms=60000)
-            await page.wait_for_timeout(2000)
+            await self._after_nnc1_menu_click(page, current_url)
             logger.info("已进入 NNC1 入口: %s → %s", text[:60], page.url[:120])
             return True
 
+        current_url = page.url
         clicked = await page.evaluate(
             """() => {
                 const exclude = /数码证书|智方便|NNC1G/i;
@@ -1568,8 +1568,7 @@ class IcrisNnc1FormBot:
             }"""
         )
         if clicked:
-            await wait_spin_clear(page, timeout_ms=60000)
-            await page.wait_for_timeout(2500)
+            await self._after_nnc1_menu_click(page, current_url)
             logger.info("已进入 NNC1 入口 (JS): %s → %s", clicked, page.url[:120])
             return True
         raw = await self._hdr_menu_js_action(
@@ -1583,16 +1582,7 @@ class IcrisNnc1FormBot:
             info = json.loads(raw)
             current_url = page.url
             await page.mouse.click(info["x"], info["y"])
-            try:
-                await page.wait_for_function(
-                    "(url) => window.location.href !== url",
-                    current_url,
-                    timeout=20000,
-                )
-            except Exception:
-                pass
-            await wait_spin_clear(page, timeout_ms=60000)
-            await page.wait_for_timeout(2000)
+            await self._after_nnc1_menu_click(page, current_url)
             logger.info(
                 "已进入 NNC1 入口 (JS 坐标): %s → %s",
                 info.get("text"),
@@ -1604,9 +1594,13 @@ class IcrisNnc1FormBot:
 
     async def _open_nnc1_wide_cascade(self, page) -> bool:
         """宽屏三级菜单：成立公司(已展开) → hover 本地公司 → 股份有限公司(表格NNC1)。"""
-        if not await self._expand_local_company_submenu(page, click=False):
-            await self._expand_local_company_submenu(page, click=True)
-        return await self._click_nnc1_menu_label(page)
+        try:
+            if not await self._expand_local_company_submenu(page, click=False):
+                await self._expand_local_company_submenu(page, click=True)
+            return await self._click_nnc1_menu_label(page)
+        except Exception as e:
+            logger.warning("宽屏 NNC1 菜单级联失败: %s", e)
+            return False
 
     async def _open_main_nav(self, page, *, force: bool = False) -> None:
         """小屏：展开汉堡菜单。force=True 时宽屏也强制展开侧边栏。"""
@@ -1654,8 +1648,7 @@ class IcrisNnc1FormBot:
     async def _open_nnc1(self, page) -> None:
         """宽屏：成立公司 → 本地公司 → 股份有限公司(表格NNC1)；小屏：侧边栏。"""
         await self._maximize_browser_window(page)
-        await wait_spin_clear(page, timeout_ms=30000)
-        await page.wait_for_timeout(500)
+        await wait_spin_clear(page, timeout_ms=15000)
 
         wide = await self._is_wide_top_nav(page)
         if not wide:
@@ -1666,40 +1659,34 @@ class IcrisNnc1FormBot:
             raise RuntimeError("未找到顶栏「成立公司」菜单")
 
         for idx, nav in enumerate(nav_targets):
-            await nav.scroll_into_view_if_needed()
+            if not wide:
+                await nav.scroll_into_view_if_needed()
             box = await nav.bounding_box()
             if wide:
                 if box:
-                    cx = box["x"] + box["width"] / 2
-                    cy = box["y"] + box["height"] / 2
-                    await page.mouse.move(cx, cy)
-                    await page.wait_for_timeout(200)
-                try:
-                    await nav.hover()
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+                    await page.mouse.move(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2,
+                    )
                 logger.info(
                     "顶栏展开 成立公司 #%d (%.0f, %.0f)",
                     idx + 1,
                     box["x"] if box else -1,
                     box["y"] if box else -1,
                 )
-                if not await self._wait_hdr_dropdown(page):
-                    try:
-                        await nav.click(timeout=5000)
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(800)
-                    await self._wait_hdr_dropdown(page, timeout_ms=5000)
-                await page.wait_for_timeout(600)
+                if not await self._wait_hdr_dropdown(page, timeout_ms=5000):
+                    if box:
+                        await page.mouse.move(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2,
+                        )
+                    await self._wait_hdr_dropdown(page, timeout_ms=4000)
                 if await self._open_nnc1_wide_cascade(page):
                     return
             else:
                 await nav.click()
-                await page.wait_for_timeout(1200)
-                if await self._expand_local_company_submenu(page):
-                    pass
+                await self._wait_hdr_dropdown(page, timeout_ms=4000)
+                await self._expand_local_company_submenu(page)
                 if await self._click_nnc1_menu_label(page):
                     return
                 if await self._click_nnc1_submenu(page, wide=False):
@@ -1713,7 +1700,7 @@ class IcrisNnc1FormBot:
                 await nav.click(force=True, timeout=10000)
             except Exception:
                 await nav.evaluate("el => el.click()")
-            await page.wait_for_timeout(1200)
+            await self._wait_hdr_dropdown(page, timeout_ms=4000)
             await self._expand_local_company_submenu(page)
             if await self._click_nnc1_menu_label(page):
                 return
@@ -1777,18 +1764,16 @@ class IcrisNnc1FormBot:
             if not box or box["y"] > y_max:
                 continue
             await link.scroll_into_view_if_needed()
+            current_url = page.url
             try:
                 await link.click(timeout=15000)
             except Exception:
                 await link.click(force=True, timeout=15000)
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=60000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(2500)
+            await self._after_nnc1_menu_click(page, current_url)
             logger.info("已进入 NNC1 入口: %s → %s", text[:60], page.url[:120])
             return True
 
+        current_url = page.url
         clicked = await page.evaluate(
             """({ yMax }) => {
                 const pat = /股份有限公司.*NNC\\s*1|表格\\s*NNC\\s*1|Form NNC1|NNC\\s*1/i;
@@ -1808,7 +1793,7 @@ class IcrisNnc1FormBot:
             {"yMax": y_max},
         )
         if clicked:
-            await page.wait_for_timeout(2500)
+            await self._after_nnc1_menu_click(page, current_url)
             logger.info("已进入 NNC1 入口 (JS): %s → %s", clicked, page.url[:120])
             return True
         return False
@@ -5988,7 +5973,7 @@ class IcrisNnc1FormBot:
         force_isolated: bool = False,
         screenshot_path: str = "",
     ) -> tuple[bool, str]:
-        """登录 → 简体 → NNC1 → 接受条款 → 填表 stub。"""
+        """登录 → NNC1 → 接受条款 → 填表。菜单与表单已兼容简繁，不再切简体。"""
         from src.browser.launcher import import_async_playwright
 
         async_playwright = import_async_playwright()
@@ -6024,31 +6009,14 @@ class IcrisNnc1FormBot:
                 await dismiss_cookie_banner(page)
                 await dismiss_google_translate(page)
 
-                if not await ensure_simplified_chinese(page, allow_url_fallback=False):
-                    await page.wait_for_timeout(3000)
-                    if not await ensure_simplified_chinese(page, allow_url_fallback=False):
-                        probe = await page.evaluate(
-                            """() => {
-                                const t = document.body?.innerText || '';
-                                return {
-                                    simplified: /公司注册处|用户|首页|实用资讯/.test(t)
-                                        && !/公司註冊處|實用資訊|主頁/.test(t),
-                                    dashboard: /登出|成立公司|提交文件|查册|查冊/.test(t),
-                                    sample: t.slice(0, 200),
-                                };
-                            }"""
-                        )
-                        if probe.get("simplified"):
-                            logger.warning("语言切换未成功，但页面似为简体，继续")
-                        elif probe.get("dashboard"):
-                            # NNC1 菜单/表单已兼容简繁；繁体仪表盘可继续填表
-                            logger.warning(
-                                "未能切换简体，仪表盘已可用（繁体），继续 NNC1: %s",
-                                (probe.get("sample") or "")[:80],
-                            )
-                        else:
-                            await self._maybe_screenshot(page, "lang_fail")
-                            raise RuntimeError("无法切换为简体中文")
+                lang = await page_language_state(page)
+                if await is_simplified_chinese_active(page):
+                    logger.info("仪表盘已是简体，跳过语言切换")
+                else:
+                    logger.info(
+                        "仪表盘为%s，NNC1 已兼容简繁，跳过切简体",
+                        lang,
+                    )
 
                 if await self._on_nnc1_form_page(page):
                     logger.info("已在 NNC1 填表页，跳过菜单导航: %s", page.url[:120])

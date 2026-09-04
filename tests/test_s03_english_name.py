@@ -30,9 +30,10 @@ class TestLatinEnglishGivenSurname(unittest.TestCase):
             s03_skip_english_name("張慧斌【ZHANG，Huibin】", name_cn="張慧斌")
         )
         self.assertTrue(s03_skip_english_name("", name_cn="姚曉佳", name_en=""))
-        self.assertFalse(
+        self.assertTrue(
             s03_skip_english_name("", name_cn="張慧斌", name_en="ZHANG Huibin")
         )
+        self.assertTrue(s03_skip_english_name("胡丹东", name_en="HU Dandong"))
 
     def test_english_only_still_splits_when_name_cn_empty(self):
         given, surname = latin_english_given_surname("Yau Siu Ka", "")
@@ -87,6 +88,73 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertNotIn("，", applicant.get("name_cn") or "")
         self.assertEqual(applicant.get("surname_en"), "KHALILOV")
         self.assertEqual(applicant.get("given_en"), "AKHTAM")
+
+    def test_hudandong_pinyin_not_in_payload_username_kept(self):
+        materials = self._materials("胡丹东")
+        materials["director_name_cn"] = {"field_value": "胡丹东"}
+        materials["director_surname_en"] = {"field_value": "HU"}
+        materials["director_given_en"] = {"field_value": "Dandong"}
+        data = aggregate_company_data(materials)
+        applicant = data.get("applicant") or {}
+        self.assertEqual(applicant.get("name_cn"), "胡丹东")
+        self.assertEqual(applicant.get("name_en") or "", "")
+        self.assertEqual(applicant.get("surname_en") or "", "")
+        self.assertEqual(applicant.get("given_en") or "", "")
+        directors = data.get("directors") or []
+        self.assertTrue(directors)
+        self.assertEqual(directors[0].get("surname_en") or "", "")
+        username = str((data.get("icris_account") or {}).get("username") or "")
+        self.assertTrue(username)
+        self.assertRegex(username.lower(), r"^hd")
+        self.assertIn("yt", username.lower())
+
+    def test_hudandong_username_from_pinyin_without_en_fields(self):
+        data = aggregate_company_data(self._materials("胡丹东"))
+        applicant = data.get("applicant") or {}
+        self.assertEqual(applicant.get("name_cn"), "胡丹东")
+        self.assertEqual(applicant.get("name_en") or "", "")
+        self.assertEqual(applicant.get("surname_en") or "", "")
+        self.assertEqual(applicant.get("given_en") or "", "")
+        username = str((data.get("icris_account") or {}).get("username") or "")
+        self.assertRegex(username.lower(), r"^hd")
+        self.assertIn("yt", username.lower())
+
+    def test_build_materials_omits_unparsed_english(self):
+        from src.web.admin_runner import (
+            _build_materials,
+            _strip_unparsed_director_english,
+        )
+
+        fields = {
+            "company_name_en": "Foo Ltd",
+            "director_name": "胡丹东",
+            "director_name_cn": "胡丹东",
+            "director_surname_en": "HU",
+            "director_given_en": "Dandong",
+            "director_name_en": "HU Dandong",
+            "id_number": "340421198611163844",
+        }
+        _strip_unparsed_director_english(fields)
+        self.assertNotIn("director_surname_en", fields)
+        self.assertNotIn("director_given_en", fields)
+        self.assertNotIn("director_name_en", fields)
+        mats = _build_materials(fields, {})
+        self.assertNotIn("director_surname_en", mats)
+        self.assertNotIn("director_given_en", mats)
+        self.assertNotIn("director_name_en", mats)
+        self.assertEqual(mats["director_name"]["field_value"], "胡丹东")
+
+    def test_strip_keeps_bracket_english(self):
+        from src.web.admin_runner import _strip_unparsed_director_english
+
+        fields = {
+            "director_name": "張慧斌【ZHANG，Huibin】",
+            "director_surname_en": "ZHANG",
+            "director_given_en": "Huibin",
+        }
+        _strip_unparsed_director_english(fields)
+        self.assertEqual(fields["director_surname_en"], "ZHANG")
+        self.assertEqual(fields["director_given_en"], "Huibin")
 
 
 if __name__ == "__main__":

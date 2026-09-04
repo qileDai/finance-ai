@@ -271,12 +271,17 @@ def s03_skip_english_name(
     name_cn: str = "",
     name_en: str = "",
 ) -> bool:
-    """原文含汉字且无拉丁字母时，s03 不填英文姓/名（忽略库里残留拼音）。"""
+    """原文有汉字且无拉丁字母时不填英文姓/名（忽略 name_en 里的拼音）。"""
     src = (raw_director_name or "").strip()
+    cn = "".join(
+        ch for ch in str(name_cn or "") if "\u4e00" <= ch <= "\u9fff"
+    )
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", src) or cn)
+    latin_in_raw = bool(re.search(r"[A-Za-z]", src))
+    if has_cjk and not latin_in_raw:
+        return True
     if src:
-        return bool(re.search(r"[\u4e00-\u9fff]", src)) and not bool(
-            re.search(r"[A-Za-z]", src)
-        )
+        return False
     blob = f"{name_cn or ''} {name_en or ''}"
     return bool(re.search(r"[\u4e00-\u9fff]", blob)) and not bool(
         re.search(r"[A-Za-z]", blob)

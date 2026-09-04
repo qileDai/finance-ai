@@ -244,6 +244,23 @@ def _save_uploaded_files(
     return out
 
 
+def _strip_unparsed_director_english(fields: dict[str, str]) -> None:
+    """原文无拉丁字母时丢掉英文姓/名，不入库。"""
+    from src.materials.name_classify import (
+        cjk_only_director_name,
+        director_raw_is_cjk_only,
+    )
+
+    raw_name = (fields.get("director_name") or "").strip()
+    if not raw_name or not director_raw_is_cjk_only(raw_name):
+        return
+    fields["director_name"] = cjk_only_director_name(raw_name)
+    if not (fields.get("director_name_cn") or "").strip():
+        fields["director_name_cn"] = fields["director_name"]
+    for k in ("director_surname_en", "director_given_en", "director_name_en"):
+        fields.pop(k, None)
+
+
 def _build_materials(
     fields: dict[str, str], file_paths: dict[str, str]
 ) -> dict[str, dict[str, Any]]:
@@ -644,6 +661,7 @@ def submit(
                 fields[k] = str(v)
     if fields.get("address_country"):
         fields["address_country"] = resolve_s03_address_country(fields["address_country"])
+    _strip_unparsed_director_english(fields)
     raw_name = (fields.get("director_name") or "").strip()
     if raw_name:
         need_cn = not (fields.get("director_name_cn") or "").strip()

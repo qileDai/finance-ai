@@ -12,6 +12,10 @@ from typing import Any
 
 from config.settings import settings
 from src.materials.checklist import MATERIAL_FIELDS, FILE_FIELD_KEYS, progress_summary
+from src.materials.name_classify import (
+    cjk_only_director_name,
+    director_raw_is_cjk_only,
+)
 from src.storage.db import ExternalGroupStore
 
 
@@ -309,6 +313,18 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
     else:
         icris_username = ""
         icris_password = ""
+
+    # 表单英文姓名：纯中文原文不入库拼音；s02 用户名已用 username_en 生成
+    form_src = person or person_cn
+    if director_raw_is_cjk_only(form_src) or (
+        bool(re.search(r"[\u4e00-\u9fff]", person_cn or ""))
+        and not re.search(r"[A-Za-z]", person or "")
+    ):
+        if person:
+            person = cjk_only_director_name(person)
+        person_en = ""
+        surname_en = ""
+        given_en = ""
 
     default_office = _get_default_office()
     office_flat = (_get_val(materials, "office_flat_floor") or default_office.get("flat_floor", "")).strip()
