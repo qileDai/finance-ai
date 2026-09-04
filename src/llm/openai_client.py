@@ -449,7 +449,7 @@ class LLMClient:
         return coerce_parse_result(data, source_text=blob)
 
     def classify_director_address(self, address_en: str) -> dict:
-        """只根据住址英文拆街道/区省市并判定香港与住址国。"""
+        """只根据住址英文拆香港四段或非香港两段+国家。"""
         from src.materials.address_classify import (
             CLASSIFY_ADDRESS_SYSTEM,
             classify_address_user_prompt,

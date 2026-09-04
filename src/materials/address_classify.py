@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from src.materials.countries import (
@@ -13,15 +15,20 @@ from src.materials.countries import (
 
 logger = logging.getLogger(__name__)
 
+S03_DISTRICTS_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "icris_s03_districts.json"
+)
+_S03_DISTRICTS: list[dict[str, Any]] | None = None
+
 CLASSIFY_HK_DISTRICT_SYSTEM = (
     "你只根据董事兼股东的个人住址，从给定的 ICRIS 下拉选项里选一个香港郵遞區號／区。"
     "不要看注册地址、公司名。"
     '只输出 JSON：{"district":"选项原文"}。'
     "规则："
-    "1) district 必须与选项列表中某一项完全一致。"
-    "2) TIN SHUI WAI / NT / N.T. / 天水圍 属新界元朗区，优先选「天水圍」或「元朗」，不要选香港仔。"
+    "1) district 必须与选项列表中某一项完全一致，如「香港仔」「紅磡」「天水圍」。"
+    "2) TIN SHUI WAI / NT / N.T. / 天水圍 选「天水圍」或「元朗」，不要选香港仔。"
     "3) 不要因为住址没有 Hong Kong 四字就选香港仔。"
-    "4) 选项对不上时选最接近的区；不要输出其它键。"
+    "4) 选项对不上时不要编造；不要输出其它键。"
 )
 
 _HK_DISTRICT_RULES: list[tuple[re.Pattern[str], tuple[str, ...]]] = [
@@ -31,38 +38,74 @@ _HK_DISTRICT_RULES: list[tuple[re.Pattern[str], tuple[str, ...]]] = [
     (re.compile(r"sha\s*tin|沙田", re.I), ("沙田",)),
     (re.compile(r"kwun\s*tong|觀塘|观塘", re.I), ("觀塘",)),
     (re.compile(r"tsuen\s*wan|荃灣|荃湾", re.I), ("荃灣",)),
-    (re.compile(r"kwai\s*chung|葵涌|葵青", re.I), ("葵涌", "葵青")),
+    (re.compile(r"kwai\s*chung|葵涌|葵青", re.I), ("葵涌", "葵芳")),
     (re.compile(r"tai\s*po|大埔", re.I), ("大埔",)),
-    (re.compile(r"fanling|粉嶺|粉岭", re.I), ("粉嶺", "北區")),
-    (re.compile(r"sheung\s*shui|上水", re.I), ("上水", "北區")),
+    (re.compile(r"fanling|粉嶺|粉岭", re.I), ("粉嶺",)),
+    (re.compile(r"sheung\s*shui|上水", re.I), ("上水",)),
     (re.compile(r"tseung\s*kwan\s*o|將軍澳|将军澳", re.I), ("將軍澳", "西貢")),
     (re.compile(r"sai\s*kung|西貢|西贡", re.I), ("西貢",)),
     (re.compile(r"tung\s*chung|東涌|东涌", re.I), ("東涌", "離島")),
-    (re.compile(r"mong\s*kok|旺角", re.I), ("旺角", "油尖旺")),
-    (re.compile(r"tsim\s*sha\s*tsui|尖沙[咀嘴]", re.I), ("尖沙咀", "油尖旺")),
+    (re.compile(r"mong\s*kok|旺角", re.I), ("旺角",)),
+    (re.compile(r"tsim\s*sha\s*tsui|尖沙[咀嘴]", re.I), ("尖沙咀",)),
     (re.compile(r"sham\s*shui\s*po|深水埗", re.I), ("深水埗",)),
     (re.compile(r"wong\s*tai\s*sin|黃大仙|黄大仙", re.I), ("黃大仙",)),
     (re.compile(r"causeway\s*bay|銅鑼灣|铜锣湾", re.I), ("銅鑼灣", "灣仔")),
     (re.compile(r"wan\s*chai|灣仔|湾仔", re.I), ("灣仔",)),
-    (re.compile(r"aberdeen|香港仔", re.I), ("香港仔", "南區")),
-    (re.compile(r"kowloon|九[龍龙]", re.I), ("九龍",)),
+    (re.compile(r"aberdeen|香港仔", re.I), ("香港仔",)),
+    (re.compile(r"hung\s*hom|紅磡|红磡", re.I), ("紅磡",)),
 ]
 
 CLASSIFY_ADDRESS_SYSTEM = (
     "你只根据董事兼股东的个人住址（标签可能是住址或地址）的英文正文判断，"
     "不要看注册地址、公司名或其它字段。"
     "只输出 JSON："
-    '{"is_hk":true|false,"street":"...","region":"...","address_country":"ISO3"}。'
+    '{"is_hk":true|false,"flat":"...","building":"...","street":"...","region":"...","address_country":"ISO3"}。'
     "规则："
     "1) is_hk 仅当该个人住址在香港特区。"
     "Hong Kong / Kowloon / New Territories / NT / N.T. / Tin Shui Wai / Kwun Tong 等均为香港，is_hk=true。"
     "内地、澳门、台湾、国外都是 false。注册地址在香港不能当成个人住址在香港。"
-    "2) street = 街道／屋苑／地段／村等（室/楼/座、门牌可并入 street）。"
-    "3) region = 区／市／省／州／邮递区号的全部，从第一个 District/City/Province/State 起到省/州/邮编为止；"
-    "不能只填 District。不要把国家名放进 region。"
-    "例：Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province → "
+    "2) 香港（is_hk=true）必须拆四段，所有逗号段必须进入其中一段，禁止丢掉樓/座。"
+    "flat=室／樓／座（RM/Flat/Shop、11/F、G/F、LG/F、BLK/Block、Phase/Wing 全部并入 flat）；"
+    "building=大廈（Court/Mansion/Building 等），没有大厦则空；"
+    "street=街道／屋苑／地段／村，不要把大厦或郵遞區放进 street；"
+    "region 必须从用户消息里的郵遞區號选项抄一项原文，如「天水圍」「紅磡」「觀塘」。"
+    "禁止自造 TIN SHUI WAI NT 或只写区英文。"
+    "address_country=HKG。"
+    "例："
+    "RM D, 11/F, BLK 5, LOCWOOD COURT, 1 TIN WU ROAD, TIN SHUI WAI NT → "
+    'flat="RM D, 11/F, BLK 5", building="LOCWOOD COURT", '
+    'street="1 TIN WU ROAD", region="天水圍"；'
+    "Flat A, 9/F, Tai Yip Street, Kwun Tong, Kowloon, Hong Kong → "
+    'flat="Flat A, 9/F", building="", street="Tai Yip Street", region="觀塘"；'
+    "Shop 3, G/F, Hang Seng Building, 83 Des Voeux Road Central, Central → "
+    'flat="Shop 3, G/F", building="Hang Seng Building", '
+    'street="83 Des Voeux Road Central", region="中環"。'
+    "3) 非香港（内地/国外）不要套香港四段：flat 与 building 输出空字符串。"
+    "street=市县级以下全部逗号段（室/门牌、路、镇/乡、村、片区、社区、团场/连等）；"
+    "region=从第一段市县级及以上起到省/州/邮编："
+    "District/County/Banner/City/League/Prefecture/Province/State/"
+    "Governorate/Emirate/New Area/Autonomous Region 等。"
+    "Town/Township/Village/2nd Area/Community/Sub-district/Barangay/MFY 必须留在 street。"
+    "所有逗号段必须进入 street 或 region，禁止丢掉中间段；不要把国家名放进 region。"
+    "例："
+    "Room 110, No. 8, Xili South Road, Nanshan District, Shenzhen City, Guangdong Province → "
     'street="Room 110, No. 8, Xili South Road", '
-    'region="Nanshan District, Shenzhen City, Guangdong Province"。'
+    'region="Nanshan District, Shenzhen City, Guangdong Province"；'
+    "No. 5, Xizhi Lane, Qiaoqian 2nd Area, Jinzao Town, Chaoyang District, "
+    "Shantou City, Guangdong Province → "
+    'street="No. 5, Xizhi Lane, Qiaoqian 2nd Area, Jinzao Town", '
+    'region="Chaoyang District, Shantou City, Guangdong Province"；'
+    "House 8, 2nd Company, 14th Regiment, Alar City, "
+    "Xinjiang Uyghur Autonomous Region → "
+    'street="House 8, 2nd Company, 14th Regiment", '
+    'region="Alar City, Xinjiang Uyghur Autonomous Region"；'
+    "39-uy, Zevarsoy kochasi, Xamkorobod MFY, Yunusabad district, Tashkent city → "
+    'street="39-uy, Zevarsoy kochasi, Xamkorobod MFY", '
+    'region="Yunusabad district, Tashkent city"；'
+    "123 Main Street, Springfield, IL 62704 → "
+    'street="123 Main Street", region="Springfield, IL 62704"；'
+    "Apt 5, 1-2-3 Jingumae, Shibuya-ku, Tokyo → "
+    'street="Apt 5, 1-2-3 Jingumae", region="Shibuya-ku, Tokyo"。'
     "4) address_country 用 ISO 3166-1 alpha-3。"
     "内地 CHN，香港 HKG，澳门 MAC，台湾 TWN；国外用对应国家（如 UZB）。"
     "5) 无英文住址则各键空/false。不要输出其它键或解释。"
@@ -75,7 +118,7 @@ _HK_EN_RE = re.compile(
     r"tsuen\s*wan|kwai\s*chung|tai\s*po|fanling|sheung\s*shui|"
     r"tseung\s*kwan\s*o|sai\s*kung|tung\s*chung|mong\s*kok|"
     r"tsim\s*sha\s*tsui|sham\s*shui\s*po|wong\s*tai\s*sin|"
-    r"causeway\s*bay|wan\s*chai|aberdeen",
+    r"causeway\s*bay|wan\s*chai|aberdeen|hung\s*hom",
     re.I,
 )
 _HK_CN_RE = re.compile(r"香港|九[龍龙]|新界")
@@ -87,9 +130,97 @@ _NON_HK_EN_RE = re.compile(
 _ADMIN_PART_RE = re.compile(
     r"\b(districts?|city|cities|province|state|prefecture|"
     r"count(?:y|ies)|territory|postal(?:\s*code)?|zip(?:\s*code)?|"
-    r"region|oblast|viloyat)\b",
+    r"region|oblast|viloyat|"
+    r"banners?|leagues?|governorates?|emirates?|cantons?|"
+    r"departments?|municipalit(?:y|ies)|krais?|voivodeships?)\b",
     re.I,
 )
+_SUBDISTRICT_RE = re.compile(r"sub[-\s]?districts?", re.I)
+_NEW_AREA_RE = re.compile(r"\bnew\s+area\b", re.I)
+_HK_REGION_TAIL_RE = re.compile(
+    r"hong\s*kong|kowloon|new\s*territories|\bhksar\b|\bN\.?\s*T\.?\b",
+    re.I,
+)
+_FLAT_PART_RE = re.compile(
+    r"^(rm|room|flat|unit|apt|ste|suite|shop|office|"
+    r"blk|block|phase|ph\.?|wing)\b|"
+    r"^(lg|ug|g|m|u)\s*/\s*f\b|"
+    r"^\d+\s*/\s*f\b|"
+    r"^\d+\s*(st|nd|rd|th)?\s*(fl\.?|floor)\b|"
+    r"^(室|座|樓|楼)",
+    re.I,
+)
+_BLDG_PART_RE = re.compile(
+    r"\b(court|mansion|building|tower|centre|center|plaza|gardens?|"
+    r"house|villa|heights|residence|park|estate)\b",
+    re.I,
+)
+_STREET_PART_RE = re.compile(
+    r"\b(road|rd\.?|street|st\.?|avenue|ave\.?|lane|path|"
+    r"drive|dr\.?|terrace|highway|circuit)\b",
+    re.I,
+)
+
+
+def _empty_address() -> dict[str, str]:
+    return {
+        "director_address_flat": "",
+        "director_address_building": "",
+        "director_address_street": "",
+        "director_address_region": "",
+        "address_country": "",
+        "address_is_hk": "0",
+    }
+
+
+def load_s03_district_options(
+    *, path: Path | None = None, reload: bool = False
+) -> list[dict[str, Any]]:
+    """ICRIS s03 香港「郵遞區號」下拉原文（如 香港仔、天水圍）。"""
+    global _S03_DISTRICTS
+    target = path or S03_DISTRICTS_PATH
+    if path is None and _S03_DISTRICTS is not None and not reload:
+        return _S03_DISTRICTS
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        rows: list[Any] = []
+    else:
+        rows = raw.get("options") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list):
+        rows = []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    skip = re.compile(r"請選擇|请选择|^Select$|^--+", re.I)
+    for item in rows:
+        if isinstance(item, str):
+            label, value, aliases = item.strip(), item.strip(), []
+        elif isinstance(item, dict):
+            label = str(item.get("label") or "").strip()
+            value = str(item.get("value") or label).strip() or label
+            raw_aliases = item.get("aliases") or []
+            aliases = (
+                [str(a).strip() for a in raw_aliases if str(a or "").strip()]
+                if isinstance(raw_aliases, list)
+                else []
+            )
+        else:
+            continue
+        if not label or skip.search(label) or label in seen:
+            continue
+        seen.add(label)
+        out.append({"label": label, "value": value, "aliases": aliases})
+    if path is None:
+        _S03_DISTRICTS = out
+    return out
+
+
+def s03_district_labels(*, path: Path | None = None) -> list[str]:
+    return [
+        str(row["label"])
+        for row in load_s03_district_options(path=path)
+        if row.get("label")
+    ]
 
 
 def english_address_is_hk(address_en: str) -> bool:
@@ -169,23 +300,85 @@ def _match_district_in_options(name: str, options: list[str]) -> str:
     return ""
 
 
+def resolve_s03_hk_district(
+    raw: str = "",
+    *,
+    address_en: str = "",
+    address_cn: str = "",
+    region: str = "",
+) -> str:
+    """把区名/英文住址映射到 ICRIS 郵遞區號下拉原文。对不上则空，不默认香港仔。"""
+    labels = s03_district_labels()
+    if not labels:
+        return ""
+    allow_aberdeen = aberdeen_district_allowed(address_en, region or raw, address_cn)
+
+    def _ok(name: str) -> str:
+        hit = _match_district_in_options(name, labels)
+        if hit and "香港仔" in hit and not allow_aberdeen:
+            return ""
+        return hit
+
+    seed = (raw or region or "").strip()
+    hit = _ok(seed)
+    if hit:
+        return hit
+
+    for cand in hk_district_select_candidates(
+        address_en, region or raw, address_cn
+    ):
+        hit = _ok(cand)
+        if hit:
+            return hit
+
+    blob = _hk_district_blob(address_en, region or raw, address_cn).lower()
+    if not blob:
+        return ""
+    best = ""
+    best_len = 0
+    for row in load_s03_district_options():
+        label = str(row.get("label") or "").strip()
+        if not label:
+            continue
+        if "香港仔" in label and not allow_aberdeen:
+            continue
+        aliases = [label, *(row.get("aliases") or [])]
+        for alias in aliases:
+            a = str(alias or "").strip()
+            if len(a) < 3:
+                continue
+            if a.lower() in blob and len(a) > best_len:
+                best = label
+                best_len = len(a)
+    return best
+
+
 def pick_hk_district_from_options(
     address_en: str,
-    options: list[str],
+    options: list[str] | None = None,
     *,
     region: str = "",
     address_cn: str = "",
     llm: Any | None = None,
 ) -> str:
     """关键字命中且在下拉里的优先；否则 LLM 从选项里挑。不默认香港仔。"""
-    opts = [str(o).strip() for o in options if str(o or "").strip()]
+    opts = [str(o).strip() for o in (options or []) if str(o or "").strip()]
     opts = [o for o in opts if o and not re.search(r"請選擇|请选择|^Select$", o, re.I)]
+    if not opts:
+        opts = s03_district_labels()
     allow_aberdeen = aberdeen_district_allowed(address_en, region, address_cn)
 
     def _ok(name: str) -> str:
         hit = _match_district_in_options(name, opts) if opts else (name or "").strip()
         if hit and "香港仔" in hit and not allow_aberdeen:
             return ""
+        return hit
+
+    mapped = resolve_s03_hk_district(
+        region, address_en=address_en, address_cn=address_cn, region=region
+    )
+    hit = _ok(mapped) if mapped else ""
+    if hit:
         return hit
 
     for cand in hk_district_select_candidates(address_en, region, address_cn):
@@ -221,24 +414,41 @@ def pick_hk_district_from_options(
 
 def classify_address_user_prompt(address_en: str) -> str:
     en = (address_en or "").strip()
+    labels = s03_district_labels()
+    opts = "、".join(labels)
     if not en:
         return "请判定住址。证件相关行:（无英文住址）"
-    return f"请只根据下面这一行英文住址拆分并判定类型，忽略其它资料。\n\n住址英文:\n{en}"
+    return (
+        "请只根据下面这一行英文住址拆分并判定类型，忽略其它资料。"
+        "若是香港住址，region 必须从下列郵遞區號选项抄一项原文，禁止自造。\n\n"
+        f"住址英文:\n{en}\n\n"
+        f"香港郵遞區號选项:\n{opts}"
+    )
+
+
+def _english_address_body_parts(address_en: str) -> list[str]:
+    parts = [p.strip() for p in re.split(r"[,，]", address_en or "") if p.strip()]
+    if not parts:
+        return []
+    country = normalize_address_country(parts[-1])
+    return parts[:-1] if country and len(parts) > 1 else parts
+
+
+def _part_starts_region(part: str) -> bool:
+    """市县级及以上逗号段：District/City/Banner 等；Sub-district、2nd Area 不算。"""
+    if _SUBDISTRICT_RE.search(part):
+        return False
+    if _NEW_AREA_RE.search(part):
+        return True
+    return bool(_ADMIN_PART_RE.search(part))
 
 
 def split_english_street_region(address_en: str) -> tuple[str, str]:
-    """英文住址：从第一段行政单位（District/City/Province 等）起到末尾为 region。"""
-    address = (address_en or "").strip()
-    if not address:
-        return "", ""
-    parts = [p.strip() for p in re.split(r"[,，]", address) if p.strip()]
-    if not parts:
-        return "", ""
-    country = normalize_address_country(parts[-1])
-    body = parts[:-1] if country and len(parts) > 1 else parts
+    """英文住址：从第一段市县级及以上行政单位起到末尾为 region。"""
+    body = _english_address_body_parts(address_en)
     if not body:
         return "", ""
-    idx = next((i for i, p in enumerate(body) if _ADMIN_PART_RE.search(p)), -1)
+    idx = next((i for i, p in enumerate(body) if _part_starts_region(p)), -1)
     if idx >= 0:
         return ", ".join(body[:idx]), ", ".join(body[idx:])
     if len(body) >= 3:
@@ -248,10 +458,48 @@ def split_english_street_region(address_en: str) -> tuple[str, str]:
     return body[0], ""
 
 
-def _region_is_truncated(llm_region: str, rule_region: str) -> bool:
-    """LLM 的 region 是规则 region 的前缀/真子集（缺了市省）。"""
-    a = re.sub(r"\s+", " ", (llm_region or "").strip().lower()).rstrip(",")
-    b = re.sub(r"\s+", " ", (rule_region or "").strip().lower()).rstrip(",")
+def split_hk_english_four_way(address_en: str) -> tuple[str, str, str, str]:
+    """香港英文住址弱拆：室/楼/座、大厦、街道、区（区为下拉原文或未映射原文）。"""
+    address = (address_en or "").strip()
+    if not address:
+        return "", "", "", ""
+    parts = [p.strip() for p in re.split(r"[,，]", address) if p.strip()]
+    region_parts: list[str] = []
+    while parts:
+        last = parts[-1]
+        if _STREET_PART_RE.search(last):
+            break
+        named = bool(resolve_s03_hk_district(last))
+        if named or _HK_REGION_TAIL_RE.search(last):
+            region_parts.insert(0, parts.pop())
+            continue
+        break
+    region_raw = ", ".join(region_parts)
+    region = resolve_s03_hk_district(
+        region_raw, address_en=address, region=region_raw
+    )
+
+    flat_parts: list[str] = []
+    while parts and _FLAT_PART_RE.search(parts[0]):
+        flat_parts.append(parts.pop(0))
+
+    building = ""
+    bldg_idx = -1
+    for i, part in enumerate(parts):
+        if _BLDG_PART_RE.search(part) and not _STREET_PART_RE.search(part):
+            bldg_idx = i
+    if bldg_idx >= 0:
+        building = parts[bldg_idx]
+        parts = parts[:bldg_idx] + parts[bldg_idx + 1 :]
+    street = ", ".join(parts)
+    flat = ", ".join(flat_parts)
+    return flat, building, street, region
+
+
+def _is_truncated_vs_rule(llm_val: str, rule_val: str) -> bool:
+    """LLM 字段是规则结果的前缀/真子集（缺了中间段或市省）。"""
+    a = re.sub(r"\s+", " ", (llm_val or "").strip().lower()).rstrip(",")
+    b = re.sub(r"\s+", " ", (rule_val or "").strip().lower()).rstrip(",")
     if not b or a == b:
         return False
     if not a:
@@ -262,6 +510,52 @@ def _region_is_truncated(llm_region: str, rule_region: str) -> bool:
     b_parts = [p.strip() for p in b.split(",") if p.strip()]
     if a_parts and all(p in b_parts for p in a_parts) and len(b_parts) > len(a_parts):
         return True
+    return False
+
+
+def _region_is_truncated(llm_region: str, rule_region: str) -> bool:
+    """LLM 的 region 是规则 region 的前缀/真子集（缺了市省）。"""
+    return _is_truncated_vs_rule(llm_region, rule_region)
+
+
+def _street_is_truncated(llm_street: str, rule_street: str) -> bool:
+    """LLM 的 street 是规则 street 的前缀/真子集（缺了镇/片区等）。"""
+    return _is_truncated_vs_rule(llm_street, rule_street)
+
+
+def _dropped_comma_parts(address_en: str, street: str, region: str) -> bool:
+    """原文（不含国名）有逗号段未出现在 street+region。"""
+    combined = f"{street}, {region}".lower()
+    combined = re.sub(r"\s+", " ", combined)
+    for part in _english_address_body_parts(address_en):
+        token = re.sub(r"\s+", " ", part.strip().lower())
+        if token and token not in combined:
+            return True
+    return False
+
+
+def _hk_region_tail_part(part: str) -> bool:
+    """郵遞區／港九新界尾段，不算香港四段丢失。"""
+    token = (part or "").strip()
+    if not token:
+        return True
+    if _HK_REGION_TAIL_RE.search(token):
+        return True
+    return bool(resolve_s03_hk_district(token))
+
+
+def _hk_dropped_address_parts(
+    address_en: str, flat: str, building: str, street: str
+) -> bool:
+    """原文里非区名逗号段未出现在 flat+building+street。"""
+    combined = re.sub(r"\s+", " ", f"{flat}, {building}, {street}".lower())
+    parts = [p.strip() for p in re.split(r"[,，]", address_en or "") if p.strip()]
+    for part in parts:
+        if _hk_region_tail_part(part):
+            continue
+        token = re.sub(r"\s+", " ", part.strip().lower())
+        if token and token not in combined:
+            return True
     return False
 
 
@@ -279,6 +573,12 @@ def coerce_address_result(
     cn = (address_cn or "").strip()
     if not isinstance(data, dict):
         data = {}
+    flat = str(
+        data.get("flat") or data.get("director_address_flat") or ""
+    ).strip()
+    building = str(
+        data.get("building") or data.get("director_address_building") or ""
+    ).strip()
     street = str(
         data.get("street") or data.get("director_address_street") or ""
     ).strip()
@@ -312,14 +612,46 @@ def coerce_address_result(
     elif not country and english_address_looks_greater_china(en):
         country = _guess_country_from_en(en) or "CHN"
 
-    if en and (not street and not region):
-        street, region = split_english_street_region(en)
-    elif en:
-        rule_street, rule_region = split_english_street_region(en)
-        if rule_region and _region_is_truncated(region, rule_region):
-            street, region = rule_street, rule_region
-    region = _strip_country_token(region, country)
+    if is_hk:
+        fb_flat, fb_bldg, fb_street, fb_region = split_hk_english_four_way(en)
+        if not en:
+            fb_region = resolve_s03_hk_district("", address_cn=cn) or fb_region
+        if en and (fb_flat or fb_bldg or fb_street):
+            if (
+                _is_truncated_vs_rule(flat, fb_flat)
+                or _is_truncated_vs_rule(building, fb_bldg)
+                or _is_truncated_vs_rule(street, fb_street)
+                or _hk_dropped_address_parts(en, flat, building, street)
+            ):
+                flat, building, street = fb_flat, fb_bldg, fb_street
+        else:
+            flat = flat or fb_flat
+            building = building or fb_bldg
+            street = street or fb_street
+        region = resolve_s03_hk_district(
+            region or fb_region,
+            address_en=en,
+            address_cn=cn,
+            region=region or fb_region,
+        )
+    else:
+        flat = ""
+        building = ""
+        if en and (not street and not region):
+            street, region = split_english_street_region(en)
+        elif en:
+            rule_street, rule_region = split_english_street_region(en)
+            if rule_street or rule_region:
+                if (
+                    (rule_region and _region_is_truncated(region, rule_region))
+                    or _street_is_truncated(street, rule_street)
+                    or _dropped_comma_parts(en, street, region)
+                ):
+                    street, region = rule_street, rule_region
+        region = _strip_country_token(region, country)
     return {
+        "director_address_flat": flat,
+        "director_address_building": building,
         "director_address_street": street,
         "director_address_region": region,
         "address_country": country,
@@ -360,25 +692,30 @@ def _strip_country_token(region: str, country_iso: str) -> str:
 def weak_fallback_address(address_en: str) -> dict[str, str]:
     en = (address_en or "").strip()
     if not en:
+        return _empty_address()
+    is_hk = english_address_is_hk(en)
+    if is_hk:
+        flat, building, street, region = split_hk_english_four_way(en)
         return {
-            "director_address_street": "",
-            "director_address_region": "",
-            "address_country": "",
-            "address_is_hk": "0",
+            "director_address_flat": flat,
+            "director_address_building": building,
+            "director_address_street": street,
+            "director_address_region": region,
+            "address_country": "HKG",
+            "address_is_hk": "1",
         }
     street, region = split_english_street_region(en)
-    is_hk = english_address_is_hk(en)
     country = _guess_country_from_en(en)
-    if is_hk:
-        country = "HKG"
-    elif not country and english_address_looks_greater_china(en):
+    if not country and english_address_looks_greater_china(en):
         country = "CHN"
     region = _strip_country_token(region, country)
     return {
+        "director_address_flat": "",
+        "director_address_building": "",
         "director_address_street": street,
         "director_address_region": region,
         "address_country": country,
-        "address_is_hk": "1" if is_hk else "0",
+        "address_is_hk": "0",
     }
 
 
@@ -396,6 +733,9 @@ def classify_director_address(
         if chinese_address_is_hk(cn):
             fb["address_is_hk"] = "1"
             fb["address_country"] = fb.get("address_country") or "HKG"
+            fb["director_address_region"] = resolve_s03_hk_district(
+                "", address_cn=cn
+            )
         return fb
     try:
         client = llm
@@ -414,7 +754,13 @@ def classify_director_address(
             data = LLMClient().classify_director_address(en)
         if isinstance(data, dict) and data:
             out = coerce_address_result(data, en, cn)
-            if out.get("director_address_street") or out.get("director_address_region") or out.get("address_country") or out.get("address_is_hk") == "1":
+            if (
+                out.get("director_address_street")
+                or out.get("director_address_region")
+                or out.get("director_address_flat")
+                or out.get("address_country")
+                or out.get("address_is_hk") == "1"
+            ):
                 return out
         if data is not None:
             logger.warning("住址英文 LLM 分类结果无效: %s", data)
@@ -424,4 +770,47 @@ def classify_director_address(
     if chinese_address_is_hk(cn):
         fb["address_is_hk"] = "1"
         fb["address_country"] = fb.get("address_country") or "HKG"
+        if not fb.get("director_address_region"):
+            fb["director_address_region"] = resolve_s03_hk_district(
+                "", address_en=en, address_cn=cn
+            )
     return fb
+
+
+def stored_s03_address_fields(
+    director: dict[str, Any] | None = None,
+    applicant: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """s03 只读已入库字段，不拆分、不猜区。"""
+    d = director if isinstance(director, dict) else {}
+    a = applicant if isinstance(applicant, dict) else {}
+
+    def _get(*keys: str) -> str:
+        for src in (d, a):
+            for key in keys:
+                val = str(src.get(key) or "").strip()
+                if val:
+                    return val
+        return ""
+
+    hk_raw = _get("address_is_hk")
+    country = _get("address_country")
+    region = _get("address_region", "director_address_region")
+    if hk_raw:
+        is_hk = hk_raw.lower() in ("1", "true", "yes", "hk")
+    elif country.upper() in ("HKG", "HK"):
+        is_hk = True
+    elif region in set(s03_district_labels()) or region.startswith(
+        ("香港島-", "九龍-", "新界-")
+    ):
+        is_hk = True
+    else:
+        is_hk = False
+    return {
+        "flat": _get("address_flat", "director_address_flat"),
+        "building": _get("address_building", "director_address_building"),
+        "street": _get("address_street", "director_address_street"),
+        "region": region,
+        "country": country,
+        "address_is_hk": "1" if is_hk else "0",
+    }

@@ -35,6 +35,8 @@ MATERIAL_FIELDS: list[MaterialField] = [
     MaterialField("id_number", "身份证号码"),
     MaterialField("director_address_cn", "住址中文"),
     MaterialField("director_address_en", "住址英文"),
+    MaterialField("director_address_flat", "住址室楼座", required=False),
+    MaterialField("director_address_building", "住址大厦", required=False),
     MaterialField("director_address_street", "住址街道", required=False),
     MaterialField("director_address_region", "住址区省市", required=False),
     MaterialField("address_country", "住址国家", required=False),

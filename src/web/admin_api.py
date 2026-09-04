@@ -150,6 +150,15 @@ def handle_admin_api(
                 if row.get("label")
             ]
             return _ok(items=items, count=len(items))
+        if method == "GET" and rel == "s03-districts":
+            from src.materials.address_classify import load_s03_district_options
+
+            items = [
+                {"label": row["label"], "value": row["label"]}
+                for row in load_s03_district_options()
+                if row.get("label")
+            ]
+            return _ok(items=items, count=len(items))
         if method == "GET" and rel == "register-runner/status":
             from src.web.admin_runner import status as runner_status
 
@@ -629,6 +638,10 @@ _FIELD_LABELS: dict[str, str] = {
     "director.issuing_country": "证件签发地",
     "director.address_cn": "住址（中文）",
     "director.address_en": "住址（英文）",
+    "director.address_flat": "住址室/楼/座",
+    "director.address_building": "住址大厦",
+    "director.address_street": "住址街道",
+    "director.address_region": "住址区/市/省",
     "director.address_country": "住址国家",
     "director.address_is_hk": "住址是否香港",
     "applicant.name": "申请人姓名",
@@ -898,6 +911,26 @@ def _flatten_payload_fields(payload: dict[str, Any]) -> list[dict[str, str]]:
     add(
         "director.address_en",
         director.get("address_en") or applicant.get("address_en"),
+        group="director",
+    )
+    add(
+        "director.address_flat",
+        director.get("address_flat") or applicant.get("address_flat"),
+        group="director",
+    )
+    add(
+        "director.address_building",
+        director.get("address_building") or applicant.get("address_building"),
+        group="director",
+    )
+    add(
+        "director.address_street",
+        director.get("address_street") or applicant.get("address_street"),
+        group="director",
+    )
+    add(
+        "director.address_region",
+        director.get("address_region") or applicant.get("address_region"),
         group="director",
     )
     addr_country = director.get("address_country") or applicant.get("address_country")

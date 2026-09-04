@@ -292,6 +292,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             given_en = fb.get("director_given_en") or ""
             if surname_en or given_en:
                 person_en = f"{surname_en} {given_en}".strip()
+    address_flat = _get_val(materials, "director_address_flat")
+    address_building = _get_val(materials, "director_address_building")
     address_street = _get_val(materials, "director_address_street")
     address_region = _get_val(materials, "director_address_region")
     address_country = _get_val(materials, "address_country")
@@ -368,6 +370,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "name_cn": person_cn,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "address_flat": address_flat,
+                    "address_building": address_building,
                     "address_street": address_street,
                     "address_region": address_region,
                     "address_country": address_country,
@@ -391,6 +395,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
                     "email": contact_email,
                     "address_cn": _get_val(materials, "director_address_cn"),
                     "address_en": _get_val(materials, "director_address_en"),
+                    "address_flat": address_flat,
+                    "address_building": address_building,
                     "address_street": address_street,
                     "address_region": address_region,
                     "address_country": address_country,
@@ -429,6 +435,8 @@ def aggregate_company_data(materials: dict[str, dict[str, Any]]) -> dict[str, An
             "issuing_country": _get_val(materials, "issuing_country"),
             "surname_en": surname_en,
             "given_en": given_en,
+            "address_flat": address_flat,
+            "address_building": address_building,
             "address_street": address_street,
             "address_region": address_region,
             "address_country": address_country,

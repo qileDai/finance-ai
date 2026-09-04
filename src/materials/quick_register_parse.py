@@ -126,6 +126,10 @@ def attach_director_structure(
     cn = str(result.get("director_address_cn") or "").strip()
     if en or cn:
         addr = classify_director_address(en, cn, llm=llm)
+        result["director_address_flat"] = str(addr.get("director_address_flat") or "")
+        result["director_address_building"] = str(
+            addr.get("director_address_building") or ""
+        )
         result["director_address_street"] = str(
             addr.get("director_address_street") or ""
         )

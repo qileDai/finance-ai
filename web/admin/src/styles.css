@@ -629,8 +629,21 @@ table.data tr.clickable:hover td {
   gap: 12px 14px;
   align-items: start;
 }
+.reg-id-row .ant-select {
+  width: 100%;
+}
 .reg-id-row.with-country {
   grid-template-columns: minmax(140px, 0.8fr) minmax(160px, 1fr) minmax(200px, 1.3fr);
+}
+.reg-address-stack {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.reg-address-stack .reg-field input[type="text"],
+.reg-address-stack .ant-select {
+  width: 100%;
 }
 @media (max-width: 720px) {
   .reg-id-row,

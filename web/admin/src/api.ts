@@ -321,6 +321,10 @@ export const api = {
     request<ApiOk<{ items: { label: string; value: string }[]; count?: number }>>(
       "/admin/api/s03-countries"
     ),
+  s03Districts: () =>
+    request<ApiOk<{ items: { label: string; value: string }[]; count?: number }>>(
+      "/admin/api/s03-districts"
+    ),
   registerRunner: {
     defaults: () =>
       request<ApiOk<{ contact_email?: string; contact_phone?: string }>>(

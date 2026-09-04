@@ -1,0 +1,1087 @@
+{
+  "source": "icris_s03_hk_district",
+  "captured_at": "2026-09-04T07:24:34Z",
+  "url": "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s03.do",
+  "count": 125,
+  "options": [
+    {
+      "label": "香港仔",
+      "value": "ABERDEEN",
+      "aliases": [
+        "香港仔",
+        "Aberdeen",
+        "ABERDEEN"
+      ]
+    },
+    {
+      "label": "金鐘",
+      "value": "ADMIRALTY",
+      "aliases": [
+        "金鐘",
+        "Admiralty",
+        "ADMIRALTY"
+      ]
+    },
+    {
+      "label": "鴨脷洲",
+      "value": "APLEICHAU",
+      "aliases": [
+        "鴨脷洲",
+        "Ap Lei Chau",
+        "APLEICHAU"
+      ]
+    },
+    {
+      "label": "寶馬山",
+      "value": "BRAEMARHILL",
+      "aliases": [
+        "寶馬山",
+        "BRAEMARHILL"
+      ]
+    },
+    {
+      "label": "銅鑼灣",
+      "value": "CAUSEWAYBAY",
+      "aliases": [
+        "銅鑼灣",
+        "Causeway Bay",
+        "CAUSEWAYBAY"
+      ]
+    },
+    {
+      "label": "中環",
+      "value": "CENTRAL",
+      "aliases": [
+        "中環",
+        "Central",
+        "CENTRAL"
+      ]
+    },
+    {
+      "label": "柴灣",
+      "value": "CHAIWAN",
+      "aliases": [
+        "柴灣",
+        "Chai Wan",
+        "CHAIWAN"
+      ]
+    },
+    {
+      "label": "舂坎角",
+      "value": "CHUNGHOMKOK",
+      "aliases": [
+        "舂坎角",
+        "CHUNGHOMKOK"
+      ]
+    },
+    {
+      "label": "跑馬地",
+      "value": "HAPPYVALLEY",
+      "aliases": [
+        "跑馬地",
+        "Happy Valley",
+        "HAPPYVALLEY"
+      ]
+    },
+    {
+      "label": "渣甸山",
+      "value": "JARDINESLOOKOUT",
+      "aliases": [
+        "渣甸山",
+        "JARDINESLOOKOUT"
+      ]
+    },
+    {
+      "label": "堅尼地城",
+      "value": "KENNEDYTOWN",
+      "aliases": [
+        "堅尼地城",
+        "Kennedy Town",
+        "KENNEDYTOWN"
+      ]
+    },
+    {
+      "label": "半山區",
+      "value": "MIDLEVELS",
+      "aliases": [
+        "半山區",
+        "MIDLEVELS"
+      ]
+    },
+    {
+      "label": "北角",
+      "value": "NORTHPOINT",
+      "aliases": [
+        "北角",
+        "North Point",
+        "NORTHPOINT"
+      ]
+    },
+    {
+      "label": "山頂",
+      "value": "PEAK",
+      "aliases": [
+        "山頂",
+        "The Peak",
+        "Peak",
+        "PEAK"
+      ]
+    },
+    {
+      "label": "薄扶林",
+      "value": "POKFULAM",
+      "aliases": [
+        "薄扶林",
+        "Pok Fu Lam",
+        "Pokfulam",
+        "POKFULAM"
+      ]
+    },
+    {
+      "label": "鰂魚涌",
+      "value": "QUARRYBAY",
+      "aliases": [
+        "鰂魚涌",
+        "Quarry Bay",
+        "QUARRYBAY"
+      ]
+    },
+    {
+      "label": "淺水灣",
+      "value": "REPULSEBAY",
+      "aliases": [
+        "淺水灣",
+        "Repulse Bay",
+        "REPULSEBAY"
+      ]
+    },
+    {
+      "label": "西灣河",
+      "value": "SAIWANHO",
+      "aliases": [
+        "西灣河",
+        "Sai Wan Ho",
+        "SAIWANHO"
+      ]
+    },
+    {
+      "label": "西營盤",
+      "value": "SAIYINGPUN",
+      "aliases": [
+        "西營盤",
+        "Sai Ying Pun",
+        "SAIYINGPUN"
+      ]
+    },
+    {
+      "label": "筲箕灣",
+      "value": "SHAUKEIWAN",
+      "aliases": [
+        "筲箕灣",
+        "Shau Kei Wan",
+        "Shaukiwan",
+        "SHAUKEIWAN"
+      ]
+    },
+    {
+      "label": "石澳",
+      "value": "SHEKO",
+      "aliases": [
+        "石澳",
+        "Shek O",
+        "SHEKO"
+      ]
+    },
+    {
+      "label": "石塘咀",
+      "value": "SHEKTONGTSUI",
+      "aliases": [
+        "石塘咀",
+        "Shek Tong Tsui",
+        "SHEKTONGTSUI"
+      ]
+    },
+    {
+      "label": "上環",
+      "value": "SHEUNGWAN",
+      "aliases": [
+        "上環",
+        "Sheung Wan",
+        "SHEUNGWAN"
+      ]
+    },
+    {
+      "label": "壽臣山",
+      "value": "SHOUSONHILL",
+      "aliases": [
+        "壽臣山",
+        "SHOUSONHILL"
+      ]
+    },
+    {
+      "label": "小西灣",
+      "value": "SIUSAIWAN",
+      "aliases": [
+        "小西灣",
+        "Siu Sai Wan",
+        "SIUSAIWAN"
+      ]
+    },
+    {
+      "label": "掃桿埔",
+      "value": "SOKONPO",
+      "aliases": [
+        "掃桿埔",
+        "SOKONPO"
+      ]
+    },
+    {
+      "label": "赤柱",
+      "value": "STANLEY",
+      "aliases": [
+        "赤柱",
+        "Stanley",
+        "STANLEY"
+      ]
+    },
+    {
+      "label": "大坑",
+      "value": "TAIHANG",
+      "aliases": [
+        "大坑",
+        "Tai Hang",
+        "TAIHANG"
+      ]
+    },
+    {
+      "label": "大潭",
+      "value": "TAITAM",
+      "aliases": [
+        "大潭",
+        "TAITAM"
+      ]
+    },
+    {
+      "label": "天后",
+      "value": "TINHAU",
+      "aliases": [
+        "天后",
+        "TINHAU"
+      ]
+    },
+    {
+      "label": "灣仔",
+      "value": "WANCHAI",
+      "aliases": [
+        "灣仔",
+        "Wan Chai",
+        "Wanchai",
+        "WANCHAI"
+      ]
+    },
+    {
+      "label": "黃竹坑",
+      "value": "WONGCHUKHANG",
+      "aliases": [
+        "黃竹坑",
+        "Wong Chuk Hang",
+        "WONGCHUKHANG"
+      ]
+    },
+    {
+      "label": "筆架山",
+      "value": "BEACONHILL",
+      "aliases": [
+        "筆架山",
+        "BEACONHILL"
+      ]
+    },
+    {
+      "label": "長沙灣",
+      "value": "CHEUNGSHAWAN",
+      "aliases": [
+        "長沙灣",
+        "Cheung Sha Wan",
+        "CHEUNGSHAWAN"
+      ]
+    },
+    {
+      "label": "鑽石山",
+      "value": "DIAMONDHILL",
+      "aliases": [
+        "鑽石山",
+        "Diamond Hill",
+        "DIAMONDHILL"
+      ]
+    },
+    {
+      "label": "何文田",
+      "value": "HOMANTIN",
+      "aliases": [
+        "何文田",
+        "Ho Man Tin",
+        "HOMANTIN"
+      ]
+    },
+    {
+      "label": "紅磡",
+      "value": "HUNGHOM",
+      "aliases": [
+        "紅磡",
+        "Hung Hom",
+        "HUNGHOM"
+      ]
+    },
+    {
+      "label": "佐敦谷",
+      "value": "JORDANVALLEY",
+      "aliases": [
+        "佐敦谷",
+        "JORDANVALLEY"
+      ]
+    },
+    {
+      "label": "啟德",
+      "value": "KAITAK",
+      "aliases": [
+        "啟德",
+        "Kai Tak",
+        "KAITAK"
+      ]
+    },
+    {
+      "label": "京士柏",
+      "value": "KINGSPARK",
+      "aliases": [
+        "京士柏",
+        "KINGSPARK"
+      ]
+    },
+    {
+      "label": "九龍灣",
+      "value": "KOWLOONBAY",
+      "aliases": [
+        "九龍灣",
+        "Kowloon Bay",
+        "KOWLOONBAY"
+      ]
+    },
+    {
+      "label": "九龍城",
+      "value": "KOWLOONCITY",
+      "aliases": [
+        "九龍城",
+        "Kowloon City",
+        "KOWLOONCITY"
+      ]
+    },
+    {
+      "label": "九龍塘",
+      "value": "KOWLOONTONG",
+      "aliases": [
+        "九龍塘",
+        "Kowloon Tong",
+        "KOWLOONTONG"
+      ]
+    },
+    {
+      "label": "觀塘",
+      "value": "KWUNTONG",
+      "aliases": [
+        "觀塘",
+        "Kwun Tong",
+        "KWUNTONG"
+      ]
+    },
+    {
+      "label": "荔枝角",
+      "value": "LAICHIKOK",
+      "aliases": [
+        "荔枝角",
+        "Lai Chi Kok",
+        "LAICHIKOK"
+      ]
+    },
+    {
+      "label": "藍田",
+      "value": "LAMTIN",
+      "aliases": [
+        "藍田",
+        "Lam Tin",
+        "LAMTIN"
+      ]
+    },
+    {
+      "label": "樂富",
+      "value": "LOKFU",
+      "aliases": [
+        "樂富",
+        "Lok Fu",
+        "LOKFU"
+      ]
+    },
+    {
+      "label": "馬頭角",
+      "value": "MATAUKOK",
+      "aliases": [
+        "馬頭角",
+        "MATAUKOK"
+      ]
+    },
+    {
+      "label": "馬頭圍",
+      "value": "MATAUWAI",
+      "aliases": [
+        "馬頭圍",
+        "MATAUWAI"
+      ]
+    },
+    {
+      "label": "美孚",
+      "value": "MEIFOO",
+      "aliases": [
+        "美孚",
+        "Mei Foo",
+        "MEIFOO"
+      ]
+    },
+    {
+      "label": "旺角",
+      "value": "MONGKOK",
+      "aliases": [
+        "旺角",
+        "Mong Kok",
+        "Mongkok",
+        "MONGKOK"
+      ]
+    },
+    {
+      "label": "牛池灣",
+      "value": "NGAUCHIWAN",
+      "aliases": [
+        "牛池灣",
+        "NGAUCHIWAN"
+      ]
+    },
+    {
+      "label": "牛頭角",
+      "value": "NGAUTAUKOK",
+      "aliases": [
+        "牛頭角",
+        "Ngau Tau Kok",
+        "NGAUTAUKOK"
+      ]
+    },
+    {
+      "label": "坪石",
+      "value": "PINGSHEK",
+      "aliases": [
+        "坪石",
+        "PINGSHEK"
+      ]
+    },
+    {
+      "label": "新蒲崗",
+      "value": "SANPOKONG",
+      "aliases": [
+        "新蒲崗",
+        "San Po Kong",
+        "SANPOKONG"
+      ]
+    },
+    {
+      "label": "秀茂坪",
+      "value": "SAUMAUPING",
+      "aliases": [
+        "秀茂坪",
+        "Sau Mau Ping",
+        "SAUMAUPING"
+      ]
+    },
+    {
+      "label": "深水埗",
+      "value": "SHAMSHUIPO",
+      "aliases": [
+        "深水埗",
+        "Sham Shui Po",
+        "SHAMSHUIPO"
+      ]
+    },
+    {
+      "label": "石硤尾",
+      "value": "SHEKKIPMEI",
+      "aliases": [
+        "石硤尾",
+        "Shek Kip Mei",
+        "SHEKKIPMEI"
+      ]
+    },
+    {
+      "label": "昂船洲",
+      "value": "STONECUTTERSISLAND",
+      "aliases": [
+        "昂船洲",
+        "STONECUTTERSISLAND"
+      ]
+    },
+    {
+      "label": "大角咀",
+      "value": "TAIKOKTSUI",
+      "aliases": [
+        "大角咀",
+        "Tai Kok Tsui",
+        "TAIKOKTSUI"
+      ]
+    },
+    {
+      "label": "大窩坪",
+      "value": "TAIWOPING",
+      "aliases": [
+        "大窩坪",
+        "TAIWOPING"
+      ]
+    },
+    {
+      "label": "土瓜灣",
+      "value": "TOKWAWAN",
+      "aliases": [
+        "土瓜灣",
+        "To Kwa Wan",
+        "TOKWAWAN"
+      ]
+    },
+    {
+      "label": "尖沙咀",
+      "value": "TSIMSHATSUI",
+      "aliases": [
+        "尖沙咀",
+        "Tsim Sha Tsui",
+        "TST",
+        "TSIMSHATSUI"
+      ]
+    },
+    {
+      "label": "慈雲山",
+      "value": "TSZWANSHAN",
+      "aliases": [
+        "慈雲山",
+        "Tsz Wan Shan",
+        "TSZWANSHAN"
+      ]
+    },
+    {
+      "label": "東頭",
+      "value": "TUNGTAU",
+      "aliases": [
+        "東頭",
+        "TUNGTAU"
+      ]
+    },
+    {
+      "label": "橫頭磡",
+      "value": "WANGTAUHOM",
+      "aliases": [
+        "橫頭磡",
+        "WANGTAUHOM"
+      ]
+    },
+    {
+      "label": "西九文化區",
+      "value": "WESTKOWLOONCULTURALDISTRICT",
+      "aliases": [
+        "西九文化區",
+        "WESTKOWLOONCULTURALDISTRICT"
+      ]
+    },
+    {
+      "label": "黃大仙",
+      "value": "WONGTAISIN",
+      "aliases": [
+        "黃大仙",
+        "Wong Tai Sin",
+        "WONGTAISIN"
+      ]
+    },
+    {
+      "label": "油麻地",
+      "value": "YAUMATEI",
+      "aliases": [
+        "油麻地",
+        "Yau Ma Tei",
+        "YAUMATEI"
+      ]
+    },
+    {
+      "label": "油塘",
+      "value": "YAUTONG",
+      "aliases": [
+        "油塘",
+        "Yau Tong",
+        "YAUTONG"
+      ]
+    },
+    {
+      "label": "又一村",
+      "value": "YAUYATTSUEN",
+      "aliases": [
+        "又一村",
+        "YAUYATTSUEN"
+      ]
+    },
+    {
+      "label": "長洲",
+      "value": "CHEUNGCHAU",
+      "aliases": [
+        "長洲",
+        "CHEUNGCHAU"
+      ]
+    },
+    {
+      "label": "樟木頭",
+      "value": "CHEUNGMUKTAU",
+      "aliases": [
+        "樟木頭",
+        "CHEUNGMUKTAU"
+      ]
+    },
+    {
+      "label": "清水灣",
+      "value": "CLEARWATERBAY",
+      "aliases": [
+        "清水灣",
+        "CLEARWATERBAY"
+      ]
+    },
+    {
+      "label": "粉嶺",
+      "value": "FANLING",
+      "aliases": [
+        "粉嶺",
+        "Fanling",
+        "FANLING"
+      ]
+    },
+    {
+      "label": "火炭",
+      "value": "FOTAN",
+      "aliases": [
+        "火炭",
+        "Fo Tan",
+        "FOTAN"
+      ]
+    },
+    {
+      "label": "坑口",
+      "value": "HANGHAU",
+      "aliases": [
+        "坑口",
+        "Hang Hau",
+        "HANGHAU"
+      ]
+    },
+    {
+      "label": "廈村",
+      "value": "HATSUEN",
+      "aliases": [
+        "廈村",
+        "HATSUEN"
+      ]
+    },
+    {
+      "label": "洪水橋",
+      "value": "HUNGSHUIKIU",
+      "aliases": [
+        "洪水橋",
+        "Hung Shui Kiu",
+        "HUNGSHUIKIU"
+      ]
+    },
+    {
+      "label": "錦田",
+      "value": "KAMTIN",
+      "aliases": [
+        "錦田",
+        "Kam Tin",
+        "KAMTIN"
+      ]
+    },
+    {
+      "label": "企嶺下",
+      "value": "KEILINGHA",
+      "aliases": [
+        "企嶺下",
+        "KEILINGHA"
+      ]
+    },
+    {
+      "label": "葵涌",
+      "value": "KWAICHUNG",
+      "aliases": [
+        "葵涌",
+        "Kwai Chung",
+        "KWAICHUNG"
+      ]
+    },
+    {
+      "label": "南丫島",
+      "value": "LAMMAISLAND",
+      "aliases": [
+        "南丫島",
+        "LAMMAISLAND"
+      ]
+    },
+    {
+      "label": "藍地",
+      "value": "LAMTEI",
+      "aliases": [
+        "藍地",
+        "LAMTEI"
+      ]
+    },
+    {
+      "label": "大嶼山",
+      "value": "LANTAUISLAND",
+      "aliases": [
+        "大嶼山",
+        "Lantau",
+        "LANTAUISLAND"
+      ]
+    },
+    {
+      "label": "流浮山",
+      "value": "LAUFAUSHAN",
+      "aliases": [
+        "流浮山",
+        "LAUFAUSHAN"
+      ]
+    },
+    {
+      "label": "落馬洲",
+      "value": "LOKMACHAU",
+      "aliases": [
+        "落馬洲",
+        "LOKMACHAU"
+      ]
+    },
+    {
+      "label": "聯和墟",
+      "value": "LUENWOHUI",
+      "aliases": [
+        "聯和墟",
+        "LUENWOHUI"
+      ]
+    },
+    {
+      "label": "鹿頸",
+      "value": "LUKKENG",
+      "aliases": [
+        "鹿頸",
+        "LUKKENG"
+      ]
+    },
+    {
+      "label": "馬料水",
+      "value": "MALIUSHUI",
+      "aliases": [
+        "馬料水",
+        "MALIUSHUI"
+      ]
+    },
+    {
+      "label": "馬鞍山",
+      "value": "MAONSHAN",
+      "aliases": [
+        "馬鞍山",
+        "Ma On Shan",
+        "MAONSHAN"
+      ]
+    },
+    {
+      "label": "馬灣",
+      "value": "MAWAN",
+      "aliases": [
+        "馬灣",
+        "Ma Wan",
+        "MAWAN"
+      ]
+    },
+    {
+      "label": "馬游塘",
+      "value": "MAYAUTONG",
+      "aliases": [
+        "馬游塘",
+        "MAYAUTONG"
+      ]
+    },
+    {
+      "label": "八鄉",
+      "value": "PATHEUNG",
+      "aliases": [
+        "八鄉",
+        "PATHEUNG"
+      ]
+    },
+    {
+      "label": "坪洲",
+      "value": "PENGCHAU",
+      "aliases": [
+        "坪洲",
+        "PENGCHAU"
+      ]
+    },
+    {
+      "label": "西貢",
+      "value": "SAIKUNG",
+      "aliases": [
+        "西貢",
+        "Sai Kung",
+        "SAIKUNG"
+      ]
+    },
+    {
+      "label": "新田",
+      "value": "SANTIN",
+      "aliases": [
+        "新田",
+        "SANTIN"
+      ]
+    },
+    {
+      "label": "深井",
+      "value": "SHAMTSENG",
+      "aliases": [
+        "深井",
+        "SHAMTSENG"
+      ]
+    },
+    {
+      "label": "沙頭角",
+      "value": "SHATAUKOK",
+      "aliases": [
+        "沙頭角",
+        "SHATAUKOK"
+      ]
+    },
+    {
+      "label": "沙田",
+      "value": "SHATIN",
+      "aliases": [
+        "沙田",
+        "Sha Tin",
+        "Shatin",
+        "SHATIN"
+      ]
+    },
+    {
+      "label": "石崗",
+      "value": "SHEKKONG",
+      "aliases": [
+        "石崗",
+        "SHEKKONG"
+      ]
+    },
+    {
+      "label": "石湖墟",
+      "value": "SHEKWUHUI",
+      "aliases": [
+        "石湖墟",
+        "SHEKWUHUI"
+      ]
+    },
+    {
+      "label": "上葵涌",
+      "value": "SHEUNGKWAICHUNG",
+      "aliases": [
+        "上葵涌",
+        "SHEUNGKWAICHUNG"
+      ]
+    },
+    {
+      "label": "上水",
+      "value": "SHEUNGSHUI",
+      "aliases": [
+        "上水",
+        "Sheung Shui",
+        "SHEUNGSHUI"
+      ]
+    },
+    {
+      "label": "船灣",
+      "value": "SHUENWAN",
+      "aliases": [
+        "船灣",
+        "SHUENWAN"
+      ]
+    },
+    {
+      "label": "掃管笏",
+      "value": "SOKWUNWAT",
+      "aliases": [
+        "掃管笏",
+        "SOKWUNWAT"
+      ]
+    },
+    {
+      "label": "欣澳",
+      "value": "SUNNYBAY",
+      "aliases": [
+        "欣澳",
+        "SUNNYBAY"
+      ]
+    },
+    {
+      "label": "大欖涌",
+      "value": "TAILAMCHUNG",
+      "aliases": [
+        "大欖涌",
+        "TAILAMCHUNG"
+      ]
+    },
+    {
+      "label": "大美督",
+      "value": "TAIMEITUK",
+      "aliases": [
+        "大美督",
+        "TAIMEITUK"
+      ]
+    },
+    {
+      "label": "大網仔",
+      "value": "TAIMONGTSAI",
+      "aliases": [
+        "大網仔",
+        "TAIMONGTSAI"
+      ]
+    },
+    {
+      "label": "大埔",
+      "value": "TAIPO",
+      "aliases": [
+        "大埔",
+        "Tai Po",
+        "TAIPO"
+      ]
+    },
+    {
+      "label": "大埔滘",
+      "value": "TAIPOKAU",
+      "aliases": [
+        "大埔滘",
+        "TAIPOKAU"
+      ]
+    },
+    {
+      "label": "大埔墟",
+      "value": "TAIPOMARKET",
+      "aliases": [
+        "大埔墟",
+        "TAIPOMARKET"
+      ]
+    },
+    {
+      "label": "大圍",
+      "value": "TAIWAI",
+      "aliases": [
+        "大圍",
+        "Tai Wai",
+        "TAIWAI"
+      ]
+    },
+    {
+      "label": "汀九",
+      "value": "TINGKAU",
+      "aliases": [
+        "汀九",
+        "TINGKAU"
+      ]
+    },
+    {
+      "label": "天水圍",
+      "value": "TINSHUIWAI",
+      "aliases": [
+        "天水圍",
+        "Tin Shui Wai",
+        "TINSHUIWAI"
+      ]
+    },
+    {
+      "label": "調景嶺",
+      "value": "TIUKENGLENG",
+      "aliases": [
+        "調景嶺",
+        "Tiu Keng Leng",
+        "TIUKENGLENG"
+      ]
+    },
+    {
+      "label": "將軍澳",
+      "value": "TSEUNGKWANO",
+      "aliases": [
+        "將軍澳",
+        "Tseung Kwan O",
+        "TKO",
+        "TSEUNGKWANO"
+      ]
+    },
+    {
+      "label": "青龍頭",
+      "value": "TSINGLUNGTAU",
+      "aliases": [
+        "青龍頭",
+        "TSINGLUNGTAU"
+      ]
+    },
+    {
+      "label": "青衣",
+      "value": "TSINGYI",
+      "aliases": [
+        "青衣",
+        "Tsing Yi",
+        "TSINGYI"
+      ]
+    },
+    {
+      "label": "荃灣",
+      "value": "TSUENWAN",
+      "aliases": [
+        "荃灣",
+        "Tsuen Wan",
+        "TSUENWAN"
+      ]
+    },
+    {
+      "label": "屯門",
+      "value": "TUENMUN",
+      "aliases": [
+        "屯門",
+        "Tuen Mun",
+        "TUENMUN"
+      ]
+    },
+    {
+      "label": "烏溪沙",
+      "value": "WUKAISHA",
+      "aliases": [
+        "烏溪沙",
+        "WUKAISHA"
+      ]
+    },
+    {
+      "label": "烏蛟騰",
+      "value": "WUKAUTANG",
+      "aliases": [
+        "烏蛟騰",
+        "WUKAUTANG"
+      ]
+    },
+    {
+      "label": "元朗",
+      "value": "YUENLONG",
+      "aliases": [
+        "元朗",
+        "Yuen Long",
+        "YUENLONG"
+      ]
+    }
+  ]
+}

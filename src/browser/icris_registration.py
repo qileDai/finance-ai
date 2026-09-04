@@ -24,10 +24,7 @@ from src.materials.id_type_classify import (
     s03_id_type_select_pattern,
     s04_identity_fill_values,
 )
-from src.materials.address_classify import (
-    hk_district_select_candidates,
-    pick_hk_district_from_options,
-)
+from src.materials.address_classify import stored_s03_address_fields
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -4289,31 +4286,26 @@ class IcrisRegistrationBot:
             director = {}
         addr_en = (director.get("address_en", "") or "").strip()
         addr_cn = (director.get("address_cn", "") or "").strip()
-        addr_text = addr_en or addr_cn
-        street = str(
-            director.get("address_street") or applicant.get("address_street") or ""
-        ).strip()
-        region = str(
-            director.get("address_region") or applicant.get("address_region") or ""
-        ).strip()
-        address_country = str(
-            director.get("address_country") or applicant.get("address_country") or ""
-        ).strip()
-        hk_raw = str(
-            director.get("address_is_hk") or applicant.get("address_is_hk") or ""
-        ).strip().lower()
-        if hk_raw:
-            is_hk = hk_raw in ("1", "true", "yes")
-        else:
-            is_hk = detect_hk_address(addr_en, "")
-        if not street and not region:
-            street, region = split_address_street_region(addr_en or addr_text)
+        stored = stored_s03_address_fields(director, applicant)
+        street = stored["street"]
+        region = stored["region"]
+        flat = stored["flat"]
+        building = stored["building"]
+        address_country = stored["country"]
+        is_hk = stored["address_is_hk"] == "1"
+        if not street and not region and not flat and not building:
+            logger.warning(
+                "用户资料: 缺已入库住址字段 addr_en=%s，不现场拆分",
+                (addr_en or addr_cn)[:80],
+            )
 
         logger.info(
-            "开始填写用户资料 (url=%s) 电邮=%s 地址HK=%s street=%s region=%s",
+            "开始填写用户资料 (url=%s) 电邮=%s 地址HK=%s flat=%s building=%s street=%s region=%s",
             page.url[:120],
             email,
             is_hk,
+            flat[:40],
+            building[:40],
             street[:40],
             region[:40],
         )
@@ -4382,7 +4374,26 @@ class IcrisRegistrationBot:
             pass
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
-        # 街道／屋苑／地段／村（室／樓／座 与 大廈 不填）
+        # 香港：室／樓／座、大廈、街道、郵遞區號均填已入库字段；非香港：街道 + 区文本 + 国家
+        if is_hk:
+            if flat:
+                ok = await self._fill_by_placeholder(page, r"室.*樓|室.*楼|Flat.*Floor", flat)
+                if not ok:
+                    ok = await self._fill_enabled_field_by_label(
+                        page, r"室／樓／座|室/楼/座|Flat / Floor", flat
+                    )
+                await _inc(ok, "室/楼/座")
+            else:
+                logger.warning("用户资料: 缺 director_address_flat，不填室/楼/座")
+            if building:
+                ok = await self._fill_by_placeholder(page, r"大廈|大厦|Building", building)
+                if not ok:
+                    ok = await self._fill_enabled_field_by_label(
+                        page, r"大廈|大厦|Building", building
+                    )
+                await _inc(ok, "大厦")
+            else:
+                logger.info("用户资料: 无大厦字段，跳过")
         if street:
             ok = await self._fill_by_placeholder(page, r"街道|屋苑|地段|村", street)
             if not ok:
@@ -4390,33 +4401,23 @@ class IcrisRegistrationBot:
                     page, r"街道|屋苑|地段|村", street
                 )
             await _inc(ok, "街道")
+        else:
+            logger.warning("用户资料: 缺 address_street，不填街道")
 
         # 区/市/省/州/邮递区号
         district_kws = ["郵遞區號", "邮递区号", "區/市", "区/市", "區市省", "州"]
         if is_hk:
-            options = await self._read_s03_district_options(page, district_kws)
-            picked = pick_hk_district_from_options(
-                addr_en,
-                options,
-                region=region,
-                address_cn=addr_cn,
-                llm=self.llm,
-            )
-            if not picked:
-                cands = hk_district_select_candidates(addr_en, region, addr_cn)
-                picked = cands[0] if cands else ""
             ok_dist = False
-            if picked:
+            if region:
                 ok_dist = await self._select_ant_select_by_keywords(
-                    page, district_kws, picked
+                    page, district_kws, region
                 )
             else:
                 logger.warning(
-                    "用户资料: 香港区/邮递区号未匹配 addr=%s region=%s",
+                    "用户资料: 缺已入库香港区/邮递区号 addr=%s",
                     (addr_en or "")[:80],
-                    (region or "")[:40],
                 )
-            await _inc(ok_dist, f"区/市/省={picked or '(未选)'}")
+            await _inc(ok_dist, f"区/市/省={region or '(未选)'}")
         elif region:
             # 非香港：文本填入拆分后的区/市/省（如 "Shenzhen City, Guangdong Province"）
             reg_ok = await self._fill_by_placeholder(
@@ -4428,16 +4429,18 @@ class IcrisRegistrationBot:
                 )
             await _inc(reg_ok, "区/市/省")
 
-        # 国家/地区（仅非香港地址时选「中国」；不依赖 ant-select 数量门槛）
+        # 国家/地区：只用已入库 address_country
         if not is_hk:
-            country_ok = await self._select_non_hk_country(
-                page, address_country or "CHN"
-            )
-            await _inc(country_ok, "国家/地区")
-            if not country_ok:
-                logger.warning(
-                    "用户资料: 国家/地区未选中（非香港地址仍为請選擇），请检查 ICRIS 下拉选项文案"
-                )
+            if address_country:
+                country_ok = await self._select_non_hk_country(page, address_country)
+                await _inc(country_ok, "国家/地区")
+                if not country_ok:
+                    logger.warning(
+                        "用户资料: 国家/地区未选中 country=%s",
+                        address_country[:40],
+                    )
+            else:
+                logger.warning("用户资料: 缺 address_country，不现场猜国家")
 
         # 电邮 + 确认电邮
         for pat, name in [

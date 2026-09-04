@@ -35,6 +35,8 @@ TEXT_FIELDS = (
     "id_number",
     "director_address_cn",
     "director_address_en",
+    "director_address_flat",
+    "director_address_building",
     "director_address_street",
     "director_address_region",
     "address_country",
@@ -652,6 +654,7 @@ def submit(
     addr_cn = (fields.get("director_address_cn") or "").strip()
     need_addr = (addr_en or addr_cn) and (
         not str(fields.get("director_address_street") or "").strip()
+        or not str(fields.get("director_address_region") or "").strip()
         or str(fields.get("address_is_hk") or "") not in ("0", "1")
     )
     if need_addr:
