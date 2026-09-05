@@ -6474,12 +6474,10 @@ class IcrisRegistrationBot:
                         await cancel_watch
                     except (asyncio.CancelledError, Exception):
                         pass
-                # 审核拒绝/超时/取消：立即关闭，不再保持
-                skip_keep_open = (
-                    isinstance(run_error, IcrisFlowError) and run_error.no_requeue
-                ) or self._job_is_cancelled()
+                # 失败或取消：立即关闭，不占用 CDP
+                skip_keep_open = run_error is not None or self._job_is_cancelled()
                 if skip_keep_open:
-                    logger.info("审核拒绝/超时/取消，立即关闭浏览器")
+                    logger.info("注册失败/取消，立即关闭浏览器")
                 else:
                     logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
                     remaining = float(keep_open)

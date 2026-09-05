@@ -87,6 +87,29 @@ def _ensure_chrome_profile_disable_translate(profile) -> None:
         logger.debug("写入 Chrome 禁用翻译 Preferences 失败: %s", e)
 
 
+def _cdp_profile_and_port() -> tuple[Any, int]:
+    import os
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    parsed = urlparse(settings.chrome_cdp_url)
+    port = parsed.port or 9222
+    tmp_base = os.environ.get("TEMP") or "/tmp"
+    profile = Path(tmp_base) / "icris-chrome-cdp-profile"
+    return profile, port
+
+
+def shutdown_cdp_chrome() -> None:
+    """结束本项目 CDP Chrome。心跳仍在且本线程未持锁时跳过（避免杀掉独立激活浏览器以外的占用者）。"""
+    from src.browser.cdp_lock import should_skip_kill_cdp_chrome
+
+    if should_skip_kill_cdp_chrome():
+        logger.warning("跳过结束 CDP Chrome：其他会话心跳仍在")
+        return
+    profile, port = _cdp_profile_and_port()
+    _kill_cdp_chrome_by_profile(profile, port)
+
+
 def _kill_cdp_chrome_by_profile(profile, port: int) -> None:
     """结束占用本项目 CDP profile / 调试端口的 Chrome，以便用新参数重启。"""
     import os
@@ -150,13 +173,7 @@ def _try_launch_cdp_chrome() -> bool:
     import time
     from pathlib import Path
 
-    from urllib.parse import urlparse
-
-    parsed = urlparse(settings.chrome_cdp_url)
-    port = parsed.port or 9222
-    # 跨平台临时目录：Windows 用 TEMP，Linux/macOS 用 /tmp
-    tmp_base = os.environ.get("TEMP") or "/tmp"
-    profile = Path(tmp_base) / "icris-chrome-cdp-profile"
+    profile, port = _cdp_profile_and_port()
     profile.mkdir(parents=True, exist_ok=True)
 
     candidates = [
@@ -177,6 +194,11 @@ def _try_launch_cdp_chrome() -> bool:
         return False
 
     is_linux = platform.system() == "Linux"
+    from src.browser.cdp_lock import should_skip_kill_cdp_chrome
+
+    if should_skip_kill_cdp_chrome():
+        logger.warning("跳过重启 CDP Chrome：其他会话心跳仍在")
+        return False
     _kill_cdp_chrome_by_profile(profile, port)
     _ensure_chrome_profile_disable_translate(profile)
     launch_args = [

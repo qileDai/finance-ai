@@ -139,7 +139,7 @@ CHROME_USE_EXISTING=false
 
 ## 7. L2 自动注册（队列）
 
-确认后**入队**（`registration_jobs`），由串行 Worker 执行，不再直起线程抢浏览器。
+确认后**入队**（`registration_jobs`），由串行 Worker 执行，不再直起线程抢浏览器。注册与 NNC1 共用 9222，约定见 [`ICRIS_CDP_QUEUE.md`](ICRIS_CDP_QUEUE.md)。
 
 ```env
 ICRIS_WORKER_ENABLED=true
@@ -155,6 +155,9 @@ CHROME_USE_EXISTING=false
 - [ ] 两客户先后确认：两条 pending，Worker 串行执行  
 - [ ] 同客户重复确认：不建第二活跃任务  
 - [ ] `/admin` 可取消 pending / 重跑 failed；失败任务可见截图路径  
+- [ ] `form_status=failed`：任务列表与详情均可「重跑填表」（只改回待填表，有注册排队仍让路）  
+- [ ] 看门狗超时：`data/icris_failures/watchdog_*.png` 后结束 CDP Chrome  
+- [ ] 持锁进程已死：后来者立刻拿到锁，不必空等 90 秒心跳过期  
 - [ ] 成功后再确认需回复「重新办理」；QUEUED 态闲聊会收到「办理中」提示  
 - [ ] `needs_review` 材料不可直接确认；超限/非法扩展名上传被拒  
 - [ ] **ICRIS 真提交与问答放量解耦**：问答 `normal` 稳定前保持 `DRY_RUN=true`  

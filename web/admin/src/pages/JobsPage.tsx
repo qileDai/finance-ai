@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link, useNavigate } from "react-router-dom";
 import { api, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, JobPipelineLights, jobCanCancel, jobCanRequeue, jobProgressTagColor, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobStatusLabel, jobStatusTagColor } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import {
   Alert,
@@ -190,13 +190,14 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
 
   async function runAct(
     id: number,
-    kind: "cancel" | "requeue" | "approve" | "reject",
+    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
   ) {
     const labelMap: Record<typeof kind, string> = {
       cancel: "取消",
       requeue: "重跑",
       approve: "提交审核",
       reject: "拒绝审核",
+      formRetry: "重跑填表",
     };
     const label = labelMap[kind];
     setBusyId(id);
@@ -206,6 +207,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       else if (kind === "requeue") res = await api.requeueJob(id);
       else if (kind === "approve") res = await api.approveJob(id);
       else if (kind === "reject") res = await api.rejectJob(id);
+      else if (kind === "formRetry") res = await api.formRetryJob(id);
       message.success(res?.message || `${label}成功`);
       onRefresh();
     } catch (e) {
@@ -217,7 +219,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
 
   function act(
     id: number,
-    kind: "cancel" | "requeue" | "approve" | "reject",
+    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
   ) {
     if (kind === "approve") {
       Modal.confirm({
@@ -249,6 +251,11 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
         cancelText: "返回",
         onOk: () => runAct(id, "cancel"),
       });
+      return;
+    }
+    if (kind === "formRetry") {
+      if (!window.confirm(`确认重跑填表任务 #${id}？`)) return;
+      void runAct(id, "formRetry");
       return;
     }
     const label = "重跑";
@@ -399,7 +406,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     {
       title: "操作",
       key: "action",
-      width: 180,
+      width: 240,
       fixed: "right" as const,
       render: (_: unknown, r: JobRow) => (
         <Space
@@ -425,6 +432,16 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
               重跑
             </Button>
           ) : null}
+          {jobCanFormRetry(r.form_status) ? (
+            <Button
+              size="small"
+              type="primary"
+              disabled={busyId === r.id}
+              onClick={() => act(r.id, "formRetry")}
+            >
+              重跑填表
+            </Button>
+          ) : null}
           {r.status === "awaiting_review" ? (
             <>
               <Button
@@ -445,13 +462,12 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
               </Button>
             </>
           ) : null}
-          {r.status !== "pending" &&
-          r.status !== "running" &&
-          r.status !== "failed" &&
-          r.status !== "cancelled" &&
-          r.status !== "awaiting_review"
-            ? "-"
-            : null}
+          {jobCanCancel(r.status) ||
+          jobCanRequeue(r.status) ||
+          jobCanFormRetry(r.form_status) ||
+          r.status === "awaiting_review"
+            ? null
+            : "-"}
         </Space>
       ),
     },

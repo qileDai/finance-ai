@@ -118,6 +118,8 @@ run.bat --step register
 
 ICRIS 验证码为 `data:image/gif` + 输入框 `#checkCode`，需 **ddddocr** 识别（LLM 视觉在当前 API 代理下不可用）。
 
+注册与 NNC1 填表共用 9222 上的 CDP Chrome，同时只允许一方占用；激活邮件走独立浏览器。排队、看门狗截图、死进程立刻收锁见 [`docs/ICRIS_CDP_QUEUE.md`](docs/ICRIS_CDP_QUEUE.md)。
+
 ## 生产入口（L1 客服机器人）
 
 试点推荐使用统一入口（回调 + 微信客服轮询 + 状态机）：
@@ -163,4 +165,4 @@ python main.py --step register
 python main.py wework-external-bot
 ```
 python main.py --step nnc1
-python main.py --step nnc1 --job-id 123 --username YOUR_USER --password YOUR_PASS
+python main.py --step nnc1 --job-id 123 --username KYAUk13579 --password KYAUk13579@

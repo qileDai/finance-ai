@@ -176,12 +176,31 @@ class RegistrationWorkflow:
                 else:
                     logger.info("审核通知未配置 chat_id/webhook，跳过: %s", msg)
             bot.on_review_needed = _notify_review
-        asyncio.run(
-            bot.run(
-                ctx.company_data,
-                force_isolated_browser=force_isolated_browser,
+        def _run_bot() -> None:
+            asyncio.run(
+                bot.run(
+                    ctx.company_data,
+                    force_isolated_browser=force_isolated_browser,
+                )
             )
-        )
+
+        if force_isolated_browser:
+            _run_bot()
+        else:
+            from src.browser.cdp_lock import cdp_lock_held_here
+            from src.browser.cdp_session import cdp_exclusive_session
+            from src.storage.db import ExternalGroupStore
+
+            if cdp_lock_held_here():
+                _run_bot()
+            else:
+                store = ExternalGroupStore() if job_id else None
+                with cdp_exclusive_session(
+                    "cli-register",
+                    job_id=job_id or None,
+                    store=store,
+                ):
+                    _run_bot()
         ctx.esubmit_screenshot_path = bot.esubmit_screenshot_path or ""
         ctx.success_screenshot_path = bot.success_screenshot_path or ""
         if use_submit:
@@ -248,13 +267,27 @@ class RegistrationWorkflow:
                 ctx = self.step_read_email(ctx)
 
         bot = IcrisNnc1FormBot()
-        ok, detail = asyncio.run(
-            bot.run(
-                ctx.icris_account,
-                ctx.company_data,
-                force_isolated=force_isolated_browser,
+
+        def _run_nnc1() -> tuple[bool, str]:
+            return asyncio.run(
+                bot.run(
+                    ctx.icris_account,
+                    ctx.company_data,
+                    force_isolated=force_isolated_browser,
+                )
             )
-        )
+
+        if force_isolated_browser:
+            ok, detail = _run_nnc1()
+        else:
+            from src.browser.cdp_lock import cdp_lock_held_here
+            from src.browser.cdp_session import cdp_exclusive_session
+
+            if cdp_lock_held_here():
+                ok, detail = _run_nnc1()
+            else:
+                with cdp_exclusive_session("cli-nnc1"):
+                    ok, detail = _run_nnc1()
         if ok:
             ctx.log("ICRIS NNC1 填表完成（未提交）")
         else:

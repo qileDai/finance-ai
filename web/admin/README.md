@@ -31,3 +31,5 @@ python main.py admin
 ```
 
 浏览器：`http://127.0.0.1:8082/admin` → 登录页（`ADMIN_USERNAME` / `ADMIN_PASSWORD`，Cookie 会话）。
+
+任务列表在 `form_status=failed` 时显示「重跑填表」（与详情页相同，只改回待填表）。CDP 排队约定见 [`docs/ICRIS_CDP_QUEUE.md`](../../docs/ICRIS_CDP_QUEUE.md)。

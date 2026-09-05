@@ -44,6 +44,10 @@ export function jobCanRequeue(status: string | undefined): boolean {
   return s === "failed" || s === "cancelled";
 }
 
+export function jobCanFormRetry(formStatus: string | undefined): boolean {
+  return (formStatus || "").toLowerCase() === "failed";
+}
+
 export function jobStatusLabel(
   status: string | undefined,
   reviewStatus?: string | undefined,

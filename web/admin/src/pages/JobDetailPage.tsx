@@ -9,6 +9,7 @@ import {
   JOB_SHOT_PREVIEW,
   StateBox,
   jobCanCancel,
+  jobCanFormRetry,
   jobCanRequeue,
   jobProgressTagColor,
   jobProgressTooltip,
@@ -379,7 +380,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                   </dd>
                 </div>
               </dl>
-              {job.form_status === "failed" ? (
+              {jobCanFormRetry(job.form_status) ? (
                 <div className="toolbar" style={{ gap: 12, marginTop: 8 }}>
                   <Button
                     size="small"

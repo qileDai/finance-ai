@@ -39,28 +39,53 @@ def icris_credentials_from_payload(payload: dict) -> tuple[str, str]:
 
 
 class IcrisActivationWorker:
-    """每小时检查待激活的注册任务邮箱，提取激活链接并用浏览器点击。"""
+    """扫激活邮件（小时）与待填表（约 60s）分循环，避免填表挡住收信。"""
 
-    def __init__(self, store, interval_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        store,
+        interval_seconds: int = 3600,
+        form_poll_seconds: float | None = None,
+    ) -> None:
+        from config.settings import settings
+
         self.store = store
         self.interval = interval_seconds
+        self.form_poll = float(
+            form_poll_seconds
+            if form_poll_seconds is not None
+            else getattr(settings, "icris_form_poll_seconds", 60.0) or 60.0
+        )
         self._thread: threading.Thread | None = None
+        self._form_thread: threading.Thread | None = None
         self._stop = threading.Event()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._activation_loop, daemon=True, name="icris-activation"
+        )
+        self._form_thread = threading.Thread(
+            target=self._form_loop, daemon=True, name="icris-nnc1-form"
+        )
         self._thread.start()
-        logger.info("IcrisActivationWorker 启动，间隔 %ss", self.interval)
+        self._form_thread.start()
+        logger.info(
+            "IcrisActivationWorker 启动，激活间隔 %ss，填表轮询 %ss",
+            self.interval,
+            self.form_poll,
+        )
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5.0)
+        if self._form_thread:
+            self._form_thread.join(timeout=5.0)
 
-    def _loop(self) -> None:
-        # 启动后先等 60 秒再开始（避免和 worker 启动冲突）
+    def _activation_loop(self) -> None:
         self._stop.wait(60)
         while not self._stop.is_set():
             try:
@@ -68,6 +93,15 @@ class IcrisActivationWorker:
             except Exception as e:
                 logger.exception("激活 worker 异常: %s", e)
             self._stop.wait(self.interval)
+
+    def _form_loop(self) -> None:
+        self._stop.wait(60)
+        while not self._stop.is_set():
+            try:
+                self._check_form_pending_jobs()
+            except Exception as e:
+                logger.exception("填表 worker 异常: %s", e)
+            self._stop.wait(self.form_poll)
 
     def _check_pending_jobs(self) -> None:
         jobs = self.store.get_jobs_pending_activation()
@@ -82,19 +116,26 @@ class IcrisActivationWorker:
                 self._process_one_job(job)
             except Exception as e:
                 logger.error("处理激活任务 #%s 异常: %s", job.get("id"), e)
-        # 激活阶段完成后，处理待填表任务
-        self._check_form_pending_jobs()
 
     def _check_form_pending_jobs(self) -> None:
-        """处理激活成功后待填表的任务。"""
+        """处理激活成功后待填表的任务。有可跑的注册则整轮跳过。"""
         if self._stop.is_set():
             return
         jobs = self.store.get_jobs_pending_form()
         if not jobs:
             return
+        if self.store.has_active_registration_queue():
+            logger.info(
+                "注册队列未空，待填表 %d 个暂缓",
+                len(jobs),
+            )
+            return
         logger.info("待填表任务 %d 个", len(jobs))
         for job in jobs:
             if self._stop.is_set():
+                break
+            if self.store.has_active_registration_queue():
+                logger.info("注册队列有新任务，停止本轮后续 NNC1")
                 break
             try:
                 self._process_form_job(job)
@@ -145,24 +186,44 @@ class IcrisActivationWorker:
 
         account = IcrisAccount(username=username, password=password)
         bot = IcrisNnc1FormBot()
-        try:
-            ok, detail = asyncio.run(
-                bot.run(
+        from config.settings import settings
+        from src.browser.cdp_session import SessionWatchdog, hold_cdp_lock
+
+        with hold_cdp_lock("nnc1"):
+            if self.store.has_active_registration_queue():
+                logger.info(
+                    "任务 #%s 拿锁后发现注册队列未空，放锁跳过 NNC1",
+                    job_id,
+                )
+                return
+            fill = float(
+                getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
+            )
+            keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
+            wd = SessionWatchdog(fill + keep + 30.0)
+            wd.start()
+            try:
+                ok, detail = asyncio.run(
+                    bot.run(
+                        account,
+                        data,
+                        force_isolated=False,
+                        screenshot_path=str(shot_file),
+                    )
+                )
+            except RuntimeError:
+                ok, detail = self._run_in_thread(
+                    bot.run,
                     account,
                     data,
                     force_isolated=False,
                     screenshot_path=str(shot_file),
+                    join_timeout=fill + keep + 120.0,
                 )
-            )
-        except RuntimeError:
-            # 无事件循环环境，用新线程跑
-            ok, detail = self._run_in_thread(
-                bot.run, account, data,
-                force_isolated=False,
-                screenshot_path=str(shot_file),
-            )
-        except Exception as e:
-            ok, detail = False, str(e)
+            except Exception as e:
+                ok, detail = False, str(e)
+            finally:
+                wd.stop()
 
         if ok:
             self.store.mark_job_form_filled(job_id, str(shot_file))
@@ -298,7 +359,7 @@ class IcrisActivationWorker:
             self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
             logger.error("任务 #%s 激活失败: %s", job_id, detail)
 
-    def _run_in_thread(self, coro, *args, **kwargs):
+    def _run_in_thread(self, coro, *args, join_timeout: float = 120, **kwargs):
         """在新线程的事件循环里运行协程。"""
         result: tuple[bool, str] = (False, "unknown")
 
@@ -312,5 +373,5 @@ class IcrisActivationWorker:
 
         t = threading.Thread(target=_run)
         t.start()
-        t.join(timeout=120)
+        t.join(timeout=float(join_timeout))
         return result

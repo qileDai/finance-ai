@@ -199,6 +199,8 @@ curl https://admin.yourdomain.com/health
 
 ### Chrome CDP 验证
 
+9222 同时只给注册或 NNC1 一方（激活走独立浏览器）。排队与看门狗见 [`ICRIS_CDP_QUEUE.md`](ICRIS_CDP_QUEUE.md)。
+
 ```bash
 docker compose exec bot python -c "
 from src.browser.launcher import _try_launch_cdp_chrome
@@ -290,7 +292,16 @@ docker compose logs bot | tail -50
 
 `ADMIN_PASSWORD` 不能为空。编辑 `.env` 填密码后 `docker compose restart admin`。
 
-### Q：ICRIS 注册被检测为自动化
+### Q：ICRIS 注册报 `Vue未挂载 bodyLen=0`
+
+F5 TSbd 对大陆 IP 阻断（与 stealth/CDP 无关）。**必须**让浏览器走香港/海外代理出口：
+
+1. 按 [SERVER_PROXY_DEPLOY.md](./SERVER_PROXY_DEPLOY.md) 在服务器装 mihomo + 机场订阅
+2. `.env` 加：`BROWSER_PROXY=socks5://127.0.0.1:7890`（或 `172.17.0.1:7890` 走宿主机网桥）
+3. `docker compose up -d --build`
+4. 跑注册任务，日志应出现 `proxy=socks5://...` 且 Vue 正常挂载
+
+### Q：ICRIS 注册填表失败（非 Vue 问题）
 
 1. 确认 `.env`：`CHROME_USE_EXISTING=true`（走真实 Chrome CDP）
 2. 确认 `BROWSER_HEADLESS=true`（容器无显示）

@@ -1358,7 +1358,7 @@ class ExternalGroupStore:
         return dict(row), True
 
     def claim_next_job(self) -> dict[str, Any] | None:
-        """认领最新可执行的 pending 任务（串行 worker 用）。已拒绝单不认领。"""
+        """认领最早可执行的 pending 任务（先登记的先跑）。已拒绝单不认领。"""
         now = _utc_now()
         with self._conn() as conn:
             row = conn.execute(
@@ -1367,7 +1367,7 @@ class ExternalGroupStore:
                 WHERE status = 'pending'
                   AND IFNULL(review_status, '') != 'rejected'
                   AND (available_at = '' OR available_at <= ?)
-                ORDER BY id DESC
+                ORDER BY id ASC
                 LIMIT 1
                 """,
                 (now,),
@@ -1394,6 +1394,67 @@ class ExternalGroupStore:
                 (job_id,),
             ).fetchone()
         return dict(claimed) if claimed else None
+
+    def peek_claimable_registration(self) -> dict[str, Any] | None:
+        """只读：是否有已到期、可 claim 的 pending 注册（不含 running）。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE status = 'pending'
+                  AND IFNULL(review_status, '') != 'rejected'
+                  AND (available_at = '' OR available_at <= ?)
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def has_active_registration_queue(self) -> bool:
+        """CDP 被注册占用或即将占用：running / awaiting_review / 已到期 pending。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM registration_jobs
+                WHERE (
+                        status IN ('running', 'awaiting_review')
+                        AND IFNULL(review_status, '') != 'rejected'
+                    )
+                   OR (
+                        status = 'pending'
+                        AND IFNULL(review_status, '') != 'rejected'
+                        AND (available_at = '' OR available_at <= ?)
+                   )
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+        return row is not None
+
+    def fail_orphan_awaiting_review(self) -> int:
+        """进程重启后审核页已丢失：awaiting_review 标失败，避免永远挡住 NNC1。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE registration_jobs
+                SET status = 'failed',
+                    last_error = CASE
+                        WHEN last_error = '' THEN '进程重启，审核页已丢失'
+                        ELSE last_error
+                    END,
+                    finished_at = CASE WHEN finished_at IS NULL OR finished_at = ''
+                                       THEN ? ELSE finished_at END,
+                    updated_at = ?
+                WHERE status = 'awaiting_review'
+                  AND IFNULL(review_status, '') != 'rejected'
+                """,
+                (now, now),
+            )
+            return int(cur.rowcount or 0)
 
     def mark_job_succeeded(
         self,

@@ -42,6 +42,14 @@ class IcrisJobWorker:
         recovered = self.store.reset_stale_running_jobs(older_than_minutes=0)
         if recovered:
             logger.warning("ICRIS Worker 回收 stale running 任务: %d", recovered)
+        from src.browser.cdp_lock import cdp_lease_alive
+
+        if not cdp_lease_alive():
+            orphans = self.store.fail_orphan_awaiting_review()
+            if orphans:
+                logger.warning(
+                    "ICRIS Worker 清理僵尸 awaiting_review: %d", orphans
+                )
 
         # 启动激活检查 worker（每小时检查待激活任务的邮箱）
         from src.wework.icris_activation_worker import IcrisActivationWorker
@@ -60,11 +68,10 @@ class IcrisJobWorker:
             )
             while not self._stop.is_set():
                 try:
-                    job = self.store.claim_next_job()
-                    if job:
-                        self._process_job(job)
-                    else:
+                    if not self.store.peek_claimable_registration():
                         self._stop.wait(poll)
+                        continue
+                    self._claim_and_run()
                 except Exception:
                     logger.exception("ICRIS Worker 循环异常")
                     self._stop.wait(poll)
@@ -87,6 +94,30 @@ class IcrisJobWorker:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         self.alive = False
+
+    def _claim_and_run(self) -> None:
+        """先拿 CDP 锁再 claim，拿不到锁时任务保持 pending。"""
+        from config.settings import settings
+        from src.browser.cdp_session import SessionWatchdog, hold_cdp_lock
+
+        with hold_cdp_lock("registration"):
+            job = self.store.claim_next_job()
+            if not job:
+                return
+            fill = float(
+                getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
+            )
+            keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
+            wd = SessionWatchdog(
+                fill + keep + 30.0,
+                job_id=int(job["id"]),
+                store=self.store,
+            )
+            wd.start()
+            try:
+                self._process_job(job)
+            finally:
+                wd.stop()
 
     def _backoff_iso(self, attempts: int) -> str:
         base = float(settings.icris_job_retry_backoff_seconds or 30.0)
