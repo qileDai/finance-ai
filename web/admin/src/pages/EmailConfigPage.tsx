@@ -54,6 +54,10 @@ export function EmailConfigPage() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
+  const [probeUser, setProbeUser] = useState("");
+  const [probeEmail, setProbeEmail] = useState("");
+  const [probePassword, setProbePassword] = useState("");
+  const [probing, setProbing] = useState(false);
 
   function load() {
     setLoading(true);
@@ -141,6 +145,38 @@ export function EmailConfigPage() {
     }
   }
 
+  async function runProbe() {
+    if (!probeUser.trim() || !probeEmail.trim()) {
+      message.warning("账号和邮箱必填");
+      return;
+    }
+    setProbing(true);
+    try {
+      const res = await api.emailAccounts.activateProbe({
+        username: probeUser.trim(),
+        email: probeEmail.trim(),
+        password: probePassword,
+      });
+      const src =
+        res.password_source === "manual"
+          ? "手填密码"
+          : res.password_source === "job"
+            ? "任务密码"
+            : "无密码";
+      if (res.activated) {
+        message.success(res.detail || res.message || "激活成功");
+      } else if (res.found) {
+        message.warning(`${res.detail || "已找到信但激活未成功"}（${src}）`);
+      } else {
+        message.info(res.detail || res.message || "暂无激活邮件");
+      }
+    } catch (e: unknown) {
+      message.error((e as Error).message);
+    } finally {
+      setProbing(false);
+    }
+  }
+
   async function toggleEnabled(r: EmailAccount, enabled: boolean) {
     setTogglingId(r.id);
     try {
@@ -219,6 +255,48 @@ export function EmailConfigPage() {
   ];
 
   return (
+    <>
+      <Card title="激活探测" style={{ marginBottom: 16 }}>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="验证拉邮箱、找 ICRIS 激活信并点击激活"
+          description="不改注册任务状态，不影响小时巡检。密码选填：填了用手填的，没填只读查任务里的密码。"
+        />
+        <Space wrap>
+          <Input
+            placeholder="ICRIS 账号"
+            style={{ width: 180 }}
+            value={probeUser}
+            onChange={(e) => setProbeUser(e.target.value)}
+          />
+          <Select
+            placeholder="邮箱账号"
+            style={{ width: 260 }}
+            allowClear
+            value={probeEmail || undefined}
+            options={items
+              .filter((r) => r.enabled)
+              .map((r) => ({
+                value: r.email_address,
+                label: r.label
+                  ? `${r.email_address}（${r.label}）`
+                  : r.email_address,
+              }))}
+            onChange={(v) => setProbeEmail(v || "")}
+          />
+          <Input.Password
+            placeholder="密码（选填）"
+            style={{ width: 180 }}
+            value={probePassword}
+            onChange={(e) => setProbePassword(e.target.value)}
+          />
+          <Button type="primary" loading={probing} onClick={runProbe}>
+            拉信激活
+          </Button>
+        </Space>
+      </Card>
     <Card
       title="邮箱账号配置"
       extra={
@@ -354,5 +432,6 @@ export function EmailConfigPage() {
         </Space>
       </Modal>
     </Card>
+    </>
   );
 }

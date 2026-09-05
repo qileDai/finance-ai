@@ -126,6 +126,8 @@ def handle_admin_api(
             if aid is None:
                 return _err("invalid account id", 400)
             return _handle_email_account_delete(store, aid)
+        if method == "POST" and rel == "icris-activate-probe":
+            return _handle_icris_activate_probe(store, body or {})
         # 注册办事处默认地址
         if method == "GET" and rel == "default-office":
             return _handle_default_office_get(store)
@@ -1246,6 +1248,31 @@ def _handle_email_account_test(
         from src.email.imap_client import format_imap_connect_error
 
         return _err(format_imap_connect_error(e), 400)
+
+
+def _handle_icris_activate_probe(
+    store: ExternalGroupStore, body: dict[str, Any]
+) -> tuple[dict[str, Any], int]:
+    username = str(body.get("username") or "").strip()
+    email = str(body.get("email") or "").strip()
+    password = str(body.get("password") or "")
+    if not username or not email:
+        return _err("账号和邮箱必填", 400)
+    from src.email.icris_activate import run_icris_activation_probe
+
+    result = run_icris_activation_probe(
+        store, username=username, email=email, password=password
+    )
+    detail = str(result.get("detail") or "")
+    if "未配置 IMAP" in detail:
+        return _err(detail, 400)
+    return _ok(
+        found=bool(result.get("found")),
+        activated=bool(result.get("ok")),
+        password_source=str(result.get("password_source") or "none"),
+        detail=detail,
+        message=detail or ("激活成功" if result.get("ok") else "探测完成"),
+    )
 
 
 def _handle_default_office_get(

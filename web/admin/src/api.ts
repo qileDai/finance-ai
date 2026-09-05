@@ -306,6 +306,23 @@ export const api = {
         `/admin/api/email-accounts/${id}/test`,
         { method: "POST" },
       ),
+    activateProbe: (data: {
+      username: string;
+      email: string;
+      password?: string;
+    }) =>
+      request<
+        ApiOk<{
+          found: boolean;
+          activated: boolean;
+          password_source: string;
+          detail: string;
+          message?: string;
+        }>
+      >("/admin/api/icris-activate-probe", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
   },
   defaultOffice: {
     get: () => request<DefaultOffice>("/admin/api/default-office"),

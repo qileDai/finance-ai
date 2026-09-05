@@ -1564,6 +1564,35 @@ class ExternalGroupStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def find_icris_password_by_username(self, username: str) -> str:
+        """只读：最近一条 payload 中 icris_account.username 匹配的密码。不改任务。"""
+        import json
+
+        user = (username or "").strip()
+        if not user:
+            return ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT payload_json FROM registration_jobs
+                   WHERE payload_json LIKE ?
+                   ORDER BY id DESC LIMIT 50""",
+                (f"%{user}%",),
+            ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(str(row["payload_json"] or "") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            acct = data.get("icris_account") or {}
+            if not isinstance(acct, dict):
+                continue
+            if str(acct.get("username") or "").strip() != user:
+                continue
+            return str(acct.get("password") or "").strip()
+        return ""
+
     def upsert_email_account(
         self,
         email: str,
