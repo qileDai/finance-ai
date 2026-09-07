@@ -47,6 +47,10 @@ from src.browser.icris_ui_common import (
 )
 from src.browser.launcher import create_browser_context, launch_browser
 from src.email.imap_client import IcrisAccount
+from src.materials.address_classify import (
+    load_s03_district_options,
+    stored_s03_address_fields,
+)
 from src.materials.countries import icris_country_select_candidates
 from src.materials.id_type_classify import (
     nnc1_identity_fill_plan,
@@ -72,6 +76,83 @@ NNC1_SAVE_CONTINUE_PAT = re.compile(
 
 class Nnc1CountryDropdownEmpty(RuntimeError):
     """步驟3 國家／地區 下拉没有选项，无法选中国。"""
+
+
+def nnc1_address_radio_is_non_hk(text: str) -> bool:
+    t = re.sub(r"\s+", "", text or "")
+    return "非香港" in t or "非本地" in t
+
+
+def nnc1_address_radio_is_hk(text: str) -> bool:
+    """NNC1 点「香港地址／本港地址」，排除「非香港地址」。"""
+    t = re.sub(r"\s+", "", text or "")
+    if nnc1_address_radio_is_non_hk(t):
+        return False
+    return "香港地址" in t or "本港地址" in t
+
+
+def nnc1_hk_district_label(text: str) -> bool:
+    """香港地址「区」栏。不是「地区」（已是 Hong Kong），也不是国家。"""
+    raw = (text or "").strip()
+    compact = re.sub(r"\s+", "", raw)
+    if re.search(r"地區|地区|國家|国家", compact):
+        return False
+    first = re.sub(r"\s+", "", raw.split("\n", 1)[0]).strip("*:：")
+    return bool(re.fullmatch(r"區|区|District", first, re.I))
+
+
+def nnc1_fold_district(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").replace("围", "圍"))
+
+
+def nnc1_district_select_keys(region: str) -> list[str]:
+    """入库 region → 下拉可匹配的原文 / value / 别名（含简繁围）。"""
+    raw = (region or "").strip()
+    if not raw:
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str) -> None:
+        s = (item or "").strip()
+        if not s or s in seen:
+            return
+        seen.add(s)
+        keys.append(s)
+
+    add(raw)
+    add(raw.replace("圍", "围"))
+    add(raw.replace("围", "圍"))
+    folded = nnc1_fold_district(raw)
+    for row in load_s03_district_options():
+        label = str(row.get("label") or "")
+        value = str(row.get("value") or "")
+        aliases = [str(a) for a in (row.get("aliases") or [])]
+        blob = [label, value, *aliases]
+        if any(nnc1_fold_district(x) == folded or x.strip() == raw for x in blob if x):
+            add(label)
+            add(value)
+            for alias in aliases:
+                add(alias)
+            break
+    return keys
+
+
+def resolve_nnc1_person_address(
+    person: dict[str, Any],
+    data: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """NNC1-3.1 住址与 s03 相同：只读入库字段。"""
+    applicant = dict((data or {}).get("applicant") or {})
+    stored = stored_s03_address_fields(person, applicant)
+    if not any(
+        stored.get(k) for k in ("flat", "building", "street", "region", "country")
+    ):
+        logger.warning(
+            "NNC1 地址缺已入库字段 person_keys=%s",
+            sorted((person or {}).keys())[:20],
+        )
+    return stored
 
 
 def resolve_nnc1_step3_names(
@@ -2438,8 +2519,10 @@ class IcrisNnc1FormBot:
                 };
                 const en = find(['建議採用的公司英文名稱', '建议采用的公司英文名称', '公司英文名稱', '公司英文名称']);
                 const cn = find(['建議採用的公司中文名稱', '建议采用的公司中文名称', '公司中文名稱', '公司中文名称']);
-                const enBad = !en || /^[\\d,]+$/.test(en) || (nameEn && en !== nameEn && /^\\d/.test(en));
-                const cnBad = nameCn && (!cn || /^[\\d,]+$/.test(cn));
+                const enBad = Boolean(nameEn) && (
+                    !en || /^[\\d,]+$/.test(en) || (en !== nameEn && /^\\d/.test(en))
+                );
+                const cnBad = Boolean(nameCn) && (!cn || /^[\\d,]+$/.test(cn));
                 return { en, cn, enBad, cnBad };
             }""",
             {"nameEn": name_en, "nameCn": name_cn},
@@ -3143,64 +3226,8 @@ class IcrisNnc1FormBot:
         """证件类型：库里已有则尊重；空类型才弱兜底。"""
         return normalize_stored_id_type(raw, id_number)
 
-    def _split_non_hk_address_en(self, address_en: str) -> dict[str, str]:
-        """英文非香港地址拆分（室/街道/区省市）。country 为 ISO3，不默认 China。"""
-        from src.materials.countries import normalize_address_country
-
-        parts = [p.strip() for p in re.split(r",\s*", (address_en or "").strip()) if p.strip()]
-        country = ""
-        for token in reversed(parts):
-            country = normalize_address_country(token)
-            if country:
-                break
-        if not parts:
-            return {"flat": "", "building": "", "street": "", "region": "", "country": country}
-        if len(parts) >= 2:
-            region = ", ".join(parts[-2:])
-            body = parts[:-2]
-        else:
-            region = ""
-            body = parts
-        flat = ""
-        street_parts = list(body)
-        if street_parts and re.match(r"^(room|unit|flat|室)", street_parts[0], re.I):
-            flat = street_parts[0]
-            street_parts = street_parts[1:]
-        street = ", ".join(street_parts) if street_parts else ""
-        if len(parts) == 1:
-            street = parts[0]
-            region = ""
-        # 室／樓／座、大廈不单独填写，房间号并入街道行
-        if flat and street:
-            street = f"{flat}, {street}"
-        elif flat and not street:
-            street = flat
-        return {
-            "flat": "",
-            "building": "",
-            "street": street,
-            "region": region,
-            "country": country,
-        }
-
     def _resolve_person_address(self, person: dict[str, Any], data: dict[str, Any]) -> dict[str, str]:
-        from src.materials.countries import normalize_address_country
-
-        address_en = (
-            (person.get("address_en") or person.get("address") or "").strip()
-        )
-        if not address_en:
-            applicant = data.get("applicant") or {}
-            address_en = (applicant.get("address_en") or applicant.get("address") or "").strip()
-        parsed = self._split_non_hk_address_en(address_en)
-        raw_iso = str(
-            person.get("address_country")
-            or data.get("address_country")
-            or parsed.get("country")
-            or ""
-        ).strip()
-        parsed["country"] = normalize_address_country(raw_iso) or parsed.get("country") or ""
-        return parsed
+        return resolve_nnc1_person_address(person, data)
 
     def _resolve_person_id(self, person: dict[str, Any], data: dict[str, Any]) -> tuple[str, str]:
         identity = dict(data.get("identity_proof") or {})
@@ -3290,7 +3317,9 @@ class IcrisNnc1FormBot:
             return loc
         return None
 
-    async def _select_non_hk_in_block(self, block) -> bool:
+    async def _click_address_radio_in_block(self, block, *, want_hk: bool) -> bool:
+        """块内点「香港地址」或「非香港地址」。点香港时排除含「非香港」的项。"""
+        label = "香港地址" if want_hk else "非香港地址"
         candidates = block.locator("label, .ant-radio-wrapper, span.ant-radio + span")
         count = await candidates.count()
         for i in range(count):
@@ -3300,26 +3329,37 @@ class IcrisNnc1FormBot:
             text = re.sub(r"\s+", "", (await item.inner_text() or ""))
             if len(text) > 40:
                 continue
-            if "非香港" not in text and "非本地" not in text:
+            ok = (
+                nnc1_address_radio_is_hk(text)
+                if want_hk
+                else nnc1_address_radio_is_non_hk(text)
+            )
+            if not ok:
                 continue
             try:
                 await item.scroll_into_view_if_needed()
                 await item.click(timeout=5000)
-                logger.info("已选非香港地址: %s", text[:30])
+                logger.info("已选%s: %s", label, text[:30])
                 await block.page.wait_for_timeout(300)
                 return True
             except Exception:
                 inp = item.locator("input[type=radio]").first
                 if await inp.count() > 0:
                     await inp.check(force=True)
-                    logger.info("已 force 选非香港地址: %s", text[:30])
+                    logger.info("已 force 选%s: %s", label, text[:30])
                     return True
         hit = await block.evaluate(
-            """(root) => {
+            """(root, wantHk) => {
                 for (const w of root.querySelectorAll('.ant-radio-wrapper, label')) {
                     const t = (w.innerText || '').replace(/\\s+/g, '');
                     if (t.length > 40) continue;
-                    if (!t.includes('非香港') && !t.includes('非本地')) continue;
+                    const nonHk = t.includes('非香港') || t.includes('非本地');
+                    if (wantHk) {
+                        if (nonHk) continue;
+                        if (!t.includes('香港地址') && !t.includes('本港地址')) continue;
+                    } else if (!nonHk) {
+                        continue;
+                    }
                     w.click();
                     const inp = w.querySelector('input[type=radio]');
                     if (inp) {
@@ -3329,12 +3369,19 @@ class IcrisNnc1FormBot:
                     return t.slice(0, 30);
                 }
                 return '';
-            }"""
+            }""",
+            want_hk,
         )
         if hit:
-            logger.info("已选非香港地址 (JS): %s", hit)
+            logger.info("已选%s (JS): %s", label, hit)
             return True
         return False
+
+    async def _select_hk_in_block(self, block) -> bool:
+        return await self._click_address_radio_in_block(block, want_hk=True)
+
+    async def _select_non_hk_in_block(self, block) -> bool:
+        return await self._click_address_radio_in_block(block, want_hk=False)
 
     async def _fill_textarea_in_block(
         self, block, label_re: str, value: str
@@ -3600,7 +3647,7 @@ class IcrisNnc1FormBot:
         await page.wait_for_timeout(400)
         return await _try_pick()
 
-    async def _fill_non_hk_address_section(
+    async def _fill_nnc1_address_section(
         self,
         page,
         heading_re: str,
@@ -3610,7 +3657,8 @@ class IcrisNnc1FormBot:
         block_key: str = "addr",
         scroll_keywords: list[str] | None = None,
     ) -> bool:
-        """在指定标题的地址区块：非香港 + 英文地址字段。"""
+        """在指定标题的地址区块：按入库 address_is_hk 点香港/非香港，再填原栏位。"""
+        is_hk = str(addr.get("address_is_hk") or "") == "1"
         if scroll_keywords:
             await self._scroll_to_section(page, scroll_keywords)
         await page.wait_for_timeout(300)
@@ -3623,12 +3671,53 @@ class IcrisNnc1FormBot:
         if block is None:
             logger.warning("未找到地址区块: %s", heading_re)
             return False
-        if not await self._select_non_hk_in_block(block):
+        if is_hk:
+            if not await self._select_hk_in_block(block):
+                logger.warning("地址区块未选香港地址: %s", heading_re)
+        elif not await self._select_non_hk_in_block(block):
             logger.warning("地址区块未选非香港: %s", heading_re)
         await wait_spin_clear(page, timeout_ms=30000)
-        await self._wait_country_region_options(page, block)
         filled = 0
-        # 不填室／樓／座等、大廈
+        if is_hk:
+            if await self._fill_textarea_in_block(
+                block, r"室.*樓|室.*楼|室／樓|Flat.*Floor", addr.get("flat", "")
+            ):
+                filled += 1
+            if await self._fill_textarea_in_block(
+                block, r"大廈|大厦|Building", addr.get("building", "")
+            ):
+                filled += 1
+            if await self._fill_textarea_in_block(
+                block, r"街道.*屋苑|街道.*地段|街道.*村", addr.get("street", "")
+            ):
+                filled += 1
+            region = addr.get("region", "")
+            if region:
+                if await self._select_district_in_block(page, block, region):
+                    filled += 1
+                else:
+                    logger.warning(
+                        "地址区块 [%s] 香港地址「区」未选中 region=%s",
+                        block_key,
+                        region[:40],
+                    )
+            else:
+                logger.warning(
+                    "地址区块 [%s] 缺已入库香港区/邮递区号",
+                    block_key,
+                )
+            logger.info(
+                "地址区块 [%s] 香港地址填写完成 filled=%s flat=%s street=%s region=%s",
+                block_key,
+                filled,
+                (addr.get("flat") or "")[:40],
+                (addr.get("street") or "")[:50],
+                (addr.get("region") or "")[:40],
+            )
+            await self._maybe_screenshot(page, f"step3_addr_{block_key}")
+            return filled > 0
+
+        await self._wait_country_region_options(page, block)
         if await self._fill_textarea_in_block(
             block, r"街道.*屋苑|街道.*地段|街道.*村", addr.get("street", "")
         ):
@@ -3640,13 +3729,15 @@ class IcrisNnc1FormBot:
         order_filled = await self._fill_address_fields_by_order(block, addr)
         filled += order_filled
         iso = str(addr.get("country") or "").strip()
-        if await self._select_country_in_block(page, block, iso):
+        if not iso:
+            logger.warning("地址区块 [%s] 缺 address_country，不现场猜国家", block_key)
+        elif await self._select_country_in_block(page, block, iso):
             filled += 1
         elif iso == "HKG":
             logger.info("地址区块 [%s] 香港住址不选中國", block_key)
         else:
             raise Nnc1CountryDropdownEmpty(
-                f"地址区块 [{block_key}] 未能选择國家／地區={iso or 'CHN'}"
+                f"地址区块 [{block_key}] 未能选择國家／地區={iso}"
             )
         logger.info(
             "地址区块 [%s] 填写完成 filled=%s street=%s region=%s",
@@ -3657,50 +3748,278 @@ class IcrisNnc1FormBot:
         )
         return filled > 0
 
-    async def _click_copy_founder_address(self, page) -> bool:
-        """通常住址：在区块内点击「複製創辦成員的地址」。"""
-        await self._scroll_to_section(
-            page, ["通常住址", "通常住址將不會供公眾查閱"]
-        )
-        block = await self._locate_address_block(
-            page,
-            r"通常住址.*董事|通常住址.*适用|通常住址",
-            block_key="usual",
-        )
-        scope = block if block is not None else page
-        btn = scope.locator("button, a, input[type=button], [role=button]").filter(
-            has_text=re.compile(
-                r"複製創辦成員的地址|复制创办成员的地址|複製通訊|复制通讯", re.I
-            )
-        ).first
-        if await btn.count() > 0:
-            await btn.scroll_into_view_if_needed()
-            await btn.click(timeout=10000)
-            logger.info("已点击「複製創辦成員的地址」")
-            await page.wait_for_timeout(1000)
-            return True
-        clicked = await page.evaluate(
-            """() => {
-                const pat = /複製創辦成員的地址|复制创办成员的地址/i;
-                for (const el of document.querySelectorAll(
-                    'button, a, input[type=button], [role=button], .btn'
+    async def _select_district_in_block(self, page, block, region: str) -> bool:
+        """香港地址「区」下拉：同 s03 本地地址邮区，不点「地区」。"""
+        keys = nnc1_district_select_keys(region)
+        if not keys:
+            return False
+        located = await block.evaluate(
+            """(root) => {
+                root.querySelectorAll('[data-nnc1-hk-district]').forEach(el => {
+                    el.removeAttribute('data-nnc1-hk-district');
+                });
+                const inside = (node) => node && root.contains(node);
+                const isDist = (t) => {
+                    const raw = (t || '').trim();
+                    const compact = raw.replace(/\\s+/g, '');
+                    if (/地區|地区|國家|国家/.test(compact)) return false;
+                    const first = raw.split('\\n')[0]
+                        .replace(/\\s+/g, '')
+                        .replace(/[*:：]/g, '');
+                    return /^(區|区|District)$/i.test(first);
+                };
+                const optionInfo = (sel) => {
+                    const opts = [...sel.options].map(o => ({
+                        t: (o.textContent || '').trim(),
+                        v: (o.value || '').trim(),
+                    })).filter(o => o.t && !/請選擇|请选择|^Select$|^--+$/i.test(o.t));
+                    return { n: opts.length, sample: opts.slice(0, 12) };
+                };
+                const findSelect = (labelEl) => {
+                    const own = labelEl.querySelector('select');
+                    if (own) return own;
+                    const forId = labelEl.getAttribute('for');
+                    if (forId) {
+                        const byFor = root.querySelector(
+                            '#' + CSS.escape(forId)
+                        );
+                        if (byFor && byFor.tagName === 'SELECT') return byFor;
+                    }
+                    let p = labelEl.parentElement;
+                    for (let d = 0; d < 6 && p && inside(p); d++) {
+                        const sels = [...p.querySelectorAll('select')];
+                        if (sels.length === 1) return sels[0];
+                        if (sels.length > 1) {
+                            const after = sels.find(s =>
+                                (labelEl.compareDocumentPosition(s)
+                                    & Node.DOCUMENT_POSITION_FOLLOWING)
+                            );
+                            if (after) return after;
+                        }
+                        const ant = p.querySelector('.ant-select');
+                        if (ant) return ant;
+                        p = p.parentElement;
+                    }
+                    return null;
+                };
+                for (const el of root.querySelectorAll(
+                    'label, th, .rowTitle, span, div, td'
                 )) {
-                    const t = (el.innerText || el.value || '').replace(/\\s+/g, '');
-                    if (!pat.test(t)) continue;
-                    const r = el.getBoundingClientRect();
-                    if (r.width <= 0 || r.height <= 0) continue;
-                    el.scrollIntoView({ block: 'center' });
-                    el.click();
-                    return t.slice(0, 40);
+                    const t = (el.innerText || '').trim();
+                    if (!isDist(t)) continue;
+                    const found = findSelect(el);
+                    if (!found) continue;
+                    if (found.classList && found.classList.contains('ant-select')) {
+                        found.setAttribute('data-nnc1-hk-district', 'ant');
+                        return { mode: 'ant' };
+                    }
+                    found.setAttribute('data-nnc1-hk-district', 'native');
+                    const info = optionInfo(found);
+                    return { mode: 'native', n: info.n, sample: info.sample };
                 }
-                return '';
+                return { mode: 'none' };
             }"""
         )
-        if clicked:
-            logger.info("已点击: %s", clicked)
-            await page.wait_for_timeout(1000)
-            return True
-        logger.warning("未找到「複製創辦成員的地址」按钮")
+        mode = (located or {}).get("mode") or "none"
+        logger.info(
+            "香港地址「区」定位 mode=%s n=%s region=%s sample=%s",
+            mode,
+            (located or {}).get("n"),
+            region[:40],
+            (located or {}).get("sample"),
+        )
+        if mode == "native":
+            sel = block.locator("select[data-nnc1-hk-district='native']").first
+            deadline = time.monotonic() + 20
+            last_n = int((located or {}).get("n") or 0)
+            last_sample = (located or {}).get("sample") or []
+            while time.monotonic() < deadline:
+                info = await sel.evaluate(
+                    """(el) => {
+                        const opts = [...el.options].map(o => ({
+                            t: (o.textContent || '').trim(),
+                            v: (o.value || '').trim(),
+                        })).filter(o =>
+                            o.t && !/請選擇|请选择|^Select$|^--+$/i.test(o.t)
+                        );
+                        return { n: opts.length, sample: opts.slice(0, 12) };
+                    }"""
+                )
+                last_n = int(info.get("n") or 0)
+                last_sample = info.get("sample") or []
+                if last_n >= 8:
+                    break
+                try:
+                    await sel.click(timeout=1000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(400)
+            picked = await sel.evaluate(
+                """(el, keys) => {
+                    const fold = s => (s || '').replace(/\\s+/g, '').replace(/围/g, '圍');
+                    const folded = keys.map(fold).filter(Boolean);
+                    const lower = keys.map(k => (k || '').toLowerCase());
+                    const opt = [...el.options].find(o => {
+                        const t = (o.textContent || '').trim();
+                        const v = (o.value || '').trim();
+                        const ft = fold(t);
+                        return folded.some(k => k && (ft === k || ft.includes(k)))
+                            || lower.some(k => k && v.toLowerCase() === k);
+                    });
+                    if (!opt) return '';
+                    el.value = opt.value;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return (opt.textContent || '').trim().slice(0, 40);
+                }""",
+                keys,
+            )
+            if not picked:
+                for key in keys:
+                    try:
+                        await sel.select_option(label=key, timeout=800)
+                        picked = key
+                        break
+                    except Exception:
+                        try:
+                            await sel.select_option(value=key, timeout=500)
+                            picked = key
+                            break
+                        except Exception:
+                            pass
+            if picked:
+                logger.info("已选区/邮区: %s", picked)
+                await page.wait_for_timeout(300)
+                return True
+            logger.warning(
+                "香港地址「区」原生下拉未匹配 region=%s n=%s sample=%s keys=%s",
+                region[:40],
+                last_n,
+                last_sample,
+                keys[:8],
+            )
+            return False
+
+        if mode != "ant":
+            logger.warning("未找到香港地址「区」下拉 region=%s located=%s", region[:40], located)
+            return False
+
+        ant = block.locator("[data-nnc1-hk-district='ant']").first
+        try:
+            trigger = ant.locator(".ant-select-selector").first
+            if await trigger.count() > 0:
+                await trigger.click(timeout=3000)
+            else:
+                await ant.click(timeout=3000)
+        except Exception:
+            pass
+        opt_re = re.compile("|".join(re.escape(k) for k in keys[:6] if k), re.I)
+        for attempt in range(3):
+            try:
+                dd = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden)"
+                ).last
+                try:
+                    await dd.wait_for(state="visible", timeout=8000)
+                except Exception:
+                    pass
+                search = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) input"
+                ).last
+                if await search.count() > 0 and await search.is_visible():
+                    await search.fill("")
+                    await search.type(region, delay=35)
+                    await page.wait_for_timeout(400)
+                opt = page.locator(
+                    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+                    ".ant-select-item-option"
+                ).filter(has_text=opt_re).first
+                if await opt.count() > 0:
+                    await opt.click(force=True, timeout=3000)
+                    logger.info("已选区/邮区 (ant): %s", region)
+                    await page.wait_for_timeout(400)
+                    return True
+            except Exception as exc:
+                logger.debug("区下拉选项点击失败 (尝试 %d): %s", attempt + 1, exc)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            await page.wait_for_timeout(200)
+        logger.warning("香港地址「区」下拉未选中 region=%s", region[:40])
+        return False
+
+    async def _click_copy_founder_address(self, page) -> bool:
+        """通常住址：点该区块内「複製創辦成員的地址」（不要点通讯地址上同一文案）。"""
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await self._scroll_to_section(
+            page, ["通常住址（適用於董事）", "通常住址", "通常住址將不會供公眾查閱"]
+        )
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                    const btnPat = /複製創辦成員的地址|复制创办成员的地址/;
+                    const allBtns = [...document.querySelectorAll(
+                        'button, a, input[type=button], [role=button], .btn, .ant-btn'
+                    )].filter((el) => {
+                        const t = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                        return btnPat.test(t);
+                    });
+                    let heading = null;
+                    const headingSel = 'legend,h3,h4,th,.rowTitle,label,span,div,p,td';
+                    for (const el of document.querySelectorAll(headingSel)) {
+                        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (!t || t.length > 40) continue;
+                        if (/通常住址（適用於董事）|通常住址\\(適用於董事\\)|通常住址.*適用於董事/.test(t)) {
+                            heading = el;
+                            break;
+                        }
+                    }
+                    if (!heading) {
+                        for (const el of document.querySelectorAll(headingSel)) {
+                            const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                            if (!t || t.length > 24) continue;
+                            if (/^[註注]/.test(t)) continue;
+                            if (t === '通常住址' || t.startsWith('通常住址（') || t.startsWith('通常住址(')) {
+                                heading = el;
+                                break;
+                            }
+                        }
+                    }
+                    let target = null;
+                    if (heading) {
+                        heading.scrollIntoView({ block: 'center' });
+                        const hy = heading.getBoundingClientRect().top + window.scrollY;
+                        const below = allBtns
+                            .map((el) => ({
+                                el,
+                                y: el.getBoundingClientRect().top + window.scrollY,
+                            }))
+                            .filter((x) => x.y >= hy - 8)
+                            .sort((a, b) => a.y - b.y);
+                        target = below[0] && below[0].el;
+                    }
+                    if (!target && allBtns.length) {
+                        target = allBtns[allBtns.length - 1];
+                    }
+                    if (!target) return '';
+                    target.scrollIntoView({ block: 'center' });
+                    target.click();
+                    return (target.innerText || target.value || '')
+                        .replace(/\\s+/g, '')
+                        .slice(0, 40);
+                }"""
+            )
+            if clicked:
+                logger.info("已点击通常住址「複製創辦成員的地址」: %s", clicked)
+                await page.wait_for_timeout(1000)
+                return True
+        except Exception as exc:
+            logger.warning("点击通常住址复制按钮失败: %s", exc)
+        logger.warning("未找到通常住址「複製創辦成員的地址」按钮")
         return False
 
     _NNC1_ID_NONE = "無"
@@ -5647,7 +5966,7 @@ class IcrisNnc1FormBot:
         # --- NNC1-3.1.5 地址（创办成员 / 董事通讯 / 复制通常住址）---
         addr = self._resolve_person_address(person, data)
 
-        await self._fill_non_hk_address_section(
+        await self._fill_nnc1_address_section(
             page,
             r"地址.*適用於創辦成員|地址.*适用于创办成员|地址.*創辦成員",
             addr,
@@ -5655,7 +5974,7 @@ class IcrisNnc1FormBot:
             block_key="founder",
             scroll_keywords=["地址", "創辦成員", "创办成员"],
         )
-        await self._fill_non_hk_address_section(
+        await self._fill_nnc1_address_section(
             page,
             r"通訊地址.*適用於董事|通讯地址.*适用于董事|通訊地址.*董事",
             addr,
