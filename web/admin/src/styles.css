@@ -1212,6 +1212,14 @@ table.data tr.clickable:hover td {
   pointer-events: none;
 }
 
+.shot-save-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
 .jobs-page {
   display: flex;
   flex-direction: column;
@@ -1246,6 +1254,45 @@ table.data tr.clickable:hover td {
   flex-shrink: 0;
   margin-top: 12px !important;
   margin-bottom: 0 !important;
+}
+
+.job-company-name {
+  line-height: 1.35;
+}
+
+.job-director-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.job-cred-stack {
+  line-height: 1.35;
+}
+
+.job-cred-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.job-cred-row .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.job-cred-copy {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .shot-save-zone {

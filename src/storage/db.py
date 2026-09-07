@@ -224,7 +224,8 @@ class ExternalGroupStore:
                     finished_at TEXT,
                     updated_at TEXT NOT NULL,
                     run_duration TEXT NOT NULL DEFAULT '',
-                    s03a_duration TEXT NOT NULL DEFAULT ''
+                    s03a_duration TEXT NOT NULL DEFAULT '',
+                    id_already_registered INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_registration_jobs_status
@@ -413,6 +414,11 @@ class ExternalGroupStore:
         if "s03a_duration" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN s03a_duration TEXT NOT NULL DEFAULT ''"
+            )
+        if "id_already_registered" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN id_already_registered "
+                "INTEGER NOT NULL DEFAULT 0"
             )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
@@ -1705,6 +1711,51 @@ class ExternalGroupStore:
                 "SELECT status FROM registration_jobs WHERE id=?", (job_id,)
             ).fetchone()
         return str(row["status"] if row else "")
+
+    def mark_job_id_already_registered(self, job_id: int) -> None:
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET id_already_registered = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id),
+            )
+
+    def find_job_id_already_registered(self, id_number: str) -> dict[str, Any] | None:
+        """历史任务曾标红该证件号则返回该行（用于快速注册拦截）。"""
+        from src.browser.icris_errors import (
+            id_numbers_from_job_payload,
+            normalize_id_number_key,
+        )
+        import json
+
+        key = normalize_id_number_key(id_number)
+        if not key:
+            return None
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM registration_jobs
+                WHERE id_already_registered = 1
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        for row in rows:
+            item = dict(row)
+            raw = str(item.get("payload_json") or "")
+            try:
+                payload = json.loads(raw) if raw else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            for num in id_numbers_from_job_payload(payload):
+                if normalize_id_number_key(num) == key:
+                    return item
+        return None
 
     # ---- 邮箱账号配置 ----
 

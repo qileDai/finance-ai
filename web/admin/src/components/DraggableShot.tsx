@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Button, Image, Space } from "antd";
+import { Button, Image, Space, Tooltip } from "antd";
+import { SaveOutlined } from "@ant-design/icons";
 import { JOB_SHOT_PREVIEW } from "./ui";
 import {
   downloadBlob,
@@ -168,9 +169,17 @@ export function DraggableShot({
           }}
         />
       </div>
-      <Button size="small" loading={saving} onClick={onSaveClick}>
-        保存
-      </Button>
+      <Tooltip title="保存">
+        <Button
+          type="text"
+          size="small"
+          className="shot-save-btn"
+          loading={saving}
+          icon={<SaveOutlined />}
+          aria-label="保存"
+          onClick={onSaveClick}
+        />
+      </Tooltip>
       {ghost ? (
         <img
           className="shot-save-ghost"

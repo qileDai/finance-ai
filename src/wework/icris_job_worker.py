@@ -234,12 +234,19 @@ class IcrisJobWorker:
 
             if isinstance(e, IcrisFlowError):
                 screenshot_path = e.screenshot_path or ""
-                # 审核拒绝/超时：不重跑，直接关闭任务
+                # 审核拒绝/超时 / 证件号已登记：不重跑，直接关闭任务
                 if getattr(e, "no_requeue", False):
                     requeue = False
                     available_at = ""
                     logger.warning(
-                        "ICRIS job 审核拒绝/超时不重跑 id=%s", job_id
+                        "ICRIS job 不重跑 id=%s err=%s",
+                        job_id,
+                        err[:80],
+                    )
+                if getattr(e, "id_already_registered", False):
+                    self.store.mark_job_id_already_registered(job_id)
+                    logger.warning(
+                        "ICRIS job 证件号已登记 id=%s", job_id
                     )
             # 审核等待中 bot 异常退出（如浏览器崩溃）：不重跑，标记 failed
             if requeue:

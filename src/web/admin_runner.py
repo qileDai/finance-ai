@@ -719,6 +719,15 @@ def submit(
     allow_submit = not dry_run
 
     store = ExternalGroupStore()
+    dup = store.find_job_id_already_registered(id_number)
+    if dup:
+        return {
+            "ok": False,
+            "error": "证件号码已被注册",
+            "code": "id_already_registered",
+            "job_id": dup.get("id"),
+        }, 409
+
     store.upsert_group(
         case_id,
         name=f"admin-quick {company_name}".strip(),

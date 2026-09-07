@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Button, Select, Spin } from "antd";
-import { api, type RunnerFile, type RunnerStatus } from "../api";
+import { Button, Modal, Select, Spin } from "antd";
+import { api, ApiError, type RunnerFile, type RunnerStatus } from "../api";
 import { PASSPORT_COUNTRIES, countryLabel } from "../countries";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -507,7 +507,18 @@ export function RegisterPage() {
       setPolling(true);
       resetFormForNext();
     } catch (e) {
-      messageApi.error((e as Error).message || "提交失败");
+      const msg = (e as Error).message || "提交失败";
+      if (
+        msg.includes("证件号码已被注册") ||
+        (e instanceof ApiError && e.status === 409 && msg.includes("已被注册"))
+      ) {
+        Modal.warning({
+          title: "已被注册",
+          content: "该证件号码已被注册，无法再跑任务。",
+        });
+      } else {
+        messageApi.error(msg);
+      }
     } finally {
       setSubmitting(false);
     }

@@ -16,7 +16,11 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 from config.settings import settings
 from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
-from src.browser.icris_errors import IcrisFlowError, IcrisStepLoadError
+from src.browser.icris_errors import (
+    IcrisFlowError,
+    IcrisStepLoadError,
+    is_id_already_registered_error,
+)
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 from src.materials.id_type_classify import (
@@ -757,6 +761,37 @@ class IcrisRegistrationBot:
             return errs or []
         except Exception:
             return []
+
+    async def _page_body_text(self, page: "Page") -> str:
+        try:
+            return str(
+                await page.evaluate(
+                    "() => (document.body && document.body.innerText) || ''"
+                )
+                or ""
+            )
+        except Exception:
+            return ""
+
+    async def _raise_if_id_already_registered(
+        self, page: "Page", errs: list[str] | None = None
+    ) -> None:
+        """仅当 s04 出现「相同的身分證件號碼已在系統中登記」才失败。"""
+        texts = list(errs or [])
+        if not is_id_already_registered_error(texts):
+            body = await self._page_body_text(page)
+            if is_id_already_registered_error(body):
+                texts = ["相同的身分證件號碼已在系統中登記！"]
+            elif not texts:
+                texts = await self._get_validation_errors(page)
+        if not is_id_already_registered_error(texts):
+            return
+        logger.error("s04 证件号码已在系统登记: %s", texts[:4])
+        raise IcrisFlowError(
+            "相同的身分證件號碼已在系統中登記！",
+            no_requeue=True,
+            id_already_registered=True,
+        )
 
     async def _wait_spin_clear(self, page: "Page", timeout_ms: int | None = None) -> bool:
         """等待全页 loading 结束；超时则 Esc 尝试恢复（防卡死）"""
@@ -4654,6 +4689,7 @@ class IcrisRegistrationBot:
         except Exception:
             pass
         await self._wait_spin_clear(page, timeout_ms=15000)
+        await self._raise_if_id_already_registered(page)
 
         for attempt in range(1, 3):
             ok = await self._click_continue(page)
@@ -4671,6 +4707,7 @@ class IcrisRegistrationBot:
                 logger.error("s04 继续后跳转首页")
                 return False
             errs = await self._get_validation_errors(page)
+            await self._raise_if_id_already_registered(page, errs)
             if errs:
                 logger.warning("s04→s03a 仍有校验: %s", errs)
                 return False
@@ -4679,6 +4716,7 @@ class IcrisRegistrationBot:
             await page.wait_for_timeout(600)
 
         if self._is_identity_proof_url(page.url):
+            await self._raise_if_id_already_registered(page)
             logger.warning(
                 "s04 点继续后仍停在身份证明页（不强制跳 s03a） url=%s",
                 page.url[:120],
@@ -5808,6 +5846,8 @@ class IcrisRegistrationBot:
         if id_ok:
             filled += 1
             logger.info("身份证明号码已填写 type=%s", fill_plan["id_type"])
+            await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+            await self._raise_if_id_already_registered(page)
         else:
             logger.debug("未找到身份证明号码输入框（部分类型可能无需填写）")
 
@@ -5845,6 +5885,7 @@ class IcrisRegistrationBot:
                     "身份证明填写后未能进入 s03a（仍停在 %s）",
                     page.url[:120],
                 )
+                await self._raise_if_id_already_registered(page)
                 errs = await self._get_validation_errors(page)
                 if errs:
                     logger.warning("s04 校验错误: %s", errs)

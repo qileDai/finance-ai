@@ -17,7 +17,7 @@ import {
   Tag,
   Tooltip,
 } from "antd";
-import { SearchOutlined, ReloadOutlined, FolderOpenOutlined } from "@ant-design/icons";
+import { CopyOutlined, SearchOutlined, ReloadOutlined, FolderOpenOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import {
   clearStoredDirectory,
@@ -36,6 +36,33 @@ type Props = {
 };
 
 const POLL_SEC = 20;
+
+async function copyText(text: string): Promise<boolean> {
+  const cleaned = (text || "").trim();
+  if (!cleaned) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(cleaned);
+      return true;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = cleaned;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 const STATUS_OPTIONS = [
   { value: "", label: "全部" },
@@ -321,24 +348,40 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       ),
     },
     {
-      title: "公司中文名",
-      key: "company_name_cn",
-      width: 160,
-      render: (_: unknown, r: JobRow) => r.company_name_cn || r.company_name || "-",
-    },
-    {
-      title: "公司英文名",
-      dataIndex: "company_name_en",
-      key: "company_name_en",
-      width: 180,
-      render: (v: string) => v || "-",
+      title: "公司名称",
+      key: "company_name",
+      width: 200,
+      render: (_: unknown, r: JobRow) => {
+        const en = (r.company_name_en || "").trim();
+        const cn = (r.company_name_cn || r.company_name || "").trim();
+        if (!en && !cn) return "-";
+        if (en && cn) {
+          return (
+            <div className="job-company-name">
+              <div>{en}</div>
+              <div className="muted">{cn}</div>
+            </div>
+          );
+        }
+        return en || cn;
+      },
     },
     {
       title: "姓名",
       dataIndex: "director_name",
       key: "director_name",
-      width: 120,
-      render: (v: string) => v || "-",
+      width: 80,
+      ellipsis: { showTitle: false },
+      onHeaderCell: () => ({ style: { maxWidth: 80 } }),
+      onCell: () => ({ style: { maxWidth: 80 } }),
+      render: (v: string) => {
+        const name = (v || "").trim() || "-";
+        return (
+          <Tooltip title={name === "-" ? "" : name}>
+            <span className="job-director-name">{name}</span>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "证件类型",
@@ -351,27 +394,64 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       title: "证件号码",
       dataIndex: "id_number",
       key: "id_number",
-      width: 160,
-      render: (v: string) => <span className="mono">{v || "-"}</span>,
+      width: 180,
+      render: (v: string, r: JobRow) => (
+        <div>
+          <span className="mono">{v || "-"}</span>
+          {Number(r.id_already_registered) ? (
+            <div>
+              <Tag color="error" style={{ marginTop: 4 }}>
+                已被注册
+              </Tag>
+            </div>
+          ) : null}
+        </div>
+      ),
     },
     {
-      title: "用户名",
-      dataIndex: "icris_username",
-      key: "icris_username",
-      width: 140,
-      render: (v: string) => <span className="mono">{v || "-"}</span>,
-    },
-    {
-      title: "密码",
-      dataIndex: "icris_password",
-      key: "icris_password",
-      width: 140,
-      render: (v: string) => <span className="mono">{v || "-"}</span>,
+      title: "账号",
+      key: "icris_account",
+      width: 200,
+      render: (_: unknown, r: JobRow) => {
+        const user = (r.icris_username || "").trim();
+        const pass = (r.icris_password || "").trim();
+        if (!user && !pass) return "-";
+        const copyLine = async (value: string, label: string) => {
+          const ok = await copyText(value);
+          if (ok) message.success(`已复制${label}`);
+          else message.error(`复制${label}失败`);
+        };
+        const line = (value: string, label: string) => (
+          <div className="job-cred-row">
+            <span className="mono">{value}</span>
+            <Tooltip title={`复制${label}`}>
+              <Button
+                type="text"
+                size="small"
+                className="job-cred-copy"
+                icon={<CopyOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void copyLine(value, label);
+                }}
+              />
+            </Tooltip>
+          </div>
+        );
+        return (
+          <div className="job-cred-stack">
+            {user ? line(user, "用户名") : null}
+            {pass ? line(pass, "密码") : null}
+          </div>
+        );
+      },
     },
     {
       title: "进度",
       key: "progress",
-      width: 110,
+      width: 88,
+      onHeaderCell: () => ({ style: { maxWidth: 88 } }),
+      onCell: () => ({ style: { maxWidth: 88 } }),
       render: (_: unknown, r: JobRow) => (
         <Tag color={jobProgressTagColor(r.progress)}>{r.progress?.label || "-"}</Tag>
       ),
@@ -380,7 +460,9 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 100,
+      width: 80,
+      onHeaderCell: () => ({ style: { maxWidth: 80 } }),
+      onCell: () => ({ style: { maxWidth: 80 } }),
       render: (_: unknown, r: JobRow) => (
         <Tag color={jobStatusTagColor(r.status, r.review_status)}>
           {jobStatusLabel(r.status, r.review_status)}
@@ -390,7 +472,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     {
       title: "核对截图",
       key: "esubmit_screenshot",
-      width: 160,
+      width: 120,
       render: (_: unknown, r: JobRow) =>
         r.esubmit_screenshot_path ? (
           <DraggableShot
@@ -410,7 +492,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     {
       title: "成功截图",
       key: "success_screenshot",
-      width: 160,
+      width: 120,
       render: (_: unknown, r: JobRow) =>
         r.success_screenshot_path ? (
           <DraggableShot
