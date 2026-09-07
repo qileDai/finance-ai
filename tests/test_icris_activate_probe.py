@@ -11,6 +11,11 @@ from src.email.icris_activate import (
 from src.storage.db import ExternalGroupStore
 from src.web.admin_api import handle_admin_api
 
+_S06 = (
+    "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s06.do?code=x"
+)
+_HOME = "https://www.e-services.cr.gov.hk/ICRIS3EF/system/home.do"
+
 
 def _load_cli():
     path = Path(__file__).resolve().parents[1] / "scripts" / "activate_icris.py"
@@ -103,7 +108,7 @@ class TestActivationProbe(unittest.TestCase):
 
         def fetch(account, expected_username=""):
             self.assertEqual(expected_username, "MAWADA123")
-            return "https://e-services.cr.gov.hk/activate?x=1"
+            return _S06
 
         def activate(url, user, pwd):
             seen.append((url, user, pwd))
@@ -121,6 +126,25 @@ class TestActivationProbe(unittest.TestCase):
         self.assertTrue(out["found"])
         self.assertEqual(out["password_source"], "manual")
         self.assertEqual(seen[0][2], "typed-pass")
+        self.assertIn("s06.do", seen[0][0])
+        self.assertEqual(out.get("url"), _S06)
+
+    def test_home_do_is_not_opened(self) -> None:
+        self._add_imap()
+        called = []
+
+        out = run_icris_activation_probe(
+            self.store,
+            username="MAWADA123",
+            email="foo@163.com",
+            password="typed-pass",
+            fetch_link=lambda *a, **k: _HOME,
+            activate=lambda *a: called.append(a) or (True, "no"),
+        )
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["found"])
+        self.assertIn("不是启动帐户链接", out["detail"])
+        self.assertEqual(called, [])
 
     def test_job_password_readonly(self) -> None:
         self._add_imap()
@@ -144,7 +168,7 @@ class TestActivationProbe(unittest.TestCase):
             username="MAWADA123",
             email="foo@163.com",
             password="",
-            fetch_link=lambda *a, **k: "https://example.com/a",
+            fetch_link=lambda *a, **k: _S06,
             activate=activate,
         )
         self.assertTrue(out["ok"])
@@ -167,7 +191,7 @@ class TestActivationProbe(unittest.TestCase):
             username="U1",
             email="foo@163.com",
             password="p",
-            fetch_link=lambda *a, **k: "https://example.com/a",
+            fetch_link=lambda *a, **k: _S06,
             activate=lambda *a: (True, "ok"),
         )
         store.mark_job_activated.assert_not_called()

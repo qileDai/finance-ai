@@ -76,6 +76,7 @@ class TestActivationWorkerMatch(unittest.TestCase):
 
     def test_activate_passes_stored_password_then_marks_activated(self):
         store = MagicMock()
+        store.has_active_registration_queue.return_value = False
         store.get_email_account_by_address.return_value = {
             "imap_host": "imap.example.com",
             "imap_port": 993,
@@ -114,6 +115,79 @@ class TestActivationWorkerMatch(unittest.TestCase):
         self.assertEqual(kwargs.get("password"), "Secret!")
         store.mark_job_activated.assert_called_once_with(9)
         store.mark_job_activation_failed.assert_not_called()
+
+    def test_skips_activate_when_registration_queue_busy(self):
+        store = MagicMock()
+        store.has_active_registration_queue.return_value = True
+        store.get_email_account_by_address.return_value = {
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "username": "a@x.com",
+            "password": "auth",
+        }
+        worker = IcrisActivationWorker(store)
+        job = {
+            "id": 10,
+            "payload_json": json.dumps(
+                {
+                    "contact": {"email": "a@x.com"},
+                    "icris_account": {
+                        "username": "MAWADA123",
+                        "password": "Secret!",
+                    },
+                }
+            ),
+        }
+        mock_activate = AsyncMock(return_value=(True, "/tmp/shot.png"))
+        link = (
+            "https://www.e-services.cr.gov.hk/ICRIS3EF/system/"
+            "registration/s06.do?code=x"
+        )
+        with patch("src.email.imap_client.EmailClient") as client_cls, patch(
+            "src.browser.icris_activation.activate_icris_account",
+            mock_activate,
+        ):
+            client_cls.return_value.fetch_activation_link.return_value = link
+            worker._process_one_job(job)
+        mock_activate.assert_not_called()
+        store.mark_job_activated.assert_not_called()
+        store.mark_job_activation_failed.assert_not_called()
+
+    def test_home_do_marks_failed_without_opening(self):
+        store = MagicMock()
+        store.has_active_registration_queue.return_value = False
+        store.get_email_account_by_address.return_value = {
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "username": "a@x.com",
+            "password": "auth",
+        }
+        worker = IcrisActivationWorker(store)
+        job = {
+            "id": 11,
+            "payload_json": json.dumps(
+                {
+                    "contact": {"email": "a@x.com"},
+                    "icris_account": {
+                        "username": "MAWADA123",
+                        "password": "Secret!",
+                    },
+                }
+            ),
+        }
+        mock_activate = AsyncMock(return_value=(True, "/tmp/shot.png"))
+        home = "https://www.e-services.cr.gov.hk/ICRIS3EF/system/home.do"
+        with patch("src.email.imap_client.EmailClient") as client_cls, patch(
+            "src.browser.icris_activation.activate_icris_account",
+            mock_activate,
+        ):
+            client_cls.return_value.fetch_activation_link.return_value = home
+            worker._process_one_job(job)
+        mock_activate.assert_not_called()
+        store.mark_job_activated.assert_not_called()
+        store.mark_job_activation_failed.assert_called_once()
+        err = store.mark_job_activation_failed.call_args[0][1]
+        self.assertIn("不是启动帐户链接", err)
 
 
 if __name__ == "__main__":

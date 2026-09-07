@@ -323,6 +323,7 @@ export const api = {
           activated: boolean;
           password_source: string;
           detail: string;
+          url?: string;
           message?: string;
         }>
       >("/admin/api/icris-activate-probe", {

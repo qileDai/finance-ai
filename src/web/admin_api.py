@@ -1271,6 +1271,7 @@ def _handle_icris_activate_probe(
         activated=bool(result.get("ok")),
         password_source=str(result.get("password_source") or "none"),
         detail=detail,
+        url=str(result.get("url") or ""),
         message=detail or ("激活成功" if result.get("ok") else "探测完成"),
     )
 

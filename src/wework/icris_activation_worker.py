@@ -339,22 +339,45 @@ class IcrisActivationWorker:
             logger.info("任务 #%s 暂无匹配 %s 的激活邮件，等下次检查", job_id, icris_user)
             return
 
-        # 浏览器打开链接并用该任务密码登录激活
-        logger.info("任务 #%s 开始浏览器激活（账号 %s）", job_id, icris_user)
-        from src.browser.icris_activation import activate_icris_account
+        if self.store.has_active_registration_queue():
+            logger.info("注册队列未空，任务 #%s 本轮跳过激活", job_id)
+            return
 
+        # 浏览器打开 s06 启动帐户页，填入库用户名/密码后点确认
+        logger.info("任务 #%s 开始浏览器激活（账号 %s）", job_id, icris_user)
+        from src.browser.icris_activation import (
+            activate_icris_account,
+            require_s06_activation_url,
+        )
+
+        open_url, url_err = require_s06_activation_url(link)
+        if url_err:
+            self.store.mark_job_activation_failed(job_id, url_err)
+            logger.error("任务 #%s %s", job_id, url_err)
+            return
+
+        logger.info(
+            "任务 #%s 即将打开 邮箱=%s 期望用户名=%s url=%s",
+            job_id,
+            contact_email,
+            icris_user,
+            open_url,
+        )
         try:
             ok, detail = asyncio.run(
-                activate_icris_account(link, username=icris_user, password=icris_pass)
+                activate_icris_account(
+                    open_url, username=icris_user, password=icris_pass
+                )
             )
         except RuntimeError as e:
             # 无事件循环环境，用新线程跑
             logger.warning("无事件循环，新线程执行激活: %s", e)
             ok, detail = self._run_in_thread(
                 activate_icris_account,
-                link,
+                open_url,
                 username=icris_user,
                 password=icris_pass,
+                join_timeout=180,
             )
 
         if ok:

@@ -261,8 +261,8 @@ export function EmailConfigPage() {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="验证拉邮箱、找 ICRIS 激活信并点击激活"
-          description="不改注册任务状态，不影响小时巡检。密码选填：填了用手填的，没填只读查任务里的密码。"
+          message="只认标题「電子服務 - 用戶登記及啟動」"
+          description="打开信里的 s06 启动帐户链接，填用户名/密码后点确认。不改注册任务状态。密码选填：填了用手填的，没填只读查任务里的密码。"
         />
         <Space wrap>
           <Input

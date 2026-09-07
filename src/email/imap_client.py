@@ -20,21 +20,21 @@ logger = logging.getLogger(__name__)
 
 _HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
-_ACTIVATION_URL_KEYWORDS = (
-    "activate",
-    "confirm",
-    "verify",
-    "activation",
-    "啟用",
-    "启用",
-    "激活",
-)
+_ZW_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 _USERNAME_IN_MAIL_RE = re.compile(
     r"(?:用戶名稱|用户名称|用户名|User\s*(?:Name|ID)|Username|Login\s*ID)"
     r"\s*[:：]?\s*([A-Za-z][A-Za-z0-9._-]{1,64})",
     re.I,
 )
+# 真实激活信标题：電子服務 - 用戶登記及啟動（不要当成「開始提供服務通知」）
+_ACTIVATION_SUBJECT_MARKERS = (
+    "用戶登記及啟動",
+    "用户登记及启动",
+    "User Registration and Activation",
+)
 _SUBJECT_SEARCH_TERMS = (
+    "用戶登記及啟動",
+    "用户登记及启动",
     "ICRIS",
     "e-Services",
     "Companies Registry",
@@ -79,19 +79,24 @@ def collect_message_body(msg: Message) -> str:
 
 
 def is_activation_url(url: str) -> bool:
+    """仅 ICRIS s06 启动帐户链接（s06.do?code=）。拒绝门户 home.do。"""
     raw = (url or "").strip()
     if not raw.lower().startswith("http"):
         return False
     lower = raw.lower()
-    if "e-services.cr.gov.hk" in lower and "s06.do" in lower and "code=" in lower:
-        return True
-    if any(k in lower for k in _ACTIVATION_URL_KEYWORDS):
-        return True
-    if "e-services.cr.gov.hk" in lower:
-        path = lower.split("e-services.cr.gov.hk", 1)[-1]
-        if "?" in raw or (path.startswith("/") and len(path) > 2):
-            return True
-    return False
+    if "home.do" in lower:
+        return False
+    return (
+        "e-services.cr.gov.hk" in lower
+        and "s06.do" in lower
+        and "code=" in lower
+    )
+
+
+def _prep_body_for_urls(body: str) -> str:
+    text = html_lib.unescape(body or "")
+    text = re.sub(r"(?i)<br\s*/?>", "", text)
+    return _ZW_RE.sub("", text)
 
 
 def _body_as_text(body: str) -> str:
@@ -142,34 +147,54 @@ def select_activation_link(body: str, expected_username: str) -> str | None:
 
 
 def extract_activation_link_from_body(body: str) -> str | None:
-    """从纯文本/HTML 正文提取 ICRIS 激活链接。优先 s06.do?code=。"""
+    """从纯文本/HTML 正文提取 ICRIS s06 启动帐户链接。"""
     if not body:
         return None
-    text = html_lib.unescape(body)
+    text = _prep_body_for_urls(body)
     candidates: list[str] = []
     for match in _HREF_RE.finditer(text):
         candidates.append(match.group(1))
     for match in _URL_RE.finditer(text):
         candidates.append(match.group(0))
-    found: list[str] = []
     for raw in candidates:
         url = unquote(raw.rstrip(".,;)"))
         if is_activation_url(url):
-            found.append(url)
-    if not found:
-        return None
-    for url in found:
-        lower = url.lower()
-        if "s06.do" in lower and "code=" in lower:
-            return url
-    return found[0]
+            from src.browser.icris_activation import normalize_s06_activation_url
+
+            return normalize_s06_activation_url(url)
+    return None
+
+
+def decode_mail_header(value: str | None) -> str:
+    """解码 Subject 等 RFC 2047 头。"""
+    if not value:
+        return ""
+    parts = decode_header(str(value))
+    decoded: list[str] = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(charset or "utf-8", errors="replace"))
+        else:
+            decoded.append(part)
+    return "".join(decoded)
+
+
+def is_activation_subject(subject: str) -> bool:
+    """是否激活邮件标题：電子服務 - 用戶登記及啟動。"""
+    text = decode_mail_header(subject)
+    compact = re.sub(r"\s+", "", text)
+    for marker in _ACTIVATION_SUBJECT_MARKERS:
+        if marker in text or marker.replace(" ", "") in compact:
+            return True
+    return False
 
 
 def imap_search_queries(since_str: str) -> list[tuple[str | None, str]]:
     """合法的 IMAP SEARCH 列表（每次一条 SUBJECT/FROM，避免非法 OR）。"""
     queries: list[tuple[str | None, str]] = []
     for term in _SUBJECT_SEARCH_TERMS:
-        queries.append((None, f'(SINCE {since_str} SUBJECT "{term}")'))
+        charset = "UTF-8" if any(ord(c) > 127 for c in term) else None
+        queries.append((charset, f'(SINCE {since_str} SUBJECT "{term}")'))
     for term in _FROM_SEARCH_TERMS:
         queries.append((None, f'(SINCE {since_str} FROM "{term}")'))
     return queries
@@ -343,14 +368,7 @@ class EmailClient:
         self._mock_mode = not settings.email_configured
 
     def _decode_header_value(self, value: str) -> str:
-        parts = decode_header(value)
-        decoded = []
-        for part, charset in parts:
-            if isinstance(part, bytes):
-                decoded.append(part.decode(charset or "utf-8", errors="replace"))
-            else:
-                decoded.append(part)
-        return "".join(decoded)
+        return decode_mail_header(value)
 
     def _parse_icris_credentials(self, body: str, subject: str) -> IcrisAccount | None:
         """从邮件正文解析 ICRIS 账号密码"""
@@ -453,70 +471,114 @@ class EmailClient:
         since_date: datetime | None = None,
         expected_username: str | None = None,
     ) -> str | None:
-        """登录指定 IMAP 邮箱，搜索 ICRIS 确认邮件，提取激活链接。
+        """登录指定 IMAP 邮箱，搜索标题为「電子服務 - 用戶登記及啟動」的信，提取 s06 链接。"""
+        info = self.fetch_activation_result(
+            account, since_date=since_date, expected_username=expected_username
+        )
+        return info.get("url")
 
-        account: {email_address, imap_host, imap_port, username, password}
-        since_date: 只搜索此日期之后的邮件（默认 7 天前）
-        expected_username: 任务入库的 ICRIS 用戶名稱；有值时必须与信内用戶名稱一致
-        返回: 激活 URL 或 None
-        """
+    def fetch_activation_result(
+        self,
+        account: dict,
+        since_date: datetime | None = None,
+        expected_username: str | None = None,
+    ) -> dict:
+        """拉激活信。url 仅 s06.do?code=；found_subject 表示已见到启动信。"""
+        empty = {
+            "url": None,
+            "found_subject": False,
+            "detail": "",
+        }
         host = str(account.get("imap_host") or "")
         port = int(account.get("imap_port") or 993)
         username = str(account.get("username") or "")
         password = str(account.get("password") or "")
         if not host or not username or not password:
             logger.warning("邮箱账号配置不完整，跳过")
-            return None
+            empty["detail"] = "邮箱账号配置不完整"
+            return empty
 
         expected = (expected_username or "").strip()
         since = since_date or (datetime.now() - timedelta(days=7))
         since_str = since.strftime("%d-%b-%Y")
 
         mail = None
+        found_subject = False
+        saw_s06_missing = False
         try:
             mail = open_imap_inbox(host, port, username, password)
+            logger.info("IMAP 已登录 %s，开始搜激活信 since=%s", username, since_str)
             ids = self._search_message_ids(mail, since_str)
+            logger.info("IMAP 搜索到 %d 封候选", len(ids))
             if not ids:
                 logger.info("未找到 ICRIS 激活邮件: %s", username)
-                return None
+                empty["detail"] = f"暂无匹配 {expected or username} 的激活邮件"
+                return empty
 
             for mid in reversed(ids):
                 _, msg_data = mail.fetch(mid, "(RFC822)")
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
+                subject = decode_mail_header(msg.get("Subject", ""))
+                if not is_activation_subject(subject):
+                    logger.debug("跳过非激活标题: %s", (subject or "")[:80])
+                    continue
+                found_subject = True
+                logger.info("命中激活信标题: %s", (subject or "")[:80])
                 body = collect_message_body(msg)
+                parsed = parse_activation_email(body)
+                link = str(parsed.get("url") or "").strip()
+                found_user = str(parsed.get("username") or "").strip()
+                logger.info(
+                    "解析 用戶名稱=%s s06链接=%s",
+                    found_user or "(无)",
+                    link or "(无 s06)",
+                )
                 if expected:
-                    link = select_activation_link(body, expected)
-                    if link:
+                    if link and found_user and found_user.lower() == expected.lower():
+                        logger.info("采用激活链接: %s", link)
+                        return {
+                            "url": link,
+                            "found_subject": True,
+                            "detail": "",
+                        }
+                    if found_user and found_user.lower() != expected.lower():
                         logger.info(
-                            "找到匹配 %s 的激活链接: %s", expected, link[:80]
-                        )
-                        return link
-                    parsed = parse_activation_email(body)
-                    found_user = str(parsed.get("username") or "")
-                    if parsed.get("url") and found_user:
-                        logger.info(
-                            "激活邮件用戶名稱 %s 与任务 %s 不符，跳过",
+                            "激活邮件用戶名稱 %s 与期望 %s 不符，跳过",
                             found_user,
                             expected,
                         )
+                        continue
+                    if not link:
+                        logger.info("激活信无 s06 链接，继续找")
+                        saw_s06_missing = True
                     continue
-                link = extract_activation_link_from_body(body)
                 if link:
-                    logger.info("找到激活链接: %s", link[:80])
-                    return link
-            if expected:
-                logger.info(
-                    "邮件中未找到用戶名稱匹配 %s 的激活链接: %s",
-                    expected,
-                    username,
-                )
+                    logger.info("采用激活链接: %s", link)
+                    return {
+                        "url": link,
+                        "found_subject": True,
+                        "detail": "",
+                    }
+                logger.info("激活信无 s06 链接，继续找")
+                saw_s06_missing = True
+            if saw_s06_missing:
+                detail = "激活信已找到但没有 s06 启动帐户链接"
+            elif expected:
+                detail = f"暂无匹配 {expected} 的激活邮件"
             else:
-                logger.info("邮件中未找到激活链接: %s", username)
-            return None
+                detail = f"邮件中未找到激活链接: {username}"
+            logger.info("%s", detail)
+            return {
+                "url": None,
+                "found_subject": found_subject,
+                "detail": detail,
+            }
         except Exception as e:
             logger.error("读取激活邮件失败 %s: %s", username, e)
-            return None
+            empty["found_subject"] = found_subject
+            empty["detail"] = str(e)
+            return empty
         finally:
             if mail is not None:
                 try:
