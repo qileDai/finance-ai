@@ -261,7 +261,10 @@ export const api = {
   },
   job: (id: number) =>
     request<JobDetailResponse>(`/admin/api/jobs/${id}`),
-  jobScreenshotUrl: (id: number, type: "esubmit" | "success" | "fail" = "fail") =>
+  jobScreenshotUrl: (
+    id: number,
+    type: "esubmit" | "success" | "fail" | "form" = "fail",
+  ) =>
     `/admin/api/jobs/${id}/screenshot?type=${type}`,
   cancelJob: (id: number) =>
     request<ApiOk<{ job: JobRow; message: string }>>(

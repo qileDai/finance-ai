@@ -77,6 +77,14 @@ class TestRegistrationFifoAndQueue(unittest.TestCase):
         self.assertEqual(row["status"], "failed")
         self.assertFalse(self.store.has_active_registration_queue())
 
+    def test_form_failed_stores_screenshot(self):
+        job, _ = self.store.enqueue_registration_job("room-fs", source="test")
+        path = str(Path(self._tmp.name) / "form_fail.png")
+        self.store.mark_job_form_failed(int(job["id"]), "boom", path)
+        row = self.store.get_registration_job(int(job["id"]))
+        self.assertEqual(row["form_status"], "failed")
+        self.assertEqual(row["form_screenshot_path"], path)
+
 
 class TestCdpHeartbeatLock(unittest.TestCase):
     def setUp(self) -> None:

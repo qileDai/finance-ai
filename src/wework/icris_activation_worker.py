@@ -230,8 +230,13 @@ class IcrisActivationWorker:
             logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
             self._notify_form_result(job, ok=True, detail=str(shot_file))
         else:
-            self.store.mark_job_form_failed(job_id, f"填表失败: {detail}")
+            fail_shot = str(shot_file) if shot_file.is_file() else ""
+            self.store.mark_job_form_failed(
+                job_id, f"填表失败: {detail}", fail_shot
+            )
             logger.error("任务 #%s 填表失败: %s", job_id, detail)
+            if fail_shot:
+                logger.info("任务 #%s 填表失败截图: %s", job_id, fail_shot)
             self._notify_form_result(job, ok=False, detail=detail)
 
     def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:

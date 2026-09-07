@@ -236,7 +236,7 @@ def s04_identity_fill_values(
 def nnc1_identity_fill_plan(
     id_type: str, id_number: str, issuing_country: str = ""
 ) -> dict[str, str]:
-    """NNC1-3.1：港证填港证栏、护照栏無；非港证港证栏無、护照栏填号。"""
+    """NNC1-3.1：港证填港证栏、护照栏無、不选签发国；非港证港证第一框無、护照号+签发国按实际。"""
     from src.materials.countries import passport_country_option_names
 
     t = normalize_stored_id_type(id_type, id_number)

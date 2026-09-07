@@ -3703,15 +3703,539 @@ class IcrisNnc1FormBot:
         logger.warning("未找到「複製創辦成員的地址」按钮")
         return False
 
+    _NNC1_ID_NONE = "無"
+    _NNC1_FILL_LABELED_JS = """({ labelRe, main, check, take }) => {
+        const setNative = (el, v) => {
+            const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype, 'value'
+            ).set;
+            el.focus();
+            setter.call(el, v);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        const vis = (el) => {
+            if (!el || el.disabled) return false;
+            const t = (el.getAttribute('type') || 'text').toLowerCase();
+            if (['hidden','radio','checkbox','file','submit','button'].includes(t))
+                return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        };
+        const textInputs = (root) => [...(root || document).querySelectorAll(
+            'input:not([disabled])'
+        )].filter(vis);
+        const re = new RegExp(labelRe);
+        const skip = /請輸入|请输入|如沒有|如没有|部分號碼|部分号码/;
+        const markers = [...document.querySelectorAll(
+            'label, span, div, td, th, p, li'
+        )];
+        const candidates = [];
+        for (const el of markers) {
+            const t = (el.innerText || '').replace(/\\s+/g, '');
+            if (!t || t.length > 22) continue;
+            if (skip.test(t)) continue;
+            if (!re.test(t)) continue;
+            candidates.push({ el, len: t.length });
+        }
+        candidates.sort((a, b) => a.len - b.len);
+        const nTake = Math.max(1, Number(take) || 1);
+        let pair = null;
+        for (const { el } of candidates) {
+            const lr = el.getBoundingClientRect();
+            const nearby = textInputs(document.body).filter((inp) => {
+                const rel = el.compareDocumentPosition(inp);
+                const following = (rel & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+                const contained = (rel & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0;
+                if (!following && !contained) return false;
+                const r = inp.getBoundingClientRect();
+                const midL = (lr.top + lr.bottom) / 2;
+                const midI = (r.top + r.bottom) / 2;
+                return Math.abs(midI - midL) < 48
+                    || (r.top >= lr.top - 16 && r.top <= lr.bottom + 130);
+            });
+            if (nearby.length >= 1) {
+                pair = nearby.slice(0, nTake);
+                break;
+            }
+        }
+        if (!pair || !pair.length) return { ok: false, value: '' };
+        setNative(pair[0], main);
+        if (check && pair[1]) setNative(pair[1], check);
+        const ok = pair[0].value === main && (
+            !check || !pair[1] || pair[1].value === check
+        );
+        return { ok, value: pair[0].value };
+    }"""
+
+    async def _fill_nnc1_labeled_inputs(
+        self,
+        page,
+        *,
+        label_re: str,
+        main: str,
+        check: str = "",
+        max_inputs: int = 4,
+        label_texts: list[str] | None = None,
+    ) -> bool:
+        """短标题同行输入框：Playwright fill 优先，JS 兜底。"""
+        main = (main or "").strip()
+        check = (check or "").strip()
+        if not main:
+            return False
+        texts = [t for t in (label_texts or []) if t]
+        take = 2 if check else 1
+        if texts and await self._fill_nnc1_by_playwright(
+            page, texts, main, check, take
+        ):
+            return True
+        arg = {
+            "labelRe": label_re,
+            "main": main,
+            "check": check,
+            "take": take,
+        }
+        last: Any = None
+        for frame in page.frames:
+            try:
+                last = await frame.evaluate(self._NNC1_FILL_LABELED_JS, arg)
+            except Exception:
+                continue
+            if isinstance(last, dict) and last.get("ok"):
+                return True
+        return bool(isinstance(last, dict) and last.get("ok"))
+
+    async def _fill_nnc1_by_playwright(
+        self,
+        page,
+        texts: list[str],
+        main: str,
+        check: str,
+        take: int,
+    ) -> bool:
+        """用可见文案定位标签，再填同一行右侧的 input（避开祖先 contains）。"""
+        for frame in page.frames:
+            for text in texts:
+                loc = frame.get_by_text(text, exact=True)
+                try:
+                    n = await loc.count()
+                except Exception:
+                    continue
+                if n < 1:
+                    loc = frame.get_by_text(re.compile(rf"^{re.escape(text)}\s*\*?$"))
+                    try:
+                        n = await loc.count()
+                    except Exception:
+                        n = 0
+                if n < 1:
+                    continue
+                label = loc.first
+                try:
+                    await label.scroll_into_view_if_needed(timeout=5000)
+                except Exception:
+                    pass
+                try:
+                    lb = await label.bounding_box()
+                except Exception:
+                    lb = None
+                if not lb:
+                    continue
+                inputs = frame.locator(
+                    "input:visible:not([type=hidden]):not([type=radio])"
+                    ":not([type=checkbox]):not([type=file]):not([type=button])"
+                    ":not([type=submit])"
+                )
+                try:
+                    icount = await inputs.count()
+                except Exception:
+                    continue
+                hits: list[int] = []
+                for i in range(icount):
+                    try:
+                        box = await inputs.nth(i).bounding_box()
+                    except Exception:
+                        box = None
+                    if not box:
+                        continue
+                    mid_l = lb["y"] + lb["height"] / 2
+                    mid_i = box["y"] + box["height"] / 2
+                    same_row = abs(mid_i - mid_l) < 52
+                    just_under = box["y"] >= lb["y"] - 16 and box["y"] <= lb["y"] + lb["height"] + 130
+                    if not same_row and not just_under:
+                        continue
+                    if box["x"] + box["width"] < lb["x"] - 12:
+                        continue
+                    hits.append(i)
+                if not hits:
+                    continue
+                first = inputs.nth(hits[0])
+                try:
+                    await first.click(timeout=5000)
+                    await first.fill(main)
+                    if check and take >= 2 and len(hits) >= 2:
+                        second = inputs.nth(hits[1])
+                        await second.click(timeout=5000)
+                        await second.fill(check)
+                    elif check and len(hits) < 2:
+                        await first.fill(f"{main}({check})")
+                    val = (await first.input_value()).strip()
+                    if val == main or (check and val.replace("（", "(").replace("）", ")") in (
+                        f"{main}({check})",
+                        main,
+                    )):
+                        return True
+                except Exception:
+                    logger.debug("NNC1 Playwright 身分栏填写失败 [%s]", text, exc_info=True)
+                    continue
+        return False
+
+    async def _log_nnc1_identity_markers(self, page) -> None:
+        try:
+            info = await page.evaluate(
+                """() => {
+                    const out = [];
+                    for (const el of document.querySelectorAll('*')) {
+                        const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+                        if (!t || t.length > 28) continue;
+                        if (!/身分|身份|護照|护照/.test(t)) continue;
+                        const r = el.getBoundingClientRect();
+                        out.push({
+                            tag: el.tagName,
+                            t,
+                            w: Math.round(r.width),
+                            h: Math.round(r.height),
+                        });
+                        if (out.length >= 40) break;
+                    }
+                    return out;
+                }"""
+            )
+            logger.warning("NNC1 身分栏 DOM 候选: %s", info)
+            ctrls = await page.evaluate(
+                """() => {
+                    const compact = (s) => (s || '').replace(/\\s+/g, '').trim();
+                    const out = [];
+                    for (const div of document.querySelectorAll('div')) {
+                        const t = compact(div.innerText || '');
+                        if (t !== '完整香港身分证号码()' && t !== '完整护照号码'
+                            && t !== '完整香港身分證號碼()' && t !== '完整護照號碼')
+                            continue;
+                        const nodes = [...div.querySelectorAll('input,textarea,select')];
+                        out.push({
+                            t,
+                            w: Math.round(div.getBoundingClientRect().width),
+                            n: nodes.length,
+                            ctrls: nodes.slice(0, 8).map((el) => ({
+                                tag: el.tagName,
+                                type: el.getAttribute('type') || '',
+                                name: el.name || '',
+                                id: el.id || '',
+                                dis: !!el.disabled,
+                                w: Math.round(el.getBoundingClientRect().width),
+                                h: Math.round(el.getBoundingClientRect().height),
+                            })),
+                        });
+                        if (out.length >= 6) break;
+                    }
+                    return out;
+                }"""
+            )
+            logger.warning("NNC1 身分栏控件: %s", ctrls)
+        except Exception:
+            logger.debug("NNC1 身分栏 DOM 候选失败", exc_info=True)
+
+    async def _log_nnc1_identity_values(self, page) -> None:
+        try:
+            vals = await page.evaluate(
+                """() => {
+                    const compact = (s) => (s || '').replace(/\\s+/g, '').trim();
+                    const boxed = (root) => [...root.querySelectorAll('input, textarea')].filter((el) => {
+                        if (!el || el.disabled) return false;
+                        const t = (el.getAttribute('type') || 'text').toLowerCase();
+                        if (['hidden','radio','checkbox','file','submit','button'].includes(t))
+                            return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width > 2 && r.height > 2;
+                    });
+                    const grab = (wants) => {
+                        let best = null;
+                        let area = 1e15;
+                        for (const div of document.querySelectorAll('div')) {
+                            const t = compact(div.innerText || '');
+                            if (!wants.some(w => t === w || t === w + '()')) continue;
+                            const r = div.getBoundingClientRect();
+                            const a = r.width * r.height;
+                            if (a < area) { area = a; best = div; }
+                        }
+                        return best ? boxed(best).map(el => el.value) : [];
+                    };
+                    return {
+                        hkid: grab(['完整香港身分证号码','完整香港身分證號碼','完整香港身分証號碼']),
+                        ppt: grab(['完整护照号码','完整護照號碼']),
+                    };
+                }"""
+            )
+            logger.info(
+                "NNC1-3.1 可见栏值 hkid=%s passport=%s",
+                (vals or {}).get("hkid"),
+                (vals or {}).get("ppt"),
+            )
+        except Exception:
+            logger.debug("NNC1 身分栏取值失败", exc_info=True)
+
     async def _fill_hkid_number(self, page, id_number: str) -> bool:
-        """完整香港身分證號碼：第一框主体、括号内第二框校验位（同 s04）。"""
-        if not id_number or id_number.strip() == "無":
+        """完整香港身分证号码：只认该 LABEL 容器。实际号填两框；無只写第一框。"""
+        raw = (id_number or "").strip()
+        if not raw:
             return False
-        main, check = split_hkid_number(id_number)
-        if not main or main == "無":
+        labels = [
+            "完整香港身分证号码",
+            "完整香港身分證號碼",
+            "完整香港身分証號碼",
+            "完整香港身份证号码",
+            "完整香港身份證號碼",
+            "完整香港身份証號碼",
+        ]
+        if raw == self._NNC1_ID_NONE:
+            ok = await self._fill_input_under_exact_label(page, labels, raw)
+        else:
+            main, check = split_hkid_number(raw)
+            if not main:
+                return False
+            ok = await self._fill_input_under_exact_label(
+                page, labels, main, check=check
+            )
+        if ok:
+            logger.info("NNC1 港证已填: %s", raw[:16])
+            return True
+        logger.warning("NNC1 港证未写入")
+        return False
+
+    async def _fill_nnc1_passport_number(self, page, value: str) -> bool:
+        """完整护照号码：只认 LABEL 精确文案，填其所在小容器里第一个输入框。"""
+        value = (value or "").strip()
+        if not value:
             return False
-        ok = await page.evaluate(
-            """({ main, check }) => {
+        labels = ["完整护照号码", "完整護照號碼"]
+        ok = await self._fill_input_under_exact_label(page, labels, value)
+        if ok:
+            logger.info("NNC1 护照已填: %s", value[:16])
+            return True
+        logger.warning("NNC1 护照未写入")
+        return False
+
+    async def _fill_by_accessible_label(
+        self, page, labels: list[str], value: str, *, check: str = ""
+    ) -> bool:
+        """用 label 无障碍名称定位，避免整页扫框。"""
+        check = (check or "").strip()
+        for frame in page.frames:
+            for text in labels:
+                loc = frame.get_by_label(text, exact=True)
+                try:
+                    n = await loc.count()
+                except Exception:
+                    continue
+                if n < 1:
+                    continue
+                visible: list[int] = []
+                for i in range(n):
+                    try:
+                        box = await loc.nth(i).bounding_box()
+                    except Exception:
+                        box = None
+                    if box and box.get("width", 0) > 2 and box.get("height", 0) > 2:
+                        visible.append(i)
+                if not visible:
+                    continue
+                if check and len(visible) < 2:
+                    continue
+                try:
+                    first = loc.nth(visible[0])
+                    await first.click(timeout=4000)
+                    await first.fill(value)
+                    if check:
+                        second = loc.nth(visible[1])
+                        await second.click(timeout=4000)
+                        await second.fill(check)
+                    got = (await first.input_value()).strip()
+                    if got != value:
+                        continue
+                    if check:
+                        got2 = (await loc.nth(visible[1]).input_value()).strip()
+                        if got2 != check:
+                            continue
+                    return True
+                except Exception:
+                    logger.debug("NNC1 get_by_label 填写失败 [%s]", text, exc_info=True)
+                    continue
+        return False
+
+    async def _fill_input_under_exact_label(
+        self, page, labels: list[str], value: str, *, check: str = ""
+    ) -> bool:
+        """只在该 LABEL 自己的小容器里填可见 input，不爬隔壁身分栏。
+
+        无 check：只写第一个框。有 check：前两个框分别写主号、校验位。
+        """
+        last: Any = None
+        arg = {"labels": labels, "value": value, "check": (check or "").strip()}
+        if await self._fill_by_accessible_label(page, labels, value, check=arg["check"]):
+            return True
+        js = """({ labels, value, check }) => {
+            const setNative = (el, v) => {
+                const proto = el.tagName === 'TEXTAREA'
+                    ? HTMLTextAreaElement.prototype
+                    : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                el.focus();
+                setter.call(el, v);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            const vis = (el) => {
+                if (!el || el.disabled) return false;
+                const t = (el.getAttribute('type') || 'text').toLowerCase();
+                if (['hidden','radio','checkbox','file','submit','button'].includes(t))
+                    return false;
+                return true;
+            };
+            const compact = (s) => (s || '').replace(/\\s+/g, '').trim();
+            const wants = labels.map(s => compact(s));
+            const otherIdRe = /香港身分[証證证]部分|完整[護护]照|[護护]照部分|[護护]照签发|[護护]照簽發|完整香港身分/;
+            const hasOtherIdLabel = (root, lab) => {
+                for (const l of root.querySelectorAll('label')) {
+                    if (lab && l === lab) continue;
+                    const t = compact(l.innerText || '');
+                    if (!t) continue;
+                    if (wants.includes(t) || wants.includes(t.replace(/\\*$/, '')))
+                        continue;
+                    if (otherIdRe.test(t)) return true;
+                }
+                return false;
+            };
+            const tryFill = (ins) => {
+                const boxed = ins.filter((el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 2 && r.height > 2;
+                });
+                const use = boxed.length ? boxed : ins;
+                if (check) {
+                    if (use.length < 2) return false;
+                    setNative(use[0], value);
+                    setNative(use[1], check);
+                    return use[0].value === value && use[1].value === check;
+                }
+                if (use.length < 1) return false;
+                setNative(use[0], value);
+                return use[0].value === value;
+            };
+            const cands = [];
+            for (const want of wants) {
+                for (const div of document.querySelectorAll('div')) {
+                    const t = compact(div.innerText || '');
+                    if (t !== want && t !== want + '()') continue;
+                    if (hasOtherIdLabel(div, null)) continue;
+                    const ins = [...div.querySelectorAll('input, textarea')].filter(vis);
+                    if (!ins.length) continue;
+                    const r = div.getBoundingClientRect();
+                    cands.push({ ins, area: r.width * r.height });
+                }
+            }
+            cands.sort((a, b) => a.area - b.area);
+            for (const c of cands) {
+                if (tryFill(c.ins)) return true;
+            }
+            for (const lab of document.querySelectorAll('label')) {
+                const t = compact(lab.innerText || '');
+                if (!wants.includes(t) && !wants.includes(t.replace(/\\*$/, '')))
+                    continue;
+                let root = lab.parentElement;
+                for (let i = 0; i < 5 && root; i++) {
+                    if (hasOtherIdLabel(root, lab)) break;
+                    if (tryFill([...root.querySelectorAll('input, textarea')].filter(vis)))
+                        return true;
+                    root = root.parentElement;
+                }
+            }
+            return false;
+        }"""
+        for frame in page.frames:
+            try:
+                last = await frame.evaluate(js, arg)
+            except Exception:
+                continue
+            if last:
+                return True
+        return bool(last)
+
+    async def _select_nnc1_passport_country(self, page, option: str) -> bool:
+        """护照签发国家／地区：只认该 LABEL，在其所在容器里选下拉。"""
+        option = (option or "").strip()
+        if not option:
+            return False
+        labels = [
+            "护照签发国家／地区",
+            "护照签发国家/地区",
+            "護照簽發國家／地區",
+            "護照簽發國家/地區",
+        ]
+        opened = await page.evaluate(
+            """({ labels }) => {
+                const wants = labels.map(s => (s || '').replace(/\\s+/g, ''));
+                const vis = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                for (const lab of document.querySelectorAll('label')) {
+                    const t = (lab.innerText || '').replace(/\\s+/g, '').trim();
+                    if (!wants.includes(t)) continue;
+                    let root = lab.parentElement;
+                    for (let i = 0; i < 5 && root; i++) {
+                        const native = root.querySelector('select');
+                        if (native && vis(native)) return 'native';
+                        const ant = root.querySelector('.ant-select');
+                        if (ant && vis(ant)) {
+                            const trigger = ant.querySelector('.ant-select-selector') || ant;
+                            trigger.scrollIntoView({ block: 'center' });
+                            trigger.click();
+                            return 'ant';
+                        }
+                        root = root.parentElement;
+                    }
+                }
+                return '';
+            }""",
+            {"labels": labels},
+        )
+        if opened == "ant":
+            try:
+                await page.wait_for_selector(".ant-select-item-option", timeout=15000)
+            except Exception:
+                pass
+            opt = page.locator(".ant-select-item-option").filter(
+                has_text=re.compile(re.escape(option), re.I)
+            ).first
+            if await opt.count() > 0:
+                await opt.click(timeout=5000)
+                logger.info("已选择护照签发国家: %s", option)
+                await page.wait_for_timeout(400)
+                return True
+            return False
+        if opened == "native":
+            return await self._select_option_by_label(page, labels, option)
+        logger.warning("NNC1 未找到护照签发国家下拉")
+        return False
+
+    async def _fill_nnc1_identity_slot(
+        self, page, labels: list[str], value: str
+    ) -> bool:
+        """身分識別栏兜底：短标签，避免大容器误填。"""
+        if not value:
+            return False
+        hit = await page.evaluate(
+            """({ labels, value }) => {
                 const setNative = (el, v) => {
                     const setter = Object.getOwnPropertyDescriptor(
                         HTMLInputElement.prototype, 'value'
@@ -3721,110 +4245,46 @@ class IcrisNnc1FormBot:
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                 };
-                const vis = (el) => {
-                    if (!el || el.disabled) return false;
-                    const t = (el.getAttribute('type') || 'text').toLowerCase();
-                    if (['hidden','radio','checkbox','file','submit','button'].includes(t))
-                        return false;
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
-                };
-                const textInputs = (root) => [...(root || document).querySelectorAll(
-                    'input:not([disabled])'
-                )].filter(vis);
-
-                const markers = [...document.querySelectorAll(
-                    'label, span, div, td, th, p, li'
-                )];
-                let block = null;
-                for (const el of markers) {
-                    const t = (el.innerText || '').replace(/\\s+/g, '');
-                    if (!t || t.length > 60) continue;
-                    if (!/完整香港身分[證证]號碼|完整香港身份[證证]号码/.test(t)) continue;
-                    let n = el;
-                    for (let i = 0; i < 10 && n; i++) {
-                        const found = textInputs(n);
-                        if (found.length >= 2) { block = n; break; }
-                        if (found.length >= 1 && !block) block = n;
-                        n = n.parentElement;
-                    }
-                    if (block && textInputs(block).length >= 1) break;
-                }
-                const inputs = textInputs(block || document.body);
-                if (!inputs.length) return false;
-                const pair = inputs.length >= 2 ? inputs.slice(0, 2) : [inputs[0]];
-                setNative(pair[0], main);
-                if (check && pair[1]) setNative(pair[1], check);
-                return pair[0].value === main && (
-                    !check || !pair[1] || pair[1].value === check
-                );
-            }""",
-            {"main": main, "check": check},
-        )
-        if ok:
-            logger.info("NNC1 港证已拆填 main=%s check=%s", main, check)
-            return True
-        loc = page.locator(
-            "xpath=//*[contains(.,'完整香港身分證') or contains(.,'完整香港身份证')]"
-            "/following::input[not(@type='hidden') and not(@type='radio')"
-            " and not(@type='checkbox') and not(@type='file')]"
-        )
-        try:
-            n = await loc.count()
-            if n >= 1:
-                await loc.nth(0).fill(main)
-                await loc.nth(0).dispatch_event("input")
-                await loc.nth(0).dispatch_event("change")
-                if check and n >= 2:
-                    await loc.nth(1).fill(check)
-                    await loc.nth(1).dispatch_event("input")
-                    await loc.nth(1).dispatch_event("change")
-                logger.info("NNC1 港证 xpath 已拆填 main=%s check=%s", main, check)
-                return True
-        except Exception:
-            logger.debug("NNC1 港证 xpath 拆填失败", exc_info=True)
-        return False
-
-    async def _fill_nnc1_identity_slot(
-        self, page, labels: list[str], value: str
-    ) -> bool:
-        """身分識別栏：短标签精确匹配，避免大容器误填。"""
-        if not value:
-            return False
-        ok = await self._fill_field_by_label(page, labels, value)
-        if ok:
-            return True
-        hit = await page.evaluate(
-            """({ labels, value }) => {
-                const setNative = (el, v) => {
-                    el.focus();
-                    el.value = v;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                const skip = /請輸入|请输入|如沒有|如没有|部分號碼|部分号码/;
+                const visInp = (x) => {
+                    const r = x.getBoundingClientRect();
+                    const t = (x.getAttribute('type') || 'text').toLowerCase();
+                    return r.width > 0 && r.height > 0 && !x.disabled
+                        && !['hidden','radio','checkbox','file','submit','button'].includes(t);
                 };
                 const nodes = [...document.querySelectorAll(
-                    'label, .rowTitle, td, th, span, div, p'
+                    'label, .rowTitle, td, th, span, p'
                 )];
+                const allInp = [...document.querySelectorAll(
+                    'input:not([type=hidden]):not([type=checkbox]):not([type=radio])'
+                )].filter(visInp);
                 for (const pat of labels) {
                     const compactPat = pat.replace(/\\s+/g, '');
+                    const hits = [];
                     for (const el of nodes) {
                         const t = (el.innerText || '').replace(/\\s+/g, '').trim();
-                        if (!t || t.length > 40) continue;
+                        if (!t || t.length > 22) continue;
+                        if (skip.test(t)) continue;
                         if (!t.includes(compactPat)) continue;
-                        let inp = el.querySelector(
-                            'input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea'
-                        );
-                        if (!inp) {
-                            const row = el.closest('tr, .ant-form-item, fieldset, div');
-                            inp = row?.querySelector(
-                                'input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea'
-                            );
-                        }
-                        if (!inp || inp.disabled) continue;
-                        const r = inp.getBoundingClientRect();
-                        if (r.width <= 0 && r.height <= 0) continue;
-                        setNative(inp, value);
-                        return pat;
+                        hits.push({ el, len: t.length });
+                    }
+                    hits.sort((a, b) => a.len - b.len);
+                    for (const { el } of hits) {
+                        const lr = el.getBoundingClientRect();
+                        const nearby = allInp.filter((inp) => {
+                            const rel = el.compareDocumentPosition(inp);
+                            const following = (rel & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+                            const contained = (rel & Node.DOCUMENT_POSITION_CONTAINED_BY) !== 0;
+                            if (!following && !contained) return false;
+                            const r = inp.getBoundingClientRect();
+                            const midL = (lr.top + lr.bottom) / 2;
+                            const midI = (r.top + r.bottom) / 2;
+                            return Math.abs(midI - midL) < 48
+                                || (r.top >= lr.top - 16 && r.top <= lr.bottom + 130);
+                        });
+                        if (!nearby.length) continue;
+                        setNative(nearby[0], value);
+                        return nearby[0].value === value ? pat : '';
                     }
                 }
                 return '';
@@ -3840,43 +4300,58 @@ class IcrisNnc1FormBot:
     async def _fill_step3_identity(
         self, page, person: dict[str, Any], data: dict[str, Any]
     ) -> None:
-        """身分識別：两个栏都要写；未用一侧显式填「無」。"""
+        """NNC1-3.1 身分識別。
+
+        香港身份证：完整港证号码拆两框；完整护照号码填「無」；不选护照签发国家。
+        非香港身份证：港证第一框填「無」；护照号码 + 签发国家按实际填写。
+        """
         id_number, id_type = self._resolve_person_id(person, data)
         issuing = self._resolve_issuing_country(person, data)
         plan = nnc1_identity_fill_plan(id_type, id_number, issuing)
+        is_hkid = id_type == "HKID"
         await self._scroll_to_section(page, ["身分識別", "身份识别", "Identification"])
         logger.info(
-            "NNC1-3.1 身分識別 type=%s hkid=%s passport=%s",
+            "NNC1-3.1 身分識別 type=%s hkid=%s passport=%s country=%s",
             id_type,
             plan["hkid"][:16],
             plan["passport"][:16],
+            plan.get("passport_country") or "-",
         )
 
-        hkid_labels = ["完整香港身分證號碼", "完整香港身份证号码", "完整香港身分證"]
-        passport_labels = ["完整護照號碼", "完整护照号码", "Passport"]
+        hkid_ok = await self._fill_hkid_number(page, plan["hkid"])
 
-        if id_type == "HKID" and plan["hkid"] != "無":
-            await self._fill_hkid_number(page, plan["hkid"])
-        else:
-            await self._fill_nnc1_identity_slot(page, hkid_labels, plan["hkid"])
+        passport_ok = await self._fill_nnc1_passport_number(page, plan["passport"])
+        await self._log_nnc1_identity_values(page)
 
-        await self._fill_nnc1_identity_slot(page, passport_labels, plan["passport"])
+        if not hkid_ok or not passport_ok:
+            await self._log_nnc1_identity_markers(page)
+            await self._maybe_screenshot(page, "step3_identity_fail")
+            logger.warning(
+                "NNC1-3.1 身分欄未寫全 hkid_ok=%s passport_ok=%s",
+                hkid_ok,
+                passport_ok,
+            )
 
+        if is_hkid:
+            logger.info("NNC1-3.1 港证：跳过护照签发国家")
+            await self._maybe_screenshot(page, "step3_identity")
+            return
         if plan.get("passport_country"):
-            country_labels = [
-                "護照簽發國家",
-                "护照签发国家",
-                "護照簽發國家／地區",
-                "護照簽發國家/地區",
-            ]
-            await self._wait_labeled_dropdown_options(page, country_labels)
-            for country in icris_country_select_candidates(issuing or plan["passport_country"]):
-                if await self._select_option_by_label(
-                    page,
-                    country_labels,
-                    country,
-                ):
+            await self._wait_labeled_dropdown_options(
+                page,
+                [
+                    "护照签发国家／地区",
+                    "護照簽發國家／地區",
+                    "护照签发国家",
+                    "護照簽發國家",
+                ],
+            )
+            for country in icris_country_select_candidates(
+                issuing or plan["passport_country"]
+            ):
+                if await self._select_nnc1_passport_country(page, country):
                     break
+        await self._maybe_screenshot(page, "step3_identity")
 
     async def _click_add_to_officer_list(self, page) -> None:
         """点击「加入至創辦成員/高級人員列表」。"""

@@ -384,6 +384,26 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
         ),
     },
     {
+      title: "填表截图",
+      key: "form_screenshot",
+      width: 160,
+      render: (_: unknown, r: JobRow) =>
+        r.form_screenshot_path ? (
+          <DraggableShot
+            src={api.jobScreenshotUrl(r.id, "form")}
+            filename={jobShotFilename(r.id, "form")}
+            dir={saveDir}
+            zoneEl={zoneEl}
+            ensureFolder={pickSaveFolder}
+            onSaved={(name) => message.success(`已保存 ${name}`)}
+            onError={(msg) => message.error(msg)}
+            onHoverZone={onHoverZone}
+          />
+        ) : (
+          "-"
+        ),
+    },
+    {
       title: "错误",
       dataIndex: "last_error",
       key: "last_error",

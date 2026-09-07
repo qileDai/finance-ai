@@ -1857,16 +1857,28 @@ class ExternalGroupStore:
                 (now, screenshot_path, now, job_id),
             )
 
-    def mark_job_form_failed(self, job_id: int, error: str) -> None:
-        """填表失败。"""
+    def mark_job_form_failed(
+        self, job_id: int, error: str, screenshot_path: str = ""
+    ) -> None:
+        """填表失败。有截图则写入 form_screenshot_path。"""
         now = _utc_now()
+        shot = (screenshot_path or "").strip()
         with self._conn() as conn:
-            conn.execute(
-                """UPDATE registration_jobs
-                   SET form_status='failed', last_error=?, updated_at=?
-                   WHERE id=?""",
-                (error[:500], now, job_id),
-            )
+            if shot:
+                conn.execute(
+                    """UPDATE registration_jobs
+                       SET form_status='failed', last_error=?,
+                           form_screenshot_path=?, updated_at=?
+                       WHERE id=?""",
+                    (error[:500], shot, now, job_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE registration_jobs
+                       SET form_status='failed', last_error=?, updated_at=?
+                       WHERE id=?""",
+                    (error[:500], now, job_id),
+                )
 
     def reset_job_form_retry(self, job_id: int) -> dict[str, Any] | None:
         """重跑填表：仅允许 form_status='failed' 的任务，重置为 pending。"""

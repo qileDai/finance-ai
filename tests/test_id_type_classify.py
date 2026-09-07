@@ -120,6 +120,12 @@ class TestNormalizeAndFillPlan(unittest.TestCase):
         self.assertEqual(plan["passport"], "無")
         self.assertEqual(plan["passport_country"], "")
 
+    def test_nnc1_hkid_skips_passport_country_even_with_hkg(self):
+        plan = nnc1_identity_fill_plan("HKID", "F875519（8）", "HKG")
+        self.assertEqual(plan["hkid"], "F875519（8）")
+        self.assertEqual(plan["passport"], "無")
+        self.assertEqual(plan["passport_country"], "")
+
     def test_nnc1_prc_fills_none_and_passport_number(self):
         plan = nnc1_identity_fill_plan("PRC_ID", "44051420000318492X")
         self.assertEqual(plan["hkid"], "無")
@@ -149,6 +155,8 @@ class TestNormalizeAndFillPlan(unittest.TestCase):
         self.assertEqual(check, "2")
         main2, check2 = split_hkid_number("F570235(2)")
         self.assertEqual((main2, check2), ("F570235", "2"))
+        main3, check3 = split_hkid_number("F875519（8）")
+        self.assertEqual((main3, check3), ("F875519", "8"))
 
     def test_weak_fallback_uses_label(self):
         self.assertEqual(weak_fallback_id_type(PASTE_HKID)["id_type"], "HKID")
