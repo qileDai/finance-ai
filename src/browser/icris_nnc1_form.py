@@ -5771,15 +5771,15 @@ class IcrisNnc1FormBot:
             return True
 
         for attempt, click_fn in enumerate(
-            (_try_mouse_click, _try_playwright_row_click, _try_enter_on_br_input),
+            (_try_playwright_row_click, _try_mouse_click, _try_enter_on_br_input),
             start=1,
         ):
             try:
                 if not await click_fn():
                     continue
-                await wait_spin_clear(page, timeout_ms=90000)
-                await page.wait_for_timeout(1200)
-                if await self._wait_br_search_result(page, timeout_ms=30000):
+                await wait_spin_clear(page, timeout_ms=10000)
+                result_ms = 30000 if attempt >= 3 else 8000
+                if await self._wait_br_search_result(page, timeout_ms=result_ms):
                     logger.info("商業登記號碼检索成功 (attempt=%s)", attempt)
                     return True
                 logger.warning(
@@ -5868,10 +5868,10 @@ class IcrisNnc1FormBot:
             await page.wait_for_timeout(400)
             if not await self._click_br_search_button(page):
                 raise RuntimeError("未找到或未能点击「檢索」按钮")
-            if not await self._wait_br_search_result(page, timeout_ms=45000):
-                logger.warning("檢索后公司名称未自动带出，继续填写其余字段")
-            else:
+            if await self._br_search_names_filled(page):
                 logger.info("商業登記號碼检索后公司名称已带出")
+            else:
+                logger.warning("檢索后公司名称未自动带出，继续填写其余字段")
 
         await self._fill_secretary_hk_address(page, office)
 
@@ -6783,18 +6783,19 @@ class IcrisNnc1FormBot:
                     "IcrisNnc1FormBot: 打开 ICRIS3EP 登录页 (CDP=%s)",
                     not force_isolated,
                 )
+                t_login = time.monotonic()
                 await page.goto(LOGIN_URL, wait_until="commit", timeout=90000)
+                logger.info("登录页 goto 完成 (%.1fs)", time.monotonic() - t_login)
+                t_portal = time.monotonic()
                 if not await wait_portal_ready(page, timeout_ms=90000):
                     if is_cr_public_site(page.url):
                         raise RuntimeError(
                             "门户被重定向到公开站 — 请使用 CDP 指纹浏览器并确保香港出口 IP"
                         )
                     raise RuntimeError("ICRIS3EP 登录页未就绪（可能仍在載入中）")
+                logger.info("门户就绪 (%.1fs)", time.monotonic() - t_portal)
                 await dismiss_cookie_banner(page)
-                await page.wait_for_selector(
-                    "input[type='password'], input[placeholder*='用户'], input[placeholder*='用戶']",
-                    timeout=60000,
-                )
+                logger.info("登录页总等待 %.1fs", time.monotonic() - t_login)
 
                 # --- NNC1-0 前置：登录 / 打开 NNC1 / 接受条款 ---
                 await self._login(page, account)

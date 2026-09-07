@@ -42,7 +42,7 @@ async def wait_spin_clear(page: "Page", timeout_ms: int = 20000) -> bool:
 
 
 async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:
-    """等待 ICRIS3EP/3EF 门户 home.do 就绪（含登录表单或页头）。"""
+    """等待 ICRIS3EP 登录表单可填（或已登录见「登出」）。不等 load。"""
     if is_cr_public_site(page.url):
         logger.error(
             "门户被重定向到公开站（反自动化/IP 限制）: %s — "
@@ -51,16 +51,11 @@ async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:
         )
         return False
 
-    try:
-        await page.wait_for_url("**/e-services.cr.gov.hk/**", timeout=timeout_ms)
-    except Exception:
-        pass
+    await wait_spin_clear(page, timeout_ms=min(20000, timeout_ms))
 
     if is_cr_public_site(page.url):
-        logger.error("门户 wait_for_url 后被重定向到公开站: %s", page.url)
+        logger.error("门户加载后被重定向到公开站: %s", page.url)
         return False
-
-    await wait_spin_clear(page, timeout_ms=min(20000, timeout_ms))
 
     try:
         await page.wait_for_function(
@@ -68,11 +63,25 @@ async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:
                 const href = window.location.href || '';
                 if (!href.includes('e-services.cr.gov.hk')) return false;
                 if (href.includes('www.cr.gov.hk') && !href.includes('e-services')) return false;
+                const vis = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    const st = getComputedStyle(el);
+                    return st.visibility !== 'hidden' && st.display !== 'none';
+                };
+                const pwd = document.querySelector("input[type='password']");
+                if (vis(pwd)) return true;
+                for (const el of document.querySelectorAll(
+                    "input[name*='user' i], input[id*='user' i], " +
+                    "input[placeholder*='用户'], input[placeholder*='用戶'], " +
+                    "#username, #userId"
+                )) {
+                    if (vis(el)) return true;
+                }
                 const body = document.body ? document.body.innerText : '';
-                if (/載入中|Loading/i.test(body) && body.length < 200) return false;
-                return document.querySelector(
-                    "input[type='password'], input[placeholder*='用户'], input[placeholder*='用戶'], header, .header, #header"
-                ) != null;
+                return /登出|Logout/i.test(body)
+                    && /成立公司|电子服务|电子服務|最新消息|实用资讯|實用資訊/.test(body);
             }""",
             timeout=timeout_ms,
         )
