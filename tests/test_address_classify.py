@@ -553,5 +553,90 @@ class TestStoredS03Address(unittest.TestCase):
         self.assertEqual(applicant.get("address_is_hk"), "1")
 
 
+class TestNnc1AddressStored(unittest.TestCase):
+    def test_resolve_matches_s03_stored(self):
+        from src.browser.icris_nnc1_form import resolve_nnc1_person_address
+
+        person = {
+            "address_flat": "RM D, 11/F, BLK 5",
+            "address_building": "LOCWOOD COURT",
+            "address_street": "1 TIN WU ROAD",
+            "address_region": "天水圍",
+            "address_country": "HKG",
+            "address_is_hk": "1",
+        }
+        got = resolve_nnc1_person_address(person, {"applicant": {}})
+        self.assertEqual(got, stored_s03_address_fields(person, {}))
+        self.assertEqual(got["address_is_hk"], "1")
+
+    def test_does_not_split_raw_english(self):
+        from src.browser.icris_nnc1_form import resolve_nnc1_person_address
+
+        got = resolve_nnc1_person_address(
+            {"address_en": NT_EN, "address_is_hk": "1"},
+            {},
+        )
+        self.assertEqual(got["street"], "")
+        self.assertEqual(got["flat"], "")
+        self.assertEqual(got["address_is_hk"], "1")
+
+    def test_hk_radio_excludes_non_hk_label(self):
+        from src.browser.icris_nnc1_form import (
+            nnc1_address_radio_is_hk,
+            nnc1_address_radio_is_non_hk,
+        )
+
+        self.assertTrue(nnc1_address_radio_is_hk("香港地址"))
+        self.assertTrue(nnc1_address_radio_is_hk("本港地址"))
+        self.assertFalse(nnc1_address_radio_is_hk("非香港地址"))
+        self.assertFalse(nnc1_address_radio_is_hk("非本地地址"))
+        self.assertTrue(nnc1_address_radio_is_non_hk("非香港地址"))
+        self.assertFalse(nnc1_address_radio_is_non_hk("香港地址"))
+
+    def test_hk_district_label_excludes_region_field(self):
+        from src.browser.icris_nnc1_form import nnc1_hk_district_label
+
+        self.assertTrue(nnc1_hk_district_label("区"))
+        self.assertTrue(nnc1_hk_district_label("區"))
+        self.assertTrue(nnc1_hk_district_label("區 *"))
+        self.assertTrue(nnc1_hk_district_label("District"))
+        self.assertTrue(nnc1_hk_district_label("区\n請選擇"))
+        self.assertFalse(nnc1_hk_district_label("地区"))
+        self.assertFalse(nnc1_hk_district_label("地區"))
+        self.assertFalse(nnc1_hk_district_label("国家／地区"))
+        self.assertFalse(nnc1_hk_district_label("區／市／省／州／郵遞區號"))
+
+    def test_district_select_keys_include_value_alias(self):
+        from src.browser.icris_nnc1_form import nnc1_district_select_keys
+
+        keys = nnc1_district_select_keys("天水圍")
+        self.assertIn("天水圍", keys)
+        self.assertIn("天水围", keys)
+        self.assertIn("TINSHUIWAI", keys)
+
+    def test_nnc1_fill_uses_stored_not_split(self):
+        import inspect
+
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot, resolve_nnc1_person_address
+
+        self.assertIn("stored_s03_address_fields", inspect.getsource(resolve_nnc1_person_address))
+        self.assertNotIn(
+            "_split_non_hk_address_en",
+            inspect.getsource(IcrisNnc1FormBot._resolve_person_address),
+        )
+        src = inspect.getsource(IcrisNnc1FormBot._fill_nnc1_address_section)
+        self.assertIn("_select_hk_in_block", src)
+        self.assertIn("_select_non_hk_in_block", src)
+        self.assertNotIn("_split_non_hk_address_en", src)
+        hk_fill = src.split("filled = 0")[1].split(
+            "await self._wait_country_region_options"
+        )[0]
+        self.assertIn("_select_district_in_block(page, block, region)", hk_fill)
+        self.assertNotIn("郵遞區號", hk_fill)
+        dist_src = inspect.getsource(IcrisNnc1FormBot._select_district_in_block)
+        self.assertIn("data-nnc1-hk-district", dist_src)
+        self.assertIn("nnc1_district_select_keys", dist_src)
+
+
 if __name__ == "__main__":
     unittest.main()

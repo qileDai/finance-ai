@@ -608,9 +608,11 @@ class IcrisRegistrationBot:
                     try:
                         from src.storage.db import ExternalGroupStore
 
-                        ExternalGroupStore().update_job_esubmit_screenshot(
+                        store = ExternalGroupStore()
+                        store.update_job_esubmit_screenshot(
                             self.job_id, self.esubmit_screenshot_path
                         )
+                        store.set_job_s03a_duration(self.job_id)
                     except Exception as db_err:
                         logger.warning("写入 esubmit_screenshot_path 到 DB 失败: %s", db_err)
         except Exception as shot_err:
@@ -6166,6 +6168,7 @@ class IcrisRegistrationBot:
 
         await self._ensure_simplified_chinese(page)
         # Step 1: 验证码 + 条款（仅在 s01 页），验证码错误时自动刷新重试
+        t_s01 = time.monotonic()
         await self._dismiss_portal_overlays(page)
         terms_ok = False
         for captcha_round in range(1, 4):
@@ -6196,10 +6199,12 @@ class IcrisRegistrationBot:
 
         if not terms_ok:
             raise IcrisStepLoadError("条款页处理失败（验证码或条款）")
+        logger.info("ICRIS s01 duration=%.1fs", time.monotonic() - t_s01)
 
         if not await self._ensure_on_registration(page, "进入注册表单"):
             raise IcrisStepLoadError(f"进入注册表单失败: {page.url[:160]}")
 
+        t_s02 = time.monotonic()
         await self._ensure_simplified_chinese(page)
         await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         page = await self._recover_step_or_restart(
@@ -6214,8 +6219,10 @@ class IcrisRegistrationBot:
             raise IcrisStepLoadError(
                 f"条款通过后未进入账户资料页: {page.url[:160]}"
             )
+        logger.info("ICRIS s02 duration=%.1fs", time.monotonic() - t_s02)
 
         # Step 3: 用户资料（s03）
+        t_s03 = time.monotonic()
         page = await self._recover_step_or_restart(
             page, self._user_info_form_is_ready, label="s03用户资料"
         )
@@ -6226,8 +6233,10 @@ class IcrisRegistrationBot:
             raise IcrisStepLoadError(
                 f"账户资料继续后未进入用户资料页: {page.url[:160]}"
             )
+        logger.info("ICRIS s03 duration=%.1fs", time.monotonic() - t_s03)
 
         # Step 4: 身份证明（s04）
+        t_s04 = time.monotonic()
         await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         if not await self._is_identity_proof_step(page):
             await self._advance_from_user_info_to_identity(page)
@@ -6239,8 +6248,10 @@ class IcrisRegistrationBot:
             await self._fill_identity_proof_step(page, data)
         else:
             logger.info("暂未进入身份证明页, url=%s", page.url)
+        logger.info("ICRIS s04 duration=%.1fs", time.monotonic() - t_s04)
 
         # Step 4b: s03a 电子提交条款（s04 未跳转时再推进一次）
+        t_s03a = time.monotonic()
         await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         if not await self._is_esubmit_terms_step(page):
             if self._is_identity_proof_url(page.url) or await self._is_identity_proof_step(
@@ -6361,10 +6372,14 @@ class IcrisRegistrationBot:
                         settings.icris_allow_submit,
                     )
 
+        logger.info("ICRIS s03a duration=%.1fs", time.monotonic() - t_s03a)
+
         # s05 成功页：等待页面加载完成并截图存档（不依赖 allow_submit）
+        t_s05 = time.monotonic()
         if await self._is_success_step(page):
             logger.info("=== s05 提交成功确认页 ===")
             await self._save_success_screenshot(page)
+        logger.info("ICRIS s05 duration=%.1fs", time.monotonic() - t_s05)
 
         if self.allow_submit:
             logger.info("注册表单填写完成（已按开关尝试提交）")
@@ -6391,7 +6406,7 @@ class IcrisRegistrationBot:
                 "请先安装 Playwright: pip install playwright && playwright install chromium"
             ) from e
 
-        keep_open = max(10, settings.browser_keep_open_seconds)
+        keep_open = max(0, int(settings.browser_keep_open_seconds or 0))
 
         async with async_playwright() as p:
             browser = await launch_browser(
@@ -6478,6 +6493,8 @@ class IcrisRegistrationBot:
                 skip_keep_open = run_error is not None or self._job_is_cancelled()
                 if skip_keep_open:
                     logger.info("注册失败/取消，立即关闭浏览器")
+                elif keep_open <= 0:
+                    logger.info("注册成功，不保持打开浏览器")
                 else:
                     logger.info("浏览器保持打开 %d 秒供检查…", keep_open)
                     remaining = float(keep_open)

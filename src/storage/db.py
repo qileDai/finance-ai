@@ -18,6 +18,39 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def format_job_run_duration(seconds: float) -> str:
+    """墙钟秒数 →「M分S秒」，供 registration_jobs 耗时列存储与展示。"""
+    total = max(0, int(round(float(seconds or 0))))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}分{secs}秒"
+
+
+def _parse_iso_dt(value: str) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def duration_since_started(started_at: str, ended_at: str | None = None) -> str:
+    """从 started_at 到 ended_at（默认现在）的「M分S秒」。解析失败返回空串。"""
+    start = _parse_iso_dt(started_at)
+    if start is None:
+        return ""
+    end = _parse_iso_dt(ended_at or _utc_now())
+    if end is None:
+        end = datetime.now(timezone.utc)
+    return format_job_run_duration((end - start).total_seconds())
+
+
 def _percentile_stats(values: list[int]) -> dict[str, Any]:
     """返回 count / p50 / p95 / max（毫秒）。"""
     if not values:
@@ -189,7 +222,9 @@ class ExternalGroupStore:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    run_duration TEXT NOT NULL DEFAULT '',
+                    s03a_duration TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_registration_jobs_status
@@ -370,6 +405,14 @@ class ExternalGroupStore:
         if "form_screenshot_path" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN form_screenshot_path TEXT NOT NULL DEFAULT ''"
+            )
+        if "run_duration" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN run_duration TEXT NOT NULL DEFAULT ''"
+            )
+        if "s03a_duration" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN s03a_duration TEXT NOT NULL DEFAULT ''"
             )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
@@ -1381,6 +1424,8 @@ class ExternalGroupStore:
                 SET status = 'running',
                     attempts = attempts + 1,
                     started_at = ?,
+                    run_duration = '',
+                    s03a_duration = '',
                     updated_at = ?
                 WHERE id = ? AND status = 'pending'
                   AND IFNULL(review_status, '') != 'rejected'
@@ -1438,23 +1483,38 @@ class ExternalGroupStore:
         """进程重启后审核页已丢失：awaiting_review 标失败，避免永远挡住 NNC1。"""
         now = _utc_now()
         with self._conn() as conn:
-            cur = conn.execute(
+            rows = conn.execute(
                 """
-                UPDATE registration_jobs
-                SET status = 'failed',
-                    last_error = CASE
-                        WHEN last_error = '' THEN '进程重启，审核页已丢失'
-                        ELSE last_error
-                    END,
-                    finished_at = CASE WHEN finished_at IS NULL OR finished_at = ''
-                                       THEN ? ELSE finished_at END,
-                    updated_at = ?
+                SELECT id, started_at, run_duration FROM registration_jobs
                 WHERE status = 'awaiting_review'
                   AND IFNULL(review_status, '') != 'rejected'
-                """,
-                (now, now),
-            )
-            return int(cur.rowcount or 0)
+                """
+            ).fetchall()
+            n = 0
+            for row in rows:
+                dur = str(row["run_duration"] or "").strip() or duration_since_started(
+                    str(row["started_at"] or ""), now
+                )
+                cur = conn.execute(
+                    """
+                    UPDATE registration_jobs
+                    SET status = 'failed',
+                        last_error = CASE
+                            WHEN last_error = '' THEN '进程重启，审核页已丢失'
+                            ELSE last_error
+                        END,
+                        finished_at = CASE WHEN finished_at IS NULL OR finished_at = ''
+                                           THEN ? ELSE finished_at END,
+                        run_duration = CASE WHEN IFNULL(run_duration, '') = ''
+                                            THEN ? ELSE run_duration END,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'awaiting_review'
+                      AND IFNULL(review_status, '') != 'rejected'
+                    """,
+                    (now, dur, now, int(row["id"])),
+                )
+                n += int(cur.rowcount or 0)
+            return n
 
     def mark_job_succeeded(
         self,
@@ -1464,6 +1524,7 @@ class ExternalGroupStore:
         result_messages: list[Any] | None = None,
         esubmit_screenshot_path: str = "",
         success_screenshot_path: str = "",
+        run_duration: str = "",
     ) -> None:
         import json
 
@@ -1484,6 +1545,7 @@ class ExternalGroupStore:
                     esubmit_screenshot_path = CASE WHEN ? != '' THEN ? ELSE esubmit_screenshot_path END,
                     success_screenshot_path = CASE WHEN ? != '' THEN ? ELSE success_screenshot_path END,
                     finished_at = ?,
+                    run_duration = CASE WHEN ? != '' THEN ? ELSE run_duration END,
                     updated_at = ?,
                     last_error = ''
                 WHERE id = ? AND status IN ('running', 'awaiting_review')
@@ -1492,7 +1554,7 @@ class ExternalGroupStore:
                     package_dir, package_dir, msgs, msgs,
                     esubmit_screenshot_path, esubmit_screenshot_path,
                     success_screenshot_path, success_screenshot_path,
-                    now, now, job_id
+                    now, run_duration, run_duration, now, job_id
                 ),
             )
 
@@ -1509,6 +1571,34 @@ class ExternalGroupStore:
                        updated_at=?
                    WHERE id=? AND status='running'""",
                 (now, job_id),
+            )
+        self.set_job_s03a_duration(job_id)
+
+    def set_job_s03a_duration(self, job_id: int) -> None:
+        """第一次进入 s03a 时写入到 s03a 耗时（不含审批等待）。已有值不覆盖。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT started_at, s03a_duration FROM registration_jobs
+                WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return
+            if str(row["s03a_duration"] or "").strip():
+                return
+            dur = duration_since_started(str(row["started_at"] or ""), now)
+            if not dur:
+                return
+            conn.execute(
+                """
+                UPDATE registration_jobs
+                SET s03a_duration = ?, updated_at = ?
+                WHERE id = ? AND IFNULL(s03a_duration, '') = ''
+                """,
+                (dur, now, job_id),
             )
 
     def update_job_esubmit_screenshot(self, job_id: int, path: str) -> None:
@@ -1576,12 +1666,24 @@ class ExternalGroupStore:
         """审核拒绝：设 review_status=rejected, status=failed。"""
         now = _utc_now()
         with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT started_at, run_duration FROM registration_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not cur:
+                return None
+            dur = str(cur["run_duration"] or "").strip() or duration_since_started(
+                str(cur["started_at"] or ""), now
+            )
             conn.execute(
                 """UPDATE registration_jobs
                    SET review_status='rejected', status='failed',
-                       finished_at=?, updated_at=?
+                       finished_at=?,
+                       run_duration = CASE WHEN IFNULL(run_duration, '') = ''
+                                           THEN ? ELSE run_duration END,
+                       updated_at=?
                    WHERE id=? AND status='awaiting_review'""",
-                (now, now, job_id),
+                (now, dur, now, job_id),
             )
             row = conn.execute(
                 "SELECT * FROM registration_jobs WHERE id=?", (job_id,)
@@ -1937,6 +2039,7 @@ class ExternalGroupStore:
         package_dir: str = "",
         screenshot_path: str = "",
         result_messages: list[Any] | None = None,
+        run_duration: str = "",
     ) -> None:
         import json
 
@@ -1971,6 +2074,7 @@ class ExternalGroupStore:
                     result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
                     available_at = CASE WHEN ? != '' THEN ? ELSE available_at END,
                     finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
+                    run_duration = CASE WHEN ? != '' THEN ? ELSE run_duration END,
                     updated_at = ?
                 WHERE id = ? AND status != 'cancelled'
                 """,
@@ -1987,6 +2091,8 @@ class ExternalGroupStore:
                     available_at,
                     status,
                     now,
+                    run_duration,
+                    run_duration,
                     now,
                     job_id,
                 ),
@@ -2051,6 +2157,8 @@ class ExternalGroupStore:
                     review_status = '',
                     available_at = ?,
                     finished_at = NULL,
+                    run_duration = '',
+                    s03a_duration = '',
                     updated_at = ?,
                     last_error = ''
                 WHERE id = ?

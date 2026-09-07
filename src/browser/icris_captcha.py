@@ -194,7 +194,10 @@ async def _wait_manual_captcha(
     captcha_input,
     expected_len: int,
 ) -> str | None:
-    """等待用户在浏览器中手动输入验证码"""
+    """等待用户在浏览器中手动输入验证码。无头环境无人可输，直接跳过。"""
+    if bool(getattr(settings, "browser_headless", False)):
+        logger.info("无头模式跳过验证码人工等待")
+        return None
     timeout_ms = settings.captcha_manual_timeout * 1000
     logger.info(
         "请在浏览器验证码框中手动输入 %d 位字符（最多等待 %d 秒）…",

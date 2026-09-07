@@ -274,6 +274,14 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                   <dd className="mono muted">{formatDateTime(job.finished_at)}</dd>
                 </div>
                 <div>
+                  <dt>到 s03a</dt>
+                  <dd className="mono muted">{job.s03a_duration || "-"}</dd>
+                </div>
+                <div>
+                  <dt>整个任务</dt>
+                  <dd className="mono muted">{job.run_duration || "-"}</dd>
+                </div>
+                <div>
                   <dt>更新</dt>
                   <dd className="mono muted">{formatDateTime(job.updated_at)}</dd>
                 </div>

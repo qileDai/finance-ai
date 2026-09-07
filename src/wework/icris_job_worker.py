@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config.settings import settings
-from src.storage.db import ExternalGroupStore
+from src.storage.db import ExternalGroupStore, format_job_run_duration
 from src.wework.external_workflow import ExternalGroupWorkflow
 from src.wework.job_log_capture import JobLogCapture
 
@@ -181,6 +181,7 @@ class IcrisJobWorker:
             # 任务被取消则不覆盖为 succeeded
             cur_status = self.store.get_job_status(job_id)
             review_status = self.store.get_job_review_status(job_id)
+            elapsed = time.monotonic() - t0
             if (
                 cur_status in ("cancelled", "failed")
                 or (review_status or "").lower() == "rejected"
@@ -198,6 +199,7 @@ class IcrisJobWorker:
                     result_messages=msgs,
                     esubmit_screenshot_path=getattr(ctx, "esubmit_screenshot_path", "") or "",
                     success_screenshot_path=getattr(ctx, "success_screenshot_path", "") or "",
+                    run_duration=format_job_run_duration(elapsed),
                 )
                 # 标记待激活：激活 worker 会每小时检查邮箱
                 self.store.mark_job_activation_pending(job_id)
@@ -205,7 +207,6 @@ class IcrisJobWorker:
                 self.workflow.notify_job_result(
                     job, ok=True, package_dir=package_dir
                 )
-            elapsed = time.monotonic() - t0
             logger.info(
                 "ICRIS job ok id=%s roomid=%s duration=%.1fs package=%s",
                 job_id,
@@ -290,6 +291,7 @@ class IcrisJobWorker:
                 package_dir=package_dir,
                 screenshot_path=screenshot_path,
                 result_messages=msgs or None,
+                run_duration=format_job_run_duration(elapsed),
             )
             if screenshot_path:
                 logger.warning(

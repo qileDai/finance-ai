@@ -217,7 +217,7 @@ def _poll_task(client: httpx.Client, api_key: str, task_id: str, timeout: int) -
     from config.settings import settings
 
     deadline = time.time() + timeout
-    interval = max(0.8, float(getattr(settings, "twocaptcha_poll_interval", 1.0)))
+    interval = max(0.4, float(getattr(settings, "twocaptcha_poll_interval", 0.4)))
     first_poll = True
     while time.time() < deadline:
         if not first_poll:

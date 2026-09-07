@@ -90,6 +90,8 @@ export type JobRow = {
   finished_at?: string;
   created_at?: string;
   started_at?: string;
+  run_duration?: string;
+  s03a_duration?: string;
 };
 
 export type JobLogLine = {

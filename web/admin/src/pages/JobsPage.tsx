@@ -415,6 +415,24 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       ),
     },
     {
+      title: "到 s03a",
+      dataIndex: "s03a_duration",
+      key: "s03a_duration",
+      width: 100,
+      render: (v: string) => (
+        <span className="mono muted">{v || "-"}</span>
+      ),
+    },
+    {
+      title: "整个任务",
+      dataIndex: "run_duration",
+      key: "run_duration",
+      width: 100,
+      render: (v: string) => (
+        <span className="mono muted">{v || "-"}</span>
+      ),
+    },
+    {
       title: "更新时间",
       dataIndex: "updated_at",
       key: "updated_at",
