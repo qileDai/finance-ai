@@ -35,6 +35,8 @@ type Props = {
   onRefresh: () => void;
 };
 
+const POLL_SEC = 20;
+
 const STATUS_OPTIONS = [
   { value: "", label: "全部" },
   { value: "pending", label: "待处理" },
@@ -69,28 +71,65 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
   const [zoneHover, setZoneHover] = useState(false);
   const zoneRef = useRef<HTMLDivElement | null>(null);
   const [zoneEl, setZoneEl] = useState<HTMLDivElement | null>(null);
+  const [countdown, setCountdown] = useState(POLL_SEC);
+  const countdownRef = useRef(POLL_SEC);
+  const loadGen = useRef(0);
 
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setError(null);
+  const loadJobs = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    const gen = ++loadGen.current;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     const dateFrom = dateRange?.[0]?.format("YYYY-MM-DD") || "";
     const dateTo = dateRange?.[1]?.format("YYYY-MM-DD") || "";
-    api
-      .jobs(status, 80, "", dateFrom, dateTo, companyName, directorName, idNumber)
-      .then((d) => {
-        if (alive) setItems(d.items || []);
-      })
-      .catch((e: Error) => {
-        if (alive) setError(e.message);
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [status, refreshKey, companyName, directorName, idNumber, dateRange]);
+    try {
+      const d = await api.jobs(
+        status,
+        80,
+        "",
+        dateFrom,
+        dateTo,
+        companyName,
+        directorName,
+        idNumber,
+      );
+      if (gen !== loadGen.current) return;
+      setItems(d.items || []);
+      if (!silent) setError(null);
+    } catch (e) {
+      if (gen !== loadGen.current) return;
+      if (!silent) setError((e as Error).message);
+    } finally {
+      if (gen === loadGen.current && !silent) setLoading(false);
+    }
+  }, [status, companyName, directorName, idNumber, dateRange]);
+
+  const resetCountdown = useCallback(() => {
+    countdownRef.current = POLL_SEC;
+    setCountdown(POLL_SEC);
+  }, []);
+
+  useEffect(() => {
+    void loadJobs({ silent: false });
+    resetCountdown();
+  }, [loadJobs, refreshKey, resetCountdown]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const next = countdownRef.current - 1;
+      if (next <= 0) {
+        countdownRef.current = POLL_SEC;
+        setCountdown(POLL_SEC);
+        void loadJobs({ silent: true });
+      } else {
+        countdownRef.current = next;
+        setCountdown(next);
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [loadJobs]);
 
   useEffect(() => {
     let alive = true;
@@ -186,6 +225,11 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     setCompanyName("");
     setDirectorName("");
     setIdNumber("");
+  }
+
+  function onManualRefresh() {
+    resetCountdown();
+    void loadJobs({ silent: false });
   }
 
   async function runAct(
@@ -553,8 +597,9 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
           <Button type="primary" icon={<SearchOutlined />} onClick={onSearch}>
             搜索
           </Button>
-          <Button icon={<ReloadOutlined />} onClick={onReset}>
-            重置
+          <Button onClick={onReset}>重置</Button>
+          <Button icon={<ReloadOutlined />} onClick={onManualRefresh}>
+            刷新 {countdown}s
           </Button>
           {folderOk ? (
             <>
