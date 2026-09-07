@@ -165,6 +165,11 @@ def _is_field_required(field: MaterialField, materials: dict[str, dict[str, Any]
       - 手持照可选；
       - 护照：仅护照页。
     """
+    if field.key in ("company_name_cn", "company_name_en"):
+        cn = _field_value(materials, "company_name_cn")
+        en = _field_value(materials, "company_name_en")
+        # 中英文至少一个即可；两个都空时两项都算缺
+        return not (cn or en)
     id_type = _field_value(materials, "id_type").upper()
     issuing = _field_value(materials, "issuing_country").upper()
     if field.key in ("id_card_front", "id_card_back"):

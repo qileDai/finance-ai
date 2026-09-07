@@ -297,7 +297,11 @@ class RegistrationWorkflow:
     def step_notify_colleague(self, ctx: WorkflowContext) -> WorkflowContext:
         """⑦ 核对材料，提醒同事后续操作"""
         ctx.log("=== 步骤⑦ 提醒同事 ===")
-        company_name = ctx.company_data.get("company_name_en", "Unknown")
+        company_name = (
+            ctx.company_data.get("company_name_en")
+            or ctx.company_data.get("company_name_cn")
+            or "Unknown"
+        )
         next_steps = [
             "人工核对 ICRIS 表单填写内容",
             "确认材料附件完整性",

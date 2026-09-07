@@ -303,8 +303,10 @@ def _validate(
     fields: dict[str, str], files: dict[str, dict[str, Any]] | None = None
 ) -> list[str]:
     errs: list[str] = []
-    if not (fields.get("company_name_en") or "").strip():
-        errs.append("公司英文名必填")
+    if not (fields.get("company_name_cn") or "").strip() and not (
+        fields.get("company_name_en") or ""
+    ).strip():
+        errs.append("公司中文名或英文名至少填一个")
     if not (fields.get("director_name") or "").strip():
         errs.append("董事兼股东姓名必填")
     if not (fields.get("id_number") or "").strip():

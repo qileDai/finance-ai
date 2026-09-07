@@ -17,7 +17,7 @@ type TextField = {
 
 const TEXT_FIELDS: TextField[] = [
   { key: "company_name_cn", label: "公司中文名" },
-  { key: "company_name_en", label: "公司英文名", required: true },
+  { key: "company_name_en", label: "公司英文名" },
   { key: "registered_capital", label: "注册资本", placeholder: "1万港币" },
   { key: "business_desc", label: "经营范围" },
   { key: "registered_office_cn", label: "注册地址（中文）" },
@@ -434,7 +434,12 @@ export function RegisterPage() {
   }
 
   function validate(): string | null {
-    if (!(fields.company_name_en || "").trim()) return "公司英文名必填";
+    if (
+      !(fields.company_name_cn || "").trim() &&
+      !(fields.company_name_en || "").trim()
+    ) {
+      return "公司中文名或英文名至少填一个";
+    }
     if (!(fields.director_name || "").trim()) return "董事兼股东姓名必填";
     if (!(fields.id_number || "").trim()) return "证件号码必填";
     const email = (fields.contact_email || "").trim();
@@ -564,6 +569,9 @@ export function RegisterPage() {
       <div className="reg-grid">
         <section className="reg-card">
           <h2>公司资料</h2>
+          <p className="muted" style={{ margin: "0 0 8px" }}>
+            公司中文名、英文名至少填一个，两个都填也可以
+          </p>
           <div className="reg-form">
             {TEXT_FIELDS.map((f) => (
               <Fragment key={f.key}>
