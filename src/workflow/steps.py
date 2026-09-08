@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,8 @@ class WorkflowContext:
     esubmit_screenshot_path: str = ""
     success_screenshot_path: str = ""
     keep_browser: bool = False
+    job_id: int = 0
+    screenshot_path: str = ""
 
     def log(self, msg: str) -> None:
         logger.info(msg)
@@ -229,7 +232,7 @@ class RegistrationWorkflow:
         force_isolated_browser: bool = False,
     ) -> WorkflowContext:
         """⑥ ICRIS3EP 已激活账号登录 → NNC1 填表（CDP 指纹浏览器，与 s01-s05 登记分离）"""
-        from config.settings import settings
+        from config.settings import PROJECT_ROOT, settings
         from src.browser.icris_nnc1_form import IcrisNnc1FormBot
         from src.materials.packager import load_mock_data
 
@@ -268,6 +271,14 @@ class RegistrationWorkflow:
                 ctx = self.step_read_email(ctx)
 
         bot = IcrisNnc1FormBot()
+        job_id = int(ctx.job_id or 0)
+        shot_path = (ctx.screenshot_path or "").strip()
+        if job_id and not shot_path:
+            shot_dir = PROJECT_ROOT / "data" / "icris_form_screenshots"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            shot_path = str(shot_dir / f"form_{job_id}_{stamp}.png")
+            ctx.screenshot_path = shot_path
 
         def _run_nnc1() -> tuple[bool, str]:
             return asyncio.run(
@@ -275,6 +286,7 @@ class RegistrationWorkflow:
                     ctx.icris_account,
                     ctx.company_data,
                     force_isolated=force_isolated_browser,
+                    screenshot_path=shot_path,
                     keep_browser=ctx.keep_browser,
                 )
             )
@@ -290,7 +302,18 @@ class RegistrationWorkflow:
             else:
                 with cdp_exclusive_session("cli-nnc1"):
                     ok, detail = _run_nnc1()
-        if ok:
+        if job_id:
+            from src.storage.db import ExternalGroupStore
+
+            store = ExternalGroupStore()
+            if ok:
+                store.mark_job_form_filled(job_id, shot_path)
+                ctx.log(f"ICRIS NNC1 填表成功，截图已写入任务 #{job_id}")
+            else:
+                fail_shot = shot_path if shot_path and Path(shot_path).is_file() else ""
+                store.mark_job_form_failed(job_id, f"填表失败: {detail}", fail_shot)
+                ctx.log(f"ICRIS NNC1 填表失败: {detail}")
+        elif ok:
             ctx.log("ICRIS NNC1 填表完成（未提交）")
         else:
             ctx.log(f"ICRIS NNC1 填表失败: {detail}")

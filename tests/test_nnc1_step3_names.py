@@ -1,6 +1,11 @@
 import unittest
 
-from src.browser.icris_nnc1_form import resolve_nnc1_step3_names
+from src.browser.icris_nnc1_form import (
+    first_real_signatory_index,
+    is_signatory_placeholder,
+    prelim_check_passed,
+    resolve_nnc1_step3_names,
+)
 
 
 class TestResolveNnc1Step3Names(unittest.TestCase):
@@ -79,6 +84,28 @@ class TestResolveNnc1Step3Names(unittest.TestCase):
         self.assertEqual(cn, "胡丹东")
         self.assertEqual(surname, "")
         self.assertEqual(given, "")
+
+
+class TestNnc1SignatoryAndPrelim(unittest.TestCase):
+    def test_signatory_placeholder(self):
+        self.assertTrue(is_signatory_placeholder("请选择"))
+        self.assertTrue(is_signatory_placeholder("請選擇"))
+        self.assertTrue(is_signatory_placeholder(""))
+        self.assertFalse(is_signatory_placeholder("甄欣荣"))
+
+    def test_first_real_signatory_skips_placeholder(self):
+        self.assertEqual(
+            first_real_signatory_index(["请选择", "甄欣荣", "另一人"]),
+            1,
+        )
+
+    def test_prelim_check_passed(self):
+        self.assertTrue(
+            prelim_check_passed("通过。请按“继续”按钮以完成提交过程。")
+        )
+        self.assertTrue(prelim_check_passed("通過，請按繼續"))
+        self.assertFalse(prelim_check_passed("不通过：名称已存在"))
+        self.assertFalse(prelim_check_passed(""))
 
 
 if __name__ == "__main__":

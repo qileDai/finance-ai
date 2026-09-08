@@ -18,10 +18,10 @@
             _fill_step3_form_signatory
   NNC1-4    致商業登記署通知書：选「否」→ 储存及继续
             _fill_step4_br_notice
-  NNC1-5    詳情概要：截图 → 滚到底 → 點「繼續」（不提交）
+  NNC1-5    詳情概要：滚到底 → 點「繼續」
             _fill_step5_summary
-  NNC1-6    簽署及提交：董事同意书（自然人）→ 创办成员陈述书 → 继续 → 前往提交
-            _fill_step6_director_consent_sign（初步检查页点继续后停止，不付款）
+  NNC1-6    簽署及提交：董事同意书 → 创办成员陈述书 → 前往提交 → 初步检查
+            _fill_step6_director_consent_sign（停在初步检查，含通过则成功，不点继续）
 """
 
 from __future__ import annotations
@@ -193,14 +193,32 @@ def resolve_nnc1_step3_names(
     return name_cn, surname, given
 
 
+_SIGNATORY_PLACEHOLDER_RE = re.compile(r"請選擇|请选择|^Select$", re.I)
+_PAGE_VALIDATION_ERROR_RE = re.compile(
+    r"请选择签署人|請選擇簽署人|请勾选空格|請勾選空格|不能为空|不能為空"
+)
+
+
+def is_signatory_placeholder(text: str) -> bool:
+    t = (text or "").strip()
+    return (not t) or bool(_SIGNATORY_PLACEHOLDER_RE.search(t))
+
+
 def first_real_signatory_index(option_texts: list[str]) -> int | None:
     """下拉选项中第一项真实簽署人（跳过请选择），按顺序不按姓名。"""
     for i, raw in enumerate(option_texts):
-        text = (raw or "").strip()
-        if not text or re.search(r"請選擇|请选择|^Select$", text, re.I):
+        if is_signatory_placeholder(raw):
             continue
         return i
     return None
+
+
+def prelim_check_passed(result_text: str) -> bool:
+    """初步检查结果含「通过」才算成功（排除「不通过」）。"""
+    t = result_text or ""
+    if re.search(r"不通过|不通過|未能通过|未能通過", t):
+        return False
+    return bool(re.search(r"通过|通過", t))
 
 
 class IcrisNnc1FormBot:
@@ -211,6 +229,21 @@ class IcrisNnc1FormBot:
     def __init__(self) -> None:
         self.dry_run = settings.dry_run
         self._job_summary_shot_written = False
+        self._job_screenshot_path = ""
+
+    async def _write_job_screenshot(self, page) -> str:
+        dest = (self._job_screenshot_path or "").strip()
+        if not dest:
+            return ""
+        try:
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=dest, full_page=True)
+            self._job_summary_shot_written = True
+            logger.info("NNC1 填表截图已写入: %s", dest)
+            return dest
+        except Exception as e:
+            logger.warning("写入填表截图失败: %s", e)
+            return ""
 
     async def _maybe_screenshot(self, page, label: str) -> str:
         shot_dir = PROJECT_ROOT / "data" / "icris_form_screenshots"
@@ -222,7 +255,40 @@ class IcrisNnc1FormBot:
             logger.info("NNC1 截图 [%s]: %s", label, path)
         except Exception as e:
             logger.warning("截图失败 [%s]: %s", label, e)
+        await self._write_job_screenshot(page)
         return str(path)
+
+    async def _page_validation_error_text(self, page) -> str:
+        raw = await self._eval_in_frames(
+            page,
+            """() => {
+                const texts = [];
+                for (const el of document.querySelectorAll(
+                    '.ant-alert-error, .ant-form-item-explain-error, '
+                    + '.ant-message-error, .ant-notification-notice-error'
+                )) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+                    if (t) texts.push(t);
+                }
+                return texts.join(' ');
+            }""",
+        )
+        blob = str(raw or "").strip()
+        if blob:
+            return blob[:200]
+        body = await self._body_text(page)
+        compact = re.sub(r"\s+", "", body)
+        m = _PAGE_VALIDATION_ERROR_RE.search(compact)
+        return m.group(0) if m else ""
+
+    async def _raise_if_page_error(self, page) -> None:
+        msg = await self._page_validation_error_text(page)
+        if not msg:
+            return
+        await self._maybe_screenshot(page, "page_validation_error")
+        raise RuntimeError(f"页面校验失败: {msg}")
 
     async def _wait_nnc1_step_ready(
         self,
@@ -300,24 +366,8 @@ class IcrisNnc1FormBot:
                 """() => {
                     const body = document.body?.innerText || '';
                     if (!/請選擇創辦成員|请选择创办成员/.test(body)) return false;
+                    if (document.querySelector('.ant-spin-spinning')) return false;
                     const placeholder = /請選擇|请选择|^Select$/i;
-                    const controlReady = (node) => {
-                        if (!node) return false;
-                        const r = node.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) return false;
-                        if (node.tagName === 'SELECT') {
-                            for (const opt of node.options) {
-                                const ot = (opt.textContent || '').trim();
-                                if (ot && !placeholder.test(ot)) return true;
-                            }
-                            return false;
-                        }
-                        const shown = (node.innerText || '').trim();
-                        if (shown && !placeholder.test(shown)) return true;
-                        const item = node.querySelector('.ant-select-selection-item');
-                        const it = (item?.innerText || '').trim();
-                        return !!(it && !placeholder.test(it));
-                    };
                     const afterLabel = (el) => {
                         let n = el.nextElementSibling;
                         while (n) {
@@ -346,16 +396,22 @@ class IcrisNnc1FormBot:
                     )) {
                         const t = norm(el.innerText || '');
                         if (t !== '簽署人' && t !== '签署人') continue;
-                        if (controlReady(afterLabel(el))) return true;
+                        const node = afterLabel(el);
+                        if (!node) continue;
+                        const r = node.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        if (node.tagName === 'SELECT') {
+                            for (const opt of node.options) {
+                                const ot = (opt.textContent || '').trim();
+                                if (ot && !placeholder.test(ot)) return true;
+                            }
+                            continue;
+                        }
+                        return true;
                     }
-                    const visible = [...document.querySelectorAll('.ant-select, select')].filter(n => {
-                        const r = n.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0;
-                    });
-                    if (visible.length >= 2 && controlReady(visible[1])) return true;
-                    return visible.some(controlReady);
+                    return false;
                 }""",
-                timeout=12000,
+                timeout=30000,
             )
             logger.info("创办成员表簽署人下拉已就绪")
         except Exception as e:
@@ -490,6 +546,7 @@ class IcrisNnc1FormBot:
             except Exception:
                 pass
             await page.wait_for_timeout(2000)
+            await self._raise_if_page_error(page)
             return
 
         clicked = await page.evaluate(
@@ -514,6 +571,7 @@ class IcrisNnc1FormBot:
             await wait_spin_clear(page, timeout_ms=90000)
             await page.wait_for_timeout(2000)
             logger.info("已点击「%s」(JS)", clicked)
+            await self._raise_if_page_error(page)
             return
 
         await self._maybe_screenshot(page, "save_continue_fail")
@@ -629,6 +687,7 @@ class IcrisNnc1FormBot:
             except Exception:
                 pass
             await page.wait_for_timeout(2000)
+            await self._raise_if_page_error(page)
             return
 
         clicked = await page.evaluate(
@@ -654,6 +713,7 @@ class IcrisNnc1FormBot:
             await wait_spin_clear(page, timeout_ms=90000)
             await page.wait_for_timeout(2000)
             logger.info("已点击「%s」(JS)", clicked)
+            await self._raise_if_page_error(page)
             return
 
         await self._maybe_screenshot(page, "continue_fail")
@@ -2159,13 +2219,10 @@ class IcrisNnc1FormBot:
         logger.info("NNC1 步骤1: 输入基本资料")
         # --- NNC1-1.1 等待填表页 ---
         await self._wait_nnc1_form_ready(page)
-        await self._maybe_screenshot(page, "step1_before")
         # --- NNC1-1.2 勾选法团印章 ---
         await self._check_common_seal_checkbox(page)
-        await self._maybe_screenshot(page, "step1_checked")
         # --- NNC1-1.3 储存及继续 ---
         await self._click_save_and_continue(page)
-        await self._maybe_screenshot(page, "step1_after")
 
     # ========== NNC1-2 輸入公司資料 ==========
 
@@ -2612,10 +2669,8 @@ class IcrisNnc1FormBot:
         # --- NNC1-2.4 核对名称（防止股本填写误改公司名称：若英文名变成纯数字则重填）---
         await self._ensure_company_names(page, name_en, name_cn)
 
-        await self._maybe_screenshot(page, "step2_filled")
         # --- NNC1-2.5 储存及继续 ---
         await self._click_save_and_continue(page)
-        await self._maybe_screenshot(page, "step2_after")
 
     # ========== NNC1-3.1 创办成员兼董事（自然人） ==========
 
@@ -3714,7 +3769,6 @@ class IcrisNnc1FormBot:
                 (addr.get("street") or "")[:50],
                 (addr.get("region") or "")[:40],
             )
-            await self._maybe_screenshot(page, f"step3_addr_{block_key}")
             return filled > 0
 
         await self._wait_country_region_options(page, block)
@@ -4653,7 +4707,6 @@ class IcrisNnc1FormBot:
 
         if is_hkid:
             logger.info("NNC1-3.1 港证：跳过护照签发国家")
-            await self._maybe_screenshot(page, "step3_identity")
             return
         if plan.get("passport_country"):
             await self._wait_labeled_dropdown_options(
@@ -4670,7 +4723,6 @@ class IcrisNnc1FormBot:
             ):
                 if await self._select_nnc1_passport_country(page, country):
                     break
-        await self._maybe_screenshot(page, "step3_identity")
 
     async def _click_add_to_officer_list(self, page) -> None:
         """点击「加入至創辦成員/高級人員列表」。"""
@@ -4904,11 +4956,9 @@ class IcrisNnc1FormBot:
         """
         await self._mark_signatory_select(page)
         cur = await self._get_signatory_display_text(page)
-        if cur and not re.search(r"請選擇|请选择|^Select$", cur, re.I):
+        if cur and not is_signatory_placeholder(cur):
             logger.info("簽署人已选中: %s", cur[:50])
             return True
-
-        placeholder = r"請選擇|请选择|^Select$"
 
         # native <select>：按 index 选第一项非 placeholder
         picked_native = await page.evaluate(
@@ -5009,8 +5059,14 @@ class IcrisNnc1FormBot:
         if picked:
             await page.wait_for_timeout(500)
             new_val = await self._get_signatory_display_text(page)
-            logger.info("已选簽署人(第一项): %s", (new_val or picked)[:50])
-            return True
+            if new_val and not is_signatory_placeholder(new_val):
+                logger.info("已选簽署人(第一项): %s", new_val[:50])
+                return True
+            logger.warning(
+                "簽署人点击后仍显示请选择 (picked=%s display=%s)",
+                picked[:40],
+                (new_val or "")[:40],
+            )
 
         # 键盘：打开后下箭头选第一项，不读姓名
         try:
@@ -5021,18 +5077,31 @@ class IcrisNnc1FormBot:
             await page.keyboard.press("Enter")
             await page.wait_for_timeout(500)
             final_kb = await self._get_signatory_display_text(page)
-            if final_kb and not re.search(placeholder, final_kb, re.I):
+            if final_kb and not is_signatory_placeholder(final_kb):
                 logger.info("已选簽署人(键盘第一项): %s", final_kb[:50])
                 return True
         except Exception as e:
             logger.debug("簽署人键盘选择失败: %s", e)
 
         final = await self._get_signatory_display_text(page)
-        if final and not re.search(placeholder, final, re.I):
+        if final and not is_signatory_placeholder(final):
             logger.info("簽署人已选中(校验): %s", final[:50])
             return True
         logger.warning("未选到簽署人第一项，当前显示: %s", final[:40] if final else "空")
         return False
+
+    async def _ensure_first_signatory_selected(
+        self, page, *, fail_label: str, err: str
+    ) -> None:
+        for _attempt in range(5):
+            if await self._select_first_signatory(page):
+                cur = await self._get_signatory_display_text(page)
+                if cur and not is_signatory_placeholder(cur):
+                    logger.info("簽署人已确认: %s", cur[:50])
+                    return
+            await page.wait_for_timeout(800)
+        await self._maybe_screenshot(page, fail_label)
+        raise RuntimeError(err)
 
     async def _wait_signatory_confirm_ready(self, page) -> None:
         """选择簽署人后等待页面加载完成（spinner 消失后再点確認）。"""
@@ -5312,13 +5381,11 @@ class IcrisNnc1FormBot:
     async def _confirm_director_consent_signatory(self, page) -> None:
         """簽署人选第一项 → 等待加载 → 確認。"""
         await self._wait_director_consent_signatory_page(page)
-        await self._maybe_screenshot(page, "step3_signatory_before")
-        if not await self._select_first_signatory(page):
-            await page.wait_for_timeout(1500)
-            if not await self._select_first_signatory(page):
-                await self._maybe_screenshot(page, "step3_signatory_select_fail")
-                raise RuntimeError("未能选择簽署人第一项")
-        await self._maybe_screenshot(page, "step3_signatory_selected")
+        await self._ensure_first_signatory_selected(
+            page,
+            fail_label="step3_signatory_select_fail",
+            err="未能选择簽署人第一项",
+        )
         await self._wait_signatory_confirm_ready(page)
         if not await self._click_confirm_button(page):
             await page.wait_for_timeout(2000)
@@ -5936,7 +6003,6 @@ class IcrisNnc1FormBot:
                 company_no,
             )
 
-        await self._maybe_screenshot(page, "step3_secretary_filled")
         await self._click_add_to_officer_list(page)
         await wait_spin_clear(page, timeout_ms=90000)
         await page.wait_for_timeout(1000)
@@ -5998,7 +6064,6 @@ class IcrisNnc1FormBot:
         logger.info("NNC1 步骤3: 輸入創辦成員/董事/公司秘書資料")
         await self._wait_step3_shell_ready(page)
         await self._wait_step3_dictionaries_ready(page)
-        await self._maybe_screenshot(page, "step3_before")
 
         last_err: Exception | None = None
         for attempt in range(3):
@@ -6023,20 +6088,16 @@ class IcrisNnc1FormBot:
             await self._maybe_screenshot(page, "step3_country_fail")
             raise last_err
 
-        await self._maybe_screenshot(page, "step3_filled")
         # --- NNC1-3.1.8 加入创办成员/高级人员列表 ---
         await self._click_add_to_officer_list(page)
         # --- NNC1-3.2 董事同意书签署人 ---
         await self._confirm_director_consent_signatory(page)
         await self._wait_step3_officer_list_page(page)
-        await self._maybe_screenshot(page, "step3_list")
         # --- NNC1-3.3 公司秘书（法人团体）---
         await self._fill_step3_corporate_secretary(page, data)
         await self._wait_step3_officer_list_page(page)
-        await self._maybe_screenshot(page, "step3_secretary_added")
         # --- NNC1-3.4 储存及继续 ---
         await self._click_save_and_continue(page)
-        await self._maybe_screenshot(page, "step3_after")
 
     # ========== NNC1-3.5 创办成员表簽署人 ==========
 
@@ -6055,19 +6116,16 @@ class IcrisNnc1FormBot:
             footer="save_continue",
         )
         await self._wait_form_signatory_dropdown_ready(page)
-        await self._maybe_screenshot(page, "step3_form_signatory_before")
 
         # --- NNC1-3.5.2 簽署人下拉：第一项真实选项 ---
-        if not await self._select_first_signatory(page):
-            await page.wait_for_timeout(1500)
-            if not await self._select_first_signatory(page):
-                await self._maybe_screenshot(page, "step3_form_signatory_fail")
-                raise RuntimeError("未能选择创办成员表簽署人第一项")
-        await self._maybe_screenshot(page, "step3_form_signatory_selected")
+        await self._ensure_first_signatory_selected(
+            page,
+            fail_label="step3_form_signatory_fail",
+            err="未能选择创办成员表簽署人第一项",
+        )
 
         # --- NNC1-3.5.3 储存及继续 → 步骤4 ---
         await self._click_save_and_continue(page)
-        await self._maybe_screenshot(page, "step3_form_signatory_after")
 
     # ========== NNC1-4 致商業登記署通知書 ==========
 
@@ -6134,57 +6192,29 @@ class IcrisNnc1FormBot:
             label="4 商業登記署通知書",
             footer="save_continue",
         )
-        await self._maybe_screenshot(page, "step4_before")
 
         # --- NNC1-4.2 选「否」（一年期商业登记证）---
         if not await self._select_br_notice_no(page):
             await self._maybe_screenshot(page, "step4_no_fail")
             raise RuntimeError("未能选择「致商業登記署通知書」否")
-        await self._maybe_screenshot(page, "step4_no_selected")
 
         # --- NNC1-4.3 储存及继续 → 步骤5 ---
         await self._click_save_and_continue(page)
-        await self._maybe_screenshot(page, "step4_after")
 
     # ========== NNC1-5 詳情概要 ==========
 
-    async def _fill_step5_summary(self, page, screenshot_path: str = "") -> bool:
-        """NNC1-5：詳情概要 — 先截图保存，滚到底，点「繼續」。不填步骤6、不提交。
-
-        返回是否已写入 screenshot_path（供 run() finally 避免覆盖）。
-        """
+    async def _fill_step5_summary(self, page) -> None:
+        """NNC1-5：詳情概要 — 滚到底，点「繼續」。"""
         logger.info("NNC1 步骤5: 詳情概要")
-        wrote_job_shot = False
-
-        # --- NNC1-5.1 等待詳情概要加载完成 ---
         await self._wait_nnc1_step_ready(
             page,
             heading_js=r"步驟\s*5|步骤\s*5|詳情概要|详情概要",
             label="5 詳情概要",
             footer="continue",
         )
-
-        # --- NNC1-5.2 截图保存（任务 form 核对用这张）---
-        await self._maybe_screenshot(page, "step5_summary")
-        dest = (screenshot_path or "").strip()
-        if dest:
-            try:
-                Path(dest).parent.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=dest, full_page=True)
-                wrote_job_shot = True
-                self._job_summary_shot_written = True
-                logger.info("NNC1 步骤5 概要已写入: %s", dest)
-            except Exception as e:
-                logger.warning("步骤5 写入 screenshot_path 失败: %s", e)
-
-        # --- NNC1-5.3 滚到最底部 ---
         await self._scroll_form_to_bottom(page)
         await page.wait_for_timeout(400)
-
-        # --- NNC1-5.4 點「繼續」（不是储存及继续）---
         await self._click_continue_only(page)
-        await self._maybe_screenshot(page, "step5_after_continue")
-        return wrote_job_shot
 
     # ========== NNC1-6 簽署及提交（董事同意书） ==========
 
@@ -6894,7 +6924,6 @@ class IcrisNnc1FormBot:
         """NNC1-6.6：签「创办成员陈述书」，到已成功签署确定。"""
         logger.info("NNC1 步骤6: 签署创办成员陈述书")
         await self._wait_founder_statement_row_ready(page)
-        await self._maybe_screenshot(page, "step6_founder_table")
         await self._click_founder_statement_preview_sign(page)
 
         if await self._sign_modal_visible(page) != "consent":
@@ -6904,7 +6933,6 @@ class IcrisNnc1FormBot:
                 await self._click_continue_only(page)
         await page.wait_for_timeout(500)
         await self._complete_step6_sign_modal(page, account)
-        await self._maybe_screenshot(page, "step6_founder_signed")
 
     async def _wait_step6_both_signed_continue(self, page) -> None:
         """确定后加载：两份已签署，底栏「继续」可点。"""
@@ -7061,8 +7089,36 @@ class IcrisNnc1FormBot:
             pass
         await page.wait_for_timeout(1000)
 
+    async def _read_preliminary_check_result(self, page) -> str:
+        text = await self._eval_in_frames(
+            page,
+            """() => {
+                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+                const labelRe = /初步檢查結果|初步检查结果|Preliminary\\s*Check\\s*Result/i;
+                for (const tr of document.querySelectorAll('tr')) {
+                    const cells = [...tr.querySelectorAll('th, td')];
+                    if (cells.length < 2) continue;
+                    if (!labelRe.test(norm(cells[0].innerText))) continue;
+                    return norm(cells.slice(1).map(c => c.innerText).join(' '));
+                }
+                for (const el of document.querySelectorAll(
+                    'div, td, th, li, p, span, dt, dd'
+                )) {
+                    const t = norm(el.innerText);
+                    if (!labelRe.test(t) || t.length > 80) continue;
+                    const row = el.closest('tr, .ant-row, .ant-descriptions-item, dl, div');
+                    if (!row) continue;
+                    return norm(row.innerText).replace(labelRe, '').replace(/^[:：\\s]+/, '');
+                }
+                const body = document.body?.innerText || '';
+                const m = body.match(/初步檢查結果[:：\\s]*([^\\n]+)|初步检查结果[:：\\s]*([^\\n]+)/);
+                return ((m && (m[1] || m[2])) || '').trim();
+            }""",
+        )
+        return str(text or "").strip()
+
     async def _wait_preliminary_check_and_continue(self, page) -> None:
-        """图四：初步检查页加载完后点继续。"""
+        """到初步检查页：截图判定是否含通过，不点继续、不进付款页。"""
         logger.info("NNC1 步骤6: 等待初步检查页")
         await wait_spin_clear(page, timeout_ms=90000)
         try:
@@ -7080,30 +7136,31 @@ class IcrisNnc1FormBot:
         except Exception as e:
             await self._maybe_screenshot(page, "step6_prelim_wait_fail")
             raise RuntimeError(f"初步检查页加载超时: {e}")
+        await page.wait_for_timeout(500)
+        result = await self._read_preliminary_check_result(page)
         await self._maybe_screenshot(page, "step6_preliminary_check")
-        await self._click_continue_only(page)
-        logger.info("NNC1 步骤6: 已在初步检查页点击继续")
+        if not prelim_check_passed(result):
+            reason = result or "初步检查结果未通过"
+            raise RuntimeError(f"初步检查未通过: {reason}")
+        logger.info("初步检查通过: %s", result[:120])
 
     async def _fill_step6_proceed_submit(self, page) -> None:
-        """两份已签署 → 继续 → 前往提交 → 存档是 → 初步检查继续。"""
+        """两份已签署 → 继续 → 前往提交 → 存档是 → 初步检查（不点继续）。"""
         logger.info("NNC1 步骤6: 前往提交")
         await self._wait_step6_both_signed_continue(page)
-        await self._maybe_screenshot(page, "step6_both_signed")
         await self._click_continue_only(page)
         await self._click_goto_submit(page)
         await self._click_save_record_yes(page)
         await self._wait_preliminary_check_and_continue(page)
-        await self._maybe_screenshot(page, "step6_after_prelim_continue")
 
     async def _fill_step6_director_consent_sign(
         self, page, account: IcrisAccount
     ) -> None:
-        """NNC1-6：签董事同意书、创办成员陈述书，再前往提交到初步检查继续。"""
+        """NNC1-6：签董事同意书、创办成员陈述书，再前往提交到初步检查。"""
         logger.info("NNC1 步骤6: 簽署及提交（董事同意书）")
 
         # --- NNC1-6.0 进入签署表（整表预览则再點繼續）---
         await self._ensure_step6_sign_table(page)
-        await self._maybe_screenshot(page, "step6_table")
 
         # --- NNC1-6.1 預覽並簽署 ---
         await self._click_director_consent_preview_sign(page)
@@ -7118,7 +7175,6 @@ class IcrisNnc1FormBot:
 
         # --- NNC1-6.3～6.5 弹窗签署 → 確定 ---
         await self._complete_step6_sign_modal(page, account)
-        await self._maybe_screenshot(page, "step6_director_signed")
 
         # --- NNC1-6.6 创办成员陈述书 ---
         await self._fill_step6_founder_statement_sign(page, account)
@@ -7147,6 +7203,7 @@ class IcrisNnc1FormBot:
             context = await create_browser_context(browser)
             page = await context.new_page()
             await self._maximize_browser_window(page)
+            self._job_screenshot_path = (screenshot_path or "").strip()
             self._job_summary_shot_written = False
 
             try:
@@ -7189,7 +7246,6 @@ class IcrisNnc1FormBot:
                 else:
                     await self._open_nnc1(page)
                     await self._accept_efiling_terms(page)
-                await self._maybe_screenshot(page, "after_terms")
 
                 # --- NNC1-1 輸入基本資料 ---
                 await self._fill_step1_basic_info(page, data)
@@ -7201,15 +7257,13 @@ class IcrisNnc1FormBot:
                 await self._fill_step3_form_signatory(page)
                 # --- NNC1-4 致商業登記署通知書 ---
                 await self._fill_step4_br_notice(page)
-                # --- NNC1-5 詳情概要（截图后點繼續）---
-                await self._fill_step5_summary(
-                    page, screenshot_path
-                )
-                # --- NNC1-6 簽署及提交（董事同意书，不提交）---
+                # --- NNC1-5 詳情概要 ---
+                await self._fill_step5_summary(page)
+                # --- NNC1-6 簽署及提交（停在初步检查，不进付款）---
                 await self._fill_step6_director_consent_sign(page, account)
 
                 logger.info(
-                    "IcrisNnc1FormBot: NNC1 步骤1-6 已签署并前往提交（初步检查后已点继续，未付款）"
+                    "IcrisNnc1FormBot: NNC1 步骤1-6 完成（初步检查通过，未进入付款页）"
                 )
                 return True, screenshot_path or ""
             except Exception as e:
