@@ -180,6 +180,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 sys.exit(1)
             ctx.icris_account = IcrisAccount(username=username, password=password)
             ctx.keep_browser = bool(getattr(args, "keep_browser", False))
+            ctx.job_id = int(job_id)
             print(f"[数据] 已从任务 #{int(job_id)} 加载 payload，NNC1 登录账号={username}")
             if ctx.keep_browser:
                 print("[提示] --keep-browser：填表结束后不关闭浏览器，按 Ctrl+C 结束进程")

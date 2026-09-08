@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -14,6 +15,33 @@ logger = logging.getLogger(__name__)
 
 _FORM_PAUSE_MS = 800
 
+# True when ICRIS full-page loading overlay is visible (ant-spin or 载入中 modal).
+# Match visible 載入中… / 载入中... / 加载中 (ellipsis or dots). Do not use body.length.
+ICRIS_PAGE_IS_LOADING_JS = """(() => {
+  if (document.querySelector('.ant-spin-spinning')) return true;
+  const vis = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) !== 0;
+  };
+  for (const el of document.querySelectorAll(
+    '.ant-modal-mask, .ant-drawer-mask, .ant-spin-container.ant-spin-blur'
+  )) {
+    if (vis(el)) return true;
+  }
+  const re = /載入中|载入中|加载中/; // 載入中… 载入中...
+  for (const el of document.querySelectorAll(
+    'div, span, p, label, h1, h2, h3, h4, .ant-modal, .ant-modal-content, .ant-spin, [role=dialog]'
+  )) {
+    if (!vis(el)) continue;
+    const t = (el.innerText || '').replace(/\\s+/g, '').trim();
+    if (t.length < 24 && re.test(t)) return true;
+  }
+  return false;
+})()"""
+
 
 def is_cr_public_site(url: str) -> bool:
     """是否被重定向到公司注册处公开网站（非 e-services 子域）。"""
@@ -23,22 +51,45 @@ def is_cr_public_site(url: str) -> bool:
     return "cr.gov.hk" in host
 
 
-async def wait_spin_clear(page: "Page", timeout_ms: int = 20000) -> bool:
-    """等待全页 loading spinner 结束。"""
+async def is_page_loading(page: "Page") -> bool:
+    """全页 ant-spin 或「载入中」遮罩是否可见。求值失败时当仍在加载。"""
     try:
-        spinning = await page.evaluate(
-            "() => !!document.querySelector('.ant-spin-spinning')"
-        )
-        if not spinning:
+        return bool(await page.evaluate(f"() => {ICRIS_PAGE_IS_LOADING_JS}"))
+    except Exception:
+        return True
+
+
+async def wait_spin_clear(page: "Page", timeout_ms: int = 20000) -> bool:
+    """等待全页 loading spinner /「载入中」遮罩结束。超时返回 False，不当成已加载完。"""
+    try:
+        if not await is_page_loading(page):
             return True
         logger.info("等待页面 loading…")
         await page.wait_for_function(
-            "() => !document.querySelector('.ant-spin-spinning')",
+            f"() => !({ICRIS_PAGE_IS_LOADING_JS})",
             timeout=timeout_ms,
         )
         return True
     except Exception:
-        return True
+        logger.warning("等待页面 loading 超时，遮罩可能仍在")
+        return False
+
+
+async def wait_after_nav_loading(
+    page: "Page",
+    timeout_ms: int = 90000,
+    appear_ms: int = 1000,
+) -> None:
+    """导航点击后：短等 loading 出现，再等到遮罩消失。"""
+    deadline = time.monotonic() + appear_ms / 1000.0
+    while time.monotonic() < deadline:
+        if await is_page_loading(page):
+            break
+        try:
+            await page.wait_for_timeout(100)
+        except Exception:
+            break
+    await wait_spin_clear(page, timeout_ms=timeout_ms)
 
 
 async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:

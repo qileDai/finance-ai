@@ -36,12 +36,15 @@ from typing import Any
 
 from config.settings import PROJECT_ROOT, settings
 from src.browser.icris_ui_common import (
+    ICRIS_PAGE_IS_LOADING_JS,
     dismiss_cookie_banner,
     dismiss_google_translate,
     dismiss_portal_modals,
     is_cr_public_site,
+    is_page_loading,
     is_simplified_chinese_active,
     page_language_state,
+    wait_after_nav_loading,
     wait_portal_ready,
     wait_spin_clear,
 )
@@ -213,6 +216,66 @@ def first_real_signatory_index(option_texts: list[str]) -> int | None:
     return None
 
 
+# 与 _mark_signatory_select / 3.5 等待共用：找到可见簽署人下拉即可，不必等 option 灌完。
+_NNC1_FIND_SIGNATORY_FN = r"""
+function nnc1FindSignatoryControl() {
+    const vis = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+    const afterLabel = (el) => {
+        let n = el.nextElementSibling;
+        while (n) {
+            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') return n;
+            const inner = n.querySelector('.ant-select, select');
+            if (inner) return inner;
+            n = n.nextElementSibling;
+        }
+        n = el.parentElement?.nextElementSibling || null;
+        while (n) {
+            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') return n;
+            const inner = n.querySelector('.ant-select, select');
+            if (inner) return inner;
+            n = n.nextElementSibling;
+        }
+        return null;
+    };
+    const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+    const isSignatoryLabel = (t) => /^(簽署人|签署人)[:：]?$/.test(t) && t.length <= 8;
+    for (const el of document.querySelectorAll('label, span, td, th, div, p')) {
+        const t = norm(el.innerText || '');
+        if (!isSignatoryLabel(t)) continue;
+        const node = afterLabel(el);
+        if (vis(node)) return node;
+    }
+    const visible = [...document.querySelectorAll('.ant-select, select')].filter(vis);
+    if (visible.length >= 2) return visible[1];
+    if (visible.length === 1) return visible[0];
+    for (const el of document.querySelectorAll(
+        'legend, label, span, div, th, p, td'
+    )) {
+        const raw = (el.innerText || '').trim();
+        if (!/請選擇出任董事職位同意書的簽署人|选择出任董事职位同意书的签署人|請選擇創辦成員.*簽署人|请选择创办成员.*签署人/i.test(raw)) {
+            continue;
+        }
+        const seen = new Set();
+        const queue = [el, el.parentElement];
+        while (queue.length) {
+            const node = queue.shift();
+            if (!node || seen.has(node)) continue;
+            seen.add(node);
+            if (node.classList?.contains('ant-select') && vis(node)) return node;
+            if (node.tagName === 'SELECT' && vis(node)) return node;
+            for (const child of node.children || []) queue.push(child);
+            if (node.nextElementSibling) queue.push(node.nextElementSibling);
+        }
+    }
+    return null;
+}
+"""
+
+
 def prelim_check_passed(result_text: str) -> bool:
     """初步检查结果含「通过」才算成功（排除「不通过」）。"""
     t = result_text or ""
@@ -311,12 +374,9 @@ class IcrisNnc1FormBot:
             pass
         try:
             await page.wait_for_function(
-                """({ headingSrc, footer }) => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
-                    const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
-                        return false;
-                    }
+                "({ headingSrc, footer }) => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const body = document.body?.innerText || '';
                     if (!new RegExp(headingSrc, 'i').test(body)) return false;
                     if (footer === 'none') return true;
                     const savePat = /(储存|存储|儲存)及(继续|繼續)|Save\\s*(?:and|&)\\s*Continue/i;
@@ -347,77 +407,28 @@ class IcrisNnc1FormBot:
             shot = re.sub(r"[^\w]+", "_", label).strip("_")[:40] or "step"
             await self._maybe_screenshot(page, f"{shot}_wait_fail")
             raise RuntimeError(f"NNC1 {label} 页面加载超时: {e}")
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(200)
 
     async def _wait_form_signatory_dropdown_ready(self, page) -> None:
-        """创办成员表簽署人页：等「簽署人」下拉出现且选项已加载，再允许点选。
+        """创办成员表簽署人页：等簽署人控件可见即可，不必空等 option 灌入。
 
-        `_wait_nnc1_step_ready` 只看到标题和底栏「储存及继续」，Vue 下拉选项
-        往往更晚才到；过早 `_select_first_signatory` 会点在空控件上。
+        选项可能要点开下拉才出现；`_select_first_signatory` 会打开再选。
         """
-        logger.info("等待创办成员表簽署人下拉选项加载")
+        logger.info("等待创办成员表簽署人下拉")
         await wait_spin_clear(page, timeout_ms=20000)
         try:
-            await page.wait_for_load_state("networkidle", timeout=8000)
-        except Exception:
-            logger.debug("簽署人页 networkidle 超时，继续等下拉")
-        try:
             await page.wait_for_function(
-                """() => {
-                    const body = document.body?.innerText || '';
-                    if (!/請選擇創辦成員|请选择创办成员/.test(body)) return false;
-                    if (document.querySelector('.ant-spin-spinning')) return false;
-                    const placeholder = /請選擇|请选择|^Select$/i;
-                    const afterLabel = (el) => {
-                        let n = el.nextElementSibling;
-                        while (n) {
-                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
-                                return n;
-                            }
-                            const inner = n.querySelector('.ant-select, select');
-                            if (inner) return inner;
-                            n = n.nextElementSibling;
-                        }
-                        const parent = el.parentElement;
-                        n = parent?.nextElementSibling || null;
-                        while (n) {
-                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
-                                return n;
-                            }
-                            const inner = n.querySelector('.ant-select, select');
-                            if (inner) return inner;
-                            n = n.nextElementSibling;
-                        }
-                        return null;
-                    };
-                    const norm = (s) => (s || '').replace(/\\s+/g, '').trim();
-                    for (const el of document.querySelectorAll(
-                        'label, span, td, th, div, p'
-                    )) {
-                        const t = norm(el.innerText || '');
-                        if (t !== '簽署人' && t !== '签署人') continue;
-                        const node = afterLabel(el);
-                        if (!node) continue;
-                        const r = node.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) continue;
-                        if (node.tagName === 'SELECT') {
-                            for (const opt of node.options) {
-                                const ot = (opt.textContent || '').trim();
-                                if (ot && !placeholder.test(ot)) return true;
-                            }
-                            continue;
-                        }
-                        return true;
-                    }
-                    return false;
+                "() => {\n"
+                + _NNC1_FIND_SIGNATORY_FN
+                + f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    return !!nnc1FindSignatoryControl();
                 }""",
-                timeout=30000,
+                timeout=8000,
             )
             logger.info("创办成员表簽署人下拉已就绪")
         except Exception as e:
-            logger.warning("簽署人下拉等待超时，仍尝试选第一项: %s", e)
-            await self._maybe_screenshot(page, "step3_form_signatory_wait_fail")
-        await page.wait_for_timeout(500)
+            logger.debug("簽署人下拉短暂等待结束，继续选第一项: %s", e)
+        await page.wait_for_timeout(200)
 
     async def _wait_nnc1_save_continue_ready(self, page) -> None:
         """等待步骤底栏「储存/存储及继续」按钮渲染完成。"""
@@ -427,19 +438,14 @@ class IcrisNnc1FormBot:
             await page.wait_for_load_state("domcontentloaded", timeout=45000)
         except Exception:
             pass
-        try:
-            await page.wait_for_load_state("networkidle", timeout=45000)
-        except Exception:
-            logger.debug("NNC1 底栏 networkidle 超时，继续等待按钮")
 
         await self._scroll_form_to_bottom(page)
 
         try:
             await page.wait_for_function(
-                """() => {
-                    const body = document.body?.innerText || '';
-                    if (document.querySelector('.ant-spin-spinning')) return false;
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 400) return false;
+                "() => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const body = document.body?.innerText || '';
                     const pat = /(储存|存储|儲存)及(继续|繼續)|Save\\s*(?:and|&)\\s*Continue/i;
                     for (const el of document.querySelectorAll(
                         'button, a, input[type=button], input[type=submit], [role=button], .btn'
@@ -540,12 +546,11 @@ class IcrisNnc1FormBot:
                 )
             except Exception:
                 pass
-            await wait_spin_clear(page, timeout_ms=90000)
+            await wait_after_nav_loading(page, timeout_ms=90000)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=60000)
             except Exception:
                 pass
-            await page.wait_for_timeout(2000)
             await self._raise_if_page_error(page)
             return
 
@@ -568,8 +573,7 @@ class IcrisNnc1FormBot:
             }"""
         )
         if clicked:
-            await wait_spin_clear(page, timeout_ms=90000)
-            await page.wait_for_timeout(2000)
+            await wait_after_nav_loading(page, timeout_ms=90000)
             logger.info("已点击「%s」(JS)", clicked)
             await self._raise_if_page_error(page)
             return
@@ -611,12 +615,11 @@ class IcrisNnc1FormBot:
         except Exception:
             await chosen.click(force=True, timeout=15000)
         logger.info("已点击「%s」返回上一步", chosen_label)
-        await wait_spin_clear(page, timeout_ms=90000)
+        await wait_after_nav_loading(page, timeout_ms=90000)
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=60000)
         except Exception:
             pass
-        await page.wait_for_timeout(1500)
 
     async def _reenter_step3_from_step2(self, page) -> None:
         """國家／地區 仍空：返回步骤2（不 F5）再储存及继续进入步骤3。"""
@@ -681,12 +684,11 @@ class IcrisNnc1FormBot:
                 )
             except Exception:
                 pass
-            await wait_spin_clear(page, timeout_ms=90000)
+            await wait_after_nav_loading(page, timeout_ms=90000)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=60000)
             except Exception:
                 pass
-            await page.wait_for_timeout(2000)
             await self._raise_if_page_error(page)
             return
 
@@ -710,8 +712,7 @@ class IcrisNnc1FormBot:
             }"""
         )
         if clicked:
-            await wait_spin_clear(page, timeout_ms=90000)
-            await page.wait_for_timeout(2000)
+            await wait_after_nav_loading(page, timeout_ms=90000)
             logger.info("已点击「%s」(JS)", clicked)
             await self._raise_if_page_error(page)
             return
@@ -1947,17 +1948,12 @@ class IcrisNnc1FormBot:
             await page.wait_for_load_state("domcontentloaded", timeout=45000)
         except Exception:
             pass
-        try:
-            await page.wait_for_load_state("networkidle", timeout=45000)
-        except Exception:
-            logger.debug("e-filing networkidle 超时，继续等待条款 DOM")
 
         try:
             await page.wait_for_function(
-                """() => {
-                    const body = document.body ? document.body.innerText : '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 400) return false;
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                "() => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const body = document.body ? document.body.innerText : '';
                     const hasTerms = /条款及条件|條款及條件|Terms and Conditions|电子提交服务|電子提交服務/.test(body);
                     if (!hasTerms) return false;
                     for (const el of document.querySelectorAll(
@@ -2074,12 +2070,11 @@ class IcrisNnc1FormBot:
                 )
             except Exception:
                 pass
-            await wait_spin_clear(page, timeout_ms=60000)
+            await wait_after_nav_loading(page, timeout_ms=60000)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=60000)
             except Exception:
                 pass
-            await page.wait_for_timeout(2000)
             logger.info("条款接受后 URL: %s", page.url[:120])
             await self._wait_after_accept(page)
             return
@@ -2106,8 +2101,7 @@ class IcrisNnc1FormBot:
             }"""
         )
         if clicked:
-            await wait_spin_clear(page, timeout_ms=60000)
-            await page.wait_for_timeout(2500)
+            await wait_after_nav_loading(page, timeout_ms=60000)
             logger.info("已点击 e-filing 接受 (JS)，URL: %s", page.url[:120])
             await self._wait_after_accept(page)
             return
@@ -2117,8 +2111,7 @@ class IcrisNnc1FormBot:
             await accept_btn.scroll_into_view_if_needed()
             await page.wait_for_timeout(300)
             await accept_btn.click(force=True, timeout=15000)
-            await wait_spin_clear(page, timeout_ms=60000)
-            await page.wait_for_timeout(2500)
+            await wait_after_nav_loading(page, timeout_ms=60000)
             logger.info("已点击 e-filing 接受 (get_by_text)，URL: %s", page.url[:120])
             await self._wait_after_accept(page)
             return
@@ -2141,7 +2134,7 @@ class IcrisNnc1FormBot:
         except Exception as e:
             logger.warning("等待 NNC1 填表页超时: %s, url=%s", e, page.url[:120])
         await wait_spin_clear(page, timeout_ms=60000)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(300)
 
     # ========== NNC1-1 輸入基本資料 ==========
 
@@ -2152,15 +2145,10 @@ class IcrisNnc1FormBot:
         except Exception:
             pass
         try:
-            await page.wait_for_load_state("networkidle", timeout=45000)
-        except Exception:
-            logger.debug("NNC1 networkidle 超时，继续等待表单 DOM")
-        try:
             await page.wait_for_function(
-                """() => {
-                    const body = document.body?.innerText || '';
-                    if (document.querySelector('.ant-spin-spinning')) return false;
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 400) return false;
+                "() => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const body = document.body?.innerText || '';
                     return /输入基本资料|輸入基本資料|选择语言|選擇語言|法团印章|法團印章/.test(body);
                 }""",
                 timeout=90000,
@@ -2623,9 +2611,9 @@ class IcrisNnc1FormBot:
             pass
         try:
             await page.wait_for_function(
-                """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
-                    const t = document.body?.innerText || '';
+                "() => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const t = document.body?.innerText || '';
                     return /输入公司资料|輸入公司資料|公司英文名称|公司英文名稱/.test(t);
                 }""",
                 timeout=90000,
@@ -2779,20 +2767,13 @@ class IcrisNnc1FormBot:
             await page.wait_for_load_state("domcontentloaded", timeout=45000)
         except Exception:
             pass
-        try:
-            await page.wait_for_load_state("networkidle", timeout=60000)
-        except Exception:
-            logger.debug("步骤3 networkidle 超时，继续等待 DOM")
 
         try:
             await page.wait_for_function(
-                """() => {
-                    const body = document.body?.innerText || '';
+                "() => {\n"
+                f"                    if ({ICRIS_PAGE_IS_LOADING_JS}) return false;\n"
+                """                    const body = document.body?.innerText || '';
                     if (!/步驟\\s*3|步骤\\s*3|輸入創辦成員|输入创办成员/.test(body)) {
-                        return false;
-                    }
-                    const spinning = !!document.querySelector('.ant-spin-spinning');
-                    if (spinning && /載入中|加载中/.test(body) && body.length < 800) {
                         return false;
                     }
                     let natural = false;
@@ -2820,15 +2801,6 @@ class IcrisNnc1FormBot:
             await self._maybe_screenshot(page, "step3_wait_shell_fail")
             raise RuntimeError(f"步骤3 页面加载超时: {e}")
 
-    async def _wait_step3_dictionaries_ready(self, page) -> None:
-        """壳出来后再等 networkidle + spinner，避免國家／地區 字典未到。"""
-        await wait_spin_clear(page, timeout_ms=45000)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=30000)
-        except Exception:
-            logger.debug("步骤3 dictionaries networkidle 超时，继续")
-        await wait_spin_clear(page, timeout_ms=30000)
-
     async def _wait_step3_form_expanded(self, page) -> None:
         """勾选身分后等待姓名/股本等详情表单展开。"""
         logger.info("等待 NNC1 步骤3 人员详情表单")
@@ -2836,7 +2808,7 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const nameRe = /中文姓名|英文姓氏|中文名稱|英文名字/;
                     for (const el of document.querySelectorAll(
                         'label, .rowTitle, span, div, th, td'
@@ -2866,7 +2838,7 @@ class IcrisNnc1FormBot:
         except Exception as e:
             await self._maybe_screenshot(page, "step3_wait_expand_fail")
             raise RuntimeError(f"步骤3 人员表单展开超时: {e}")
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(400)
 
     def _capacity_row_js_helpers(self) -> str:
         """身分行定位与短标签分类的共用 JS 片段。"""
@@ -3572,9 +3544,7 @@ class IcrisNnc1FormBot:
         await wait_spin_clear(page, timeout_ms=30000)
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
-            spinning = await page.evaluate(
-                "() => !!document.querySelector('.ant-spin-spinning')"
-            )
+            spinning = await is_page_loading(page)
             if spinning:
                 await wait_spin_clear(page, timeout_ms=10000)
             n = await self._count_country_region_options(block)
@@ -4780,8 +4750,8 @@ class IcrisNnc1FormBot:
 
         def _signatory_ready_js() -> str:
             return """() => {
+                if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return '';
                 const body = document.body?.innerText || '';
-                if (/載入中|加载中|Loading/i.test(body) && body.length < 500) return '';
                 const hasHeading = /請選擇出任董事職位同意書的簽署人|选择出任董事职位同意书的签署人|出任董事職位同意書.*簽署人/i.test(body);
                 const hasLabel = /簽署人|签署人/.test(body);
                 if (!hasHeading && !hasLabel) return '';
@@ -4838,83 +4808,16 @@ class IcrisNnc1FormBot:
     async def _mark_signatory_select(self, page) -> bool:
         return bool(
             await page.evaluate(
-                """() => {
+                "() => {\n"
+                + _NNC1_FIND_SIGNATORY_FN
+                + """
                     document.querySelectorAll('[data-nnc1-signatory-select]').forEach(el => {
                         el.removeAttribute('data-nnc1-signatory-select');
                     });
-                    const mark = (ant) => {
-                        if (!ant) return false;
-                        ant.setAttribute('data-nnc1-signatory-select', '1');
-                        return true;
-                    };
-                    const afterLabel = (el) => {
-                        let n = el.nextElementSibling;
-                        while (n) {
-                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
-                                return n;
-                            }
-                            const inner = n.querySelector('.ant-select, select');
-                            if (inner) return inner;
-                            n = n.nextElementSibling;
-                        }
-                        n = el.parentElement?.nextElementSibling || null;
-                        while (n) {
-                            if (n.classList?.contains('ant-select') || n.tagName === 'SELECT') {
-                                return n;
-                            }
-                            const inner = n.querySelector('.ant-select, select');
-                            if (inner) return inner;
-                            n = n.nextElementSibling;
-                        }
-                        return null;
-                    };
-                    const norm = s => (s || '').replace(/\\s+/g, '').trim();
-
-                    // 只认短标签「簽署人」后面的下拉，不要标到上面的创办成员姓名框
-                    for (const el of document.querySelectorAll(
-                        'label, span, td, th, div, p'
-                    )) {
-                        const t = norm(el.innerText || '');
-                        if (t !== '簽署人' && t !== '签署人') continue;
-                        const node = afterLabel(el);
-                        if (mark(node)) return true;
-                    }
-
-                    const visible = [...document.querySelectorAll('.ant-select, select')].filter(n => {
-                        const r = n.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0;
-                    });
-                    if (visible.length >= 2) return mark(visible[1]);
-                    if (visible.length === 1) return mark(visible[0]);
-
-                    for (const el of document.querySelectorAll(
-                        'legend, label, span, div, th, p, td'
-                    )) {
-                        const raw = (el.innerText || '').trim();
-                        if (!/請選擇出任董事職位同意書的簽署人|选择出任董事职位同意书的签署人|請選擇創辦成員.*簽署人|请选择创办成员.*签署人/i.test(raw)) {
-                            continue;
-                        }
-                        const walk = (start) => {
-                            const seen = new Set();
-                            const queue = [start];
-                            while (queue.length) {
-                                const node = queue.shift();
-                                if (!node || seen.has(node)) continue;
-                                seen.add(node);
-                                if (node.classList?.contains('ant-select')) return mark(node);
-                                if (node.tagName === 'SELECT') {
-                                    node.setAttribute('data-nnc1-signatory-select', '1');
-                                    return true;
-                                }
-                                for (const child of node.children || []) queue.push(child);
-                                if (node.nextElementSibling) queue.push(node.nextElementSibling);
-                            }
-                            return false;
-                        };
-                        if (walk(el)) return true;
-                        if (el.parentElement && walk(el.parentElement)) return true;
-                    }
-                    return false;
+                    const node = nnc1FindSignatoryControl();
+                    if (!node) return false;
+                    node.setAttribute('data-nnc1-signatory-select', '1');
+                    return true;
                 }"""
             )
         )
@@ -5104,17 +5007,39 @@ class IcrisNnc1FormBot:
         raise RuntimeError(err)
 
     async def _wait_signatory_confirm_ready(self, page) -> None:
-        """选择簽署人后等待页面加载完成（spinner 消失后再点確認）。"""
+        """选择簽署人后等待 spinner 消失且「確認」可点。"""
         logger.info("等待簽署人选择后页面就绪")
         await wait_spin_clear(page, timeout_ms=90000)
-        await page.wait_for_timeout(1500)
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=30000)
         except Exception:
             pass
         await wait_spin_clear(page, timeout_ms=60000)
-        # 不再强依赖 body 文案含「確認」（按钮可能是 value/css/特殊节点）
-        await page.wait_for_timeout(800)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
+                    const compact = s => (s || '').replace(/\\s+/g, '');
+                    const isConfirm = t => /^(確認|确认|Confirm)$/i.test(compact(t));
+                    for (const el of document.querySelectorAll(
+                        'button, a, input[type=button], input[type=submit], [role=button], .btn, .ant-btn'
+                    )) {
+                        const t = compact(
+                            el.innerText || el.value || el.getAttribute('aria-label') || ''
+                        );
+                        if (!isConfirm(t)) continue;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+                        if (el.classList?.contains('ant-btn-disabled')) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return true;
+                    }
+                    return false;
+                }""",
+                timeout=30000,
+            )
+        except Exception:
+            logger.debug("簽署人頁「確認」等待超时，继续尝试点击")
+        await page.wait_for_timeout(200)
         logger.info("簽署人选择后加载等待结束，准备点击確認")
 
     async def _dump_signatory_click_candidates(self, page) -> None:
@@ -5406,9 +5331,8 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) return false;
                     if (!/創辦成員.*高級人員列表|创办成员.*高级人员列表|創辦成員\\/高級人員/.test(body)) {
                         return false;
                     }
@@ -5483,7 +5407,7 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
                     return /是否為在香港註冊的法人團體|是否为在香港注册的法人团体|商業登記號碼|商业登记号码/.test(body);
                 }""",
@@ -6014,7 +5938,7 @@ class IcrisNnc1FormBot:
         # --- NNC1-3.1.1 类型：自然人 ---
         if not await self._select_natural_person(page):
             logger.warning("未能选择自然人，继续尝试填表")
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(300)
 
         # --- NNC1-3.1.2 身分：创办成员 + 董事 ---
         await self._ensure_step3_identity_checkboxes(page)
@@ -6063,14 +5987,12 @@ class IcrisNnc1FormBot:
         """步骤3：創辦成員/董事 — 类型/身分、姓名、认购股本、地址、证件、加入列表。"""
         logger.info("NNC1 步骤3: 輸入創辦成員/董事/公司秘書資料")
         await self._wait_step3_shell_ready(page)
-        await self._wait_step3_dictionaries_ready(page)
 
         last_err: Exception | None = None
         for attempt in range(3):
             try:
                 if attempt > 0:
                     await self._reenter_step3_from_step2(page)
-                    await self._wait_step3_dictionaries_ready(page)
                 await self._fill_step3_person_form(page, data)
                 last_err = None
                 break
@@ -6131,9 +6053,15 @@ class IcrisNnc1FormBot:
 
     async def _select_br_notice_no(self, page) -> bool:
         """在步骤4 区块内点「否」（一年期商业登记证），避免整页误匹配。"""
+        if await is_page_loading(page):
+            logger.info("步骤4 选否前仍有载入中，等待遮罩消失")
+            cleared = await wait_spin_clear(page, timeout_ms=90000)
+            if not cleared or await is_page_loading(page):
+                logger.warning("步骤4 载入中未消失，不点否")
+                return False
         hit = await page.evaluate(
             """() => {
-                const qRe = /致商業登記署通知書|致商业登记署通知书|步驟\\s*4|步骤\\s*4/;
+                const qRe = /致商業登記署通知書|致商业登记署通知书/;
                 let scope = null;
                 for (const el of document.querySelectorAll(
                     'div, section, fieldset, form, table, article'
@@ -6188,10 +6116,13 @@ class IcrisNnc1FormBot:
         # --- NNC1-4.1 等待步骤4 加载完成 ---
         await self._wait_nnc1_step_ready(
             page,
-            heading_js=r"步驟\s*4|步骤\s*4|致商業登記署通知書|致商业登记署通知书",
+            heading_js=r"致商業登記署通知書|致商业登记署通知书",
             label="4 商業登記署通知書",
             footer="save_continue",
         )
+        if await is_page_loading(page):
+            logger.info("步骤4 就绪后又出现载入中，再等遮罩")
+            await wait_spin_clear(page, timeout_ms=90000)
 
         # --- NNC1-4.2 选「否」（一年期商业登记证）---
         if not await self._select_br_notice_no(page):
@@ -6208,7 +6139,7 @@ class IcrisNnc1FormBot:
         logger.info("NNC1 步骤5: 詳情概要")
         await self._wait_nnc1_step_ready(
             page,
-            heading_js=r"步驟\s*5|步骤\s*5|詳情概要|详情概要",
+            heading_js=r"詳情概要|详情概要",
             label="5 詳情概要",
             footer="continue",
         )
@@ -6387,11 +6318,8 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
-                        return false;
-                    }
                     if (/本人同意在公司成立為法團時擔任其董事|請選擇簽署方式|本人現核證|本人现核证/.test(body)) {
                         return true;
                     }
@@ -6890,7 +6818,7 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const btnRe = /預覽並簽署|预览并签署/;
                     const skipRe = /發送簽署請求|发送签署请求/;
                     for (const row of document.querySelectorAll(
@@ -6941,7 +6869,7 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
                     if (!/步驟\\s*6|步骤\\s*6|簽署及提交|签署及提交/.test(body)) {
                         return false;
@@ -6986,11 +6914,8 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
-                        return false;
-                    }
                     for (const el of document.querySelectorAll(
                         'button, a, input[type=button], [role=button], .ant-btn, .btn'
                     )) {
@@ -7124,11 +7049,8 @@ class IcrisNnc1FormBot:
         try:
             await page.wait_for_function(
                 """() => {
-                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
                     const body = document.body?.innerText || '';
-                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
-                        return false;
-                    }
                     return /初步檢查|初步检查|Preliminary\\s*Check/i.test(body);
                 }""",
                 timeout=120000,
