@@ -20,8 +20,8 @@
             _fill_step4_br_notice
   NNC1-5    詳情概要：截图 → 滚到底 → 點「繼續」（不提交）
             _fill_step5_summary
-  NNC1-6    簽署及提交：只签「出任董事職位同意書（自然人）」
-            _fill_step6_director_consent_sign（不点提交）
+  NNC1-6    簽署及提交：董事同意书（自然人）→ 创办成员陈述书 → 继续 → 前往提交
+            _fill_step6_director_consent_sign（初步检查页点继续后停止，不付款）
 """
 
 from __future__ import annotations
@@ -6251,7 +6251,8 @@ class IcrisNnc1FormBot:
                         && vis(document.querySelector('input[type=password]'))) {
                         return 'credentials';
                     }
-                    if (/本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事/.test(blob)
+                    if (/本人現核證|本人现核证/.test(blob)
+                        || /本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事/.test(blob)
                         || /請選擇簽署方式|请选择签署方式/.test(blob)) {
                         return 'consent';
                     }
@@ -6361,7 +6362,7 @@ class IcrisNnc1FormBot:
                     if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
                         return false;
                     }
-                    if (/本人同意在公司成立為法團時擔任其董事|請選擇簽署方式/.test(body)) {
+                    if (/本人同意在公司成立為法團時擔任其董事|請選擇簽署方式|本人現核證|本人现核证/.test(body)) {
                         return true;
                     }
                     const savePat = /(储存|存储|儲存)及(继续|繼續)/;
@@ -6438,7 +6439,7 @@ class IcrisNnc1FormBot:
                     '.ant-modal, .ant-modal-content, [role=dialog], .modal'
                 )].filter(vis);
                 const root = roots.find(el =>
-                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立/.test(el.innerText || '')
+                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立|本人現核證|本人现核证/.test(el.innerText || '')
                 ) || roots[0];
                 if (!root) return '';
                 const savePat = /(储存|存储|儲存)及(继续|繼續)/;
@@ -6464,7 +6465,18 @@ class IcrisNnc1FormBot:
         return str(hit or "")
 
     async def _check_director_consent_and_username(self, page) -> None:
-        """弹窗第一屏：勾选年满18岁同意 + 用戶名稱，再點彈窗內繼續。"""
+        """弹窗第一屏：勾选核证 + 用戶名稱，再點彈窗內繼續。
+
+        董事弹窗：「本人同意…担任其董事…已年满18岁」
+        创办成员陈述书：「本人现核证」
+        两框都按步骤3身分勾选那套：找 wrapper → 点击 → input.check。
+        """
+        consent_pat = re.compile(
+            r"本人现核证|本人現核證|"
+            r"本人同意在公司成立为法团时担任其董事|"
+            r"本人同意在公司成立為法團時擔任其董事|"
+            r"已年满18岁|已年滿18歲"
+        )
         ok = await self._eval_in_frames(
             page,
             """() => {
@@ -6476,34 +6488,33 @@ class IcrisNnc1FormBot:
                     '.ant-modal, .ant-modal-content, [role=dialog], .modal'
                 )].filter(vis);
                 const root = roots.find(el =>
-                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立/.test(el.innerText || '')
+                    /請選擇簽署方式|请选择签署方式|本人同意在公司成立|本人現核證|本人现核证/.test(el.innerText || '')
                 ) || roots[0];
                 if (!root) return null;
 
-                const consentRe = /本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事|已年滿18歲|已年满18岁/;
+                const consentRe = /本人現核證|本人现核证|本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事|已年滿18歲|已年满18岁/;
                 let checked = false;
                 for (const el of root.querySelectorAll(
                     'label, .ant-checkbox-wrapper, span, div'
                 )) {
                     const t = (el.innerText || '').replace(/\\s+/g, '');
                     if (!consentRe.test(t) || t.length > 120) continue;
-                    const box = el.querySelector('input[type=checkbox]')
-                        || el.closest('label')?.querySelector('input[type=checkbox]');
-                    if (box) {
-                        if (!box.checked) box.click();
-                        checked = !!box.checked || true;
+                    const wrap = el.closest('.ant-checkbox-wrapper, label') || el;
+                    const box = wrap.querySelector(
+                        'input.ant-checkbox-input, input[type=checkbox]'
+                    ) || el.querySelector('input[type=checkbox]');
+                    if (box && box.checked) {
+                        checked = true;
                         break;
                     }
-                    el.click();
-                    checked = true;
-                    break;
-                }
-                if (!checked) {
-                    const box = [...root.querySelectorAll('input[type=checkbox]')].find(vis);
-                    if (box) {
-                        if (!box.checked) box.click();
-                        checked = true;
-                    }
+                    if (box && !box.checked) box.click();
+                    else wrap.click();
+                    const after = wrap.querySelector(
+                        'input.ant-checkbox-input, input[type=checkbox]'
+                    );
+                    checked = !!(after && after.checked)
+                        || wrap.classList.contains('ant-checkbox-wrapper-checked');
+                    if (checked) break;
                 }
 
                 let userPicked = false;
@@ -6529,16 +6540,74 @@ class IcrisNnc1FormBot:
                 return { checked, userPicked };
             }""",
         )
-        if not isinstance(ok, dict) or not ok.get("checked"):
-            await self._maybe_screenshot(page, "step6_consent_check_fail")
-            raise RuntimeError("未能勾选董事同意（年满18岁）")
-        if not ok.get("userPicked"):
+
+        async def _consent_checked() -> bool:
+            return bool(
+                await self._eval_in_frames(
+                    page,
+                    """() => {
+                        const vis = (el) => {
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0;
+                        };
+                        const roots = [...document.querySelectorAll(
+                            '.ant-modal, .ant-modal-content, [role=dialog], .modal'
+                        )].filter(vis);
+                        const root = roots.find(el =>
+                            /請選擇簽署方式|请选择签署方式|本人同意在公司成立|本人現核證|本人现核证/.test(el.innerText || '')
+                        ) || roots[0];
+                        if (!root) return false;
+                        const re = /本人現核證|本人现核证|本人同意在公司成立為法團時擔任其董事|本人同意在公司成立为法团时担任其董事|已年滿18歲|已年满18岁/;
+                        for (const wrap of root.querySelectorAll(
+                            '.ant-checkbox-wrapper, label.ant-checkbox-wrapper, label'
+                        )) {
+                            const t = (wrap.innerText || '').replace(/\\s+/g, '');
+                            if (!re.test(t) || t.length > 120) continue;
+                            const inp = wrap.querySelector(
+                                'input.ant-checkbox-input, input[type=checkbox]'
+                            );
+                            if (inp && inp.checked) return true;
+                            if (wrap.classList.contains('ant-checkbox-wrapper-checked')) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }""",
+                )
+            )
+
+        if not await _consent_checked():
+            wrap = page.locator(
+                ".ant-modal:visible .ant-checkbox-wrapper, "
+                ".ant-modal:visible label.ant-checkbox-wrapper, "
+                "[role=dialog]:visible .ant-checkbox-wrapper"
+            ).filter(has_text=consent_pat).first
+            if await wrap.count() > 0:
+                try:
+                    await wrap.scroll_into_view_if_needed()
+                    cls = await wrap.get_attribute("class") or ""
+                    if "ant-checkbox-wrapper-checked" not in cls:
+                        await wrap.click(force=True, timeout=5000)
+                        await page.wait_for_timeout(300)
+                        inp = wrap.locator(
+                            "input.ant-checkbox-input, input[type=checkbox]"
+                        ).first
+                        if await inp.count() > 0:
+                            await inp.check(force=True)
+                except Exception:
+                    pass
+            if not await _consent_checked():
+                await self._maybe_screenshot(page, "step6_consent_check_fail")
+                raise RuntimeError("未能勾选签署核证（本人现核证 / 董事同意年满18岁）")
+        if not isinstance(ok, dict) or not ok.get("userPicked"):
             await self._maybe_screenshot(page, "step6_username_radio_fail")
             raise RuntimeError("未能选择签署方式「用戶名稱」")
-        await page.wait_for_timeout(600)
+        await page.wait_for_timeout(400)
 
         continued = ""
-        for attempt in range(4):
+        for _attempt in range(4):
+            if not await _consent_checked():
+                break
             continued = await self._click_sign_modal_continue(page)
             if continued:
                 break
@@ -6547,9 +6616,8 @@ class IcrisNnc1FormBot:
             await self._maybe_screenshot(page, "step6_modal_continue_fail")
             raise RuntimeError("未能点击签署弹窗「繼續」")
         logger.info(
-            "签署弹窗第一屏: checked=%s user=%s continue=%s",
-            ok.get("checked"),
-            ok.get("userPicked"),
+            "签署弹窗第一屏: checked=True user=%s continue=%s",
+            (ok or {}).get("userPicked"),
             continued,
         )
         await wait_spin_clear(page, timeout_ms=30000)
@@ -6668,7 +6736,13 @@ class IcrisNnc1FormBot:
                     const r = el.getBoundingClientRect();
                     return r.width > 0 && r.height > 0;
                 };
-                for (const el of document.querySelectorAll(
+                const roots = [...document.querySelectorAll(
+                    '.ant-modal, .ant-modal-wrap, [role=dialog], .modal'
+                )].filter(vis);
+                const root = roots.find(el =>
+                    /已成功簽署|已成功签署/.test(el.innerText || '')
+                ) || roots[0] || document;
+                for (const el of root.querySelectorAll(
                     'button, a, [role=button], .ant-btn, input[type=button]'
                 )) {
                     const compact = (el.innerText || el.value || '').replace(/\\s+/g, '');
@@ -6691,32 +6765,12 @@ class IcrisNnc1FormBot:
             pass
         await page.wait_for_timeout(1000)
 
-    async def _fill_step6_director_consent_sign(
-        self, page, account: IcrisAccount
-    ) -> None:
-        """NNC1-6：只签「出任董事職位同意書（自然人）」。不签创办成员确认书、不提交。"""
-        logger.info("NNC1 步骤6: 簽署及提交（董事同意书）")
-
-        # --- NNC1-6.0 进入签署表（整表预览则再點繼續）---
-        await self._ensure_step6_sign_table(page)
-        await self._maybe_screenshot(page, "step6_table")
-
-        # --- NNC1-6.1 預覽並簽署 ---
-        await self._click_director_consent_preview_sign(page)
-
-        # --- NNC1-6.2 预览页滚到底 → 繼續（若已弹出签署窗则跳过）---
-        if await self._sign_modal_visible(page) != "consent":
-            await self._wait_director_consent_preview(page)
-            if await self._sign_modal_visible(page) != "consent":
-                await self._scroll_form_to_bottom(page)
-                await self._click_continue_only(page)
-        await page.wait_for_timeout(500)
-
-        # --- NNC1-6.3 弹窗：同意 + 用戶名稱 + 繼續 ---
+    async def _complete_step6_sign_modal(self, page, account: IcrisAccount) -> None:
+        """签署弹窗：核证/同意 + 用戶名稱 → 账号密码 → 簽署 → 已成功簽署確定。"""
         consent_ready = False
         try:
             await page.wait_for_function(
-                """() => /本人同意在公司成立為法團時擔任其董事|請選擇簽署方式/.test(
+                """() => /本人同意在公司成立為法團時擔任其董事|請選擇簽署方式|本人現核證|本人现核证/.test(
                     document.body?.innerText || ''
                 )""",
                 timeout=20000,
@@ -6734,7 +6788,6 @@ class IcrisNnc1FormBot:
         if await self._sign_modal_visible(page) != "credentials":
             await self._check_director_consent_and_username(page)
 
-        # --- NNC1-6.4 填登录账号密码 → 簽署 ---
         try:
             await page.wait_for_function(
                 """() => {
@@ -6752,10 +6805,325 @@ class IcrisNnc1FormBot:
             page, account.username, account.password
         )
         await self._click_sign_modal_sign_button(page)
-
-        # --- NNC1-6.5 已成功簽署 → 確定 ---
         await self._click_signed_ok(page)
+
+    async def _click_founder_statement_preview_sign(self, page) -> None:
+        """在「创办成员陈述书」行點「預覽並簽署」。"""
+        hit = await self._eval_in_frames(
+            page,
+            """() => {
+                const rowRe = /創辦成員陳述書|创办成员陈述书/;
+                const btnRe = /預覽並簽署|预览并签署/;
+                const skipRe = /發送簽署請求|发送签署请求/;
+                const rows = document.querySelectorAll(
+                    'tr, .ant-table-row, li, [class*=row]'
+                );
+                const tryClick = (scope) => {
+                    for (const el of scope.querySelectorAll(
+                        'button, a, [role=button], span, div'
+                    )) {
+                        const lab = (el.innerText || el.getAttribute('title') || '')
+                            .replace(/\\s+/g, '');
+                        if (!btnRe.test(lab) || skipRe.test(lab)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        const clickable = el.closest('button, a, [role=button]') || el;
+                        clickable.click();
+                        return lab.slice(0, 40);
+                    }
+                    return '';
+                };
+                for (const row of rows) {
+                    const t = (row.innerText || '').replace(/\\s+/g, '');
+                    if (!rowRe.test(t) || t.length > 500) continue;
+                    const got = tryClick(row);
+                    if (got) return got;
+                }
+                return '';
+            }""",
+        )
+        if not hit:
+            await self._maybe_screenshot(page, "step6_founder_preview_sign_fail")
+            raise RuntimeError("未找到「创办成员陈述书」的預覽並簽署")
+        logger.info("已点击创办成员陈述书預覽並簽署: %s", str(hit)[:40])
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+
+    async def _wait_founder_statement_row_ready(self, page) -> None:
+        """董事签完后等签署表上创办成员陈述书仍可「预览并签署」。"""
+        logger.info("NNC1 步骤6: 等待创办成员陈述书可签署")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const btnRe = /預覽並簽署|预览并签署/;
+                    const skipRe = /發送簽署請求|发送签署请求/;
+                    for (const row of document.querySelectorAll(
+                        'tr, .ant-table-row, li, [class*=row]'
+                    )) {
+                        const t = (row.innerText || '').replace(/\\s+/g, '');
+                        if (!/創辦成員陳述書|创办成员陈述书/.test(t) || t.length > 500) {
+                            continue;
+                        }
+                        if (/已簽署|已签署/.test(t) && !btnRe.test(t)) return false;
+                        for (const el of row.querySelectorAll(
+                            'button, a, [role=button], span, div'
+                        )) {
+                            const lab = (el.innerText || '').replace(/\\s+/g, '');
+                            if (!btnRe.test(lab) || skipRe.test(lab)) continue;
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) return true;
+                        }
+                    }
+                    return false;
+                }""",
+                timeout=90000,
+            )
+        except Exception as e:
+            await self._maybe_screenshot(page, "step6_founder_row_wait_fail")
+            raise RuntimeError(f"创办成员陈述书签署行未就绪: {e}")
+
+    async def _fill_step6_founder_statement_sign(
+        self, page, account: IcrisAccount
+    ) -> None:
+        """NNC1-6.6：签「创办成员陈述书」，到已成功签署确定。"""
+        logger.info("NNC1 步骤6: 签署创办成员陈述书")
+        await self._wait_founder_statement_row_ready(page)
+        await self._maybe_screenshot(page, "step6_founder_table")
+        await self._click_founder_statement_preview_sign(page)
+
+        if await self._sign_modal_visible(page) != "consent":
+            await self._wait_director_consent_preview(page)
+            if await self._sign_modal_visible(page) != "consent":
+                await self._scroll_form_to_bottom(page)
+                await self._click_continue_only(page)
+        await page.wait_for_timeout(500)
+        await self._complete_step6_sign_modal(page, account)
+        await self._maybe_screenshot(page, "step6_founder_signed")
+
+    async def _wait_step6_both_signed_continue(self, page) -> None:
+        """确定后加载：两份已签署，底栏「继续」可点。"""
+        logger.info("NNC1 步骤6: 等待两份已签署后的继续")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    if (!/步驟\\s*6|步骤\\s*6|簽署及提交|签署及提交/.test(body)) {
+                        return false;
+                    }
+                    const signed = (rowRe) => {
+                        for (const row of document.querySelectorAll(
+                            'tr, .ant-table-row, li, [class*=row]'
+                        )) {
+                            const t = (row.innerText || '').replace(/\\s+/g, '');
+                            if (!rowRe.test(t) || t.length > 500) continue;
+                            return /已簽署|已签署/.test(t);
+                        }
+                        return false;
+                    };
+                    if (!signed(/出任董事職位同意書|出任董事职位同意书/)) return false;
+                    if (!signed(/創辦成員陳述書|创办成员陈述书/)) return false;
+                    const savePat = /(储存|存储|儲存)及(继续|繼續)/;
+                    for (const el of document.querySelectorAll(
+                        'button, a, input[type=button], input[type=submit], [role=button], .btn'
+                    )) {
+                        const compact = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                        if (savePat.test(compact)) continue;
+                        if (!/^(繼續|继续|Continue)$/i.test(compact)) continue;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') {
+                            continue;
+                        }
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return true;
+                    }
+                    return false;
+                }""",
+                timeout=120000,
+            )
+        except Exception as e:
+            await self._maybe_screenshot(page, "step6_both_signed_wait_fail")
+            raise RuntimeError(f"两份已签署后「继续」未就绪: {e}")
+        logger.info("NNC1 步骤6 两份已签署，继续可点")
+
+    async def _click_goto_submit(self, page) -> None:
+        """图二：点底栏「前往提交」，避开预览并签署。"""
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
+                        return false;
+                    }
+                    for (const el of document.querySelectorAll(
+                        'button, a, input[type=button], [role=button], .ant-btn, .btn'
+                    )) {
+                        const compact = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                        if (!/^(前往提交)$/.test(compact)) continue;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') {
+                            continue;
+                        }
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return true;
+                    }
+                    return false;
+                }""",
+                timeout=120000,
+            )
+        except Exception as e:
+            await self._maybe_screenshot(page, "step6_goto_submit_wait_fail")
+            raise RuntimeError(f"「前往提交」未就绪: {e}")
+        await self._scroll_form_to_bottom(page)
+        hit = await self._eval_in_frames(
+            page,
+            """() => {
+                const vis = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                for (const el of document.querySelectorAll(
+                    'button, a, input[type=button], [role=button], .ant-btn, .btn'
+                )) {
+                    const compact = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                    if (!/^(前往提交)$/.test(compact)) continue;
+                    if (!vis(el)) continue;
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+                    el.click();
+                    return compact;
+                }
+                return '';
+            }""",
+        )
+        if not hit:
+            await self._maybe_screenshot(page, "step6_goto_submit_fail")
+            raise RuntimeError("未找到「前往提交」按钮")
+        logger.info("已点击「%s」", hit)
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(800)
+
+    async def _click_save_record_yes(self, page) -> None:
+        """图三：你要储存此文件以作纪录吗？→ 是。"""
+        try:
+            await page.wait_for_function(
+                """() => /你要儲存此文件以作紀錄嗎|你要储存此文件以作纪录吗/.test(
+                    document.body?.innerText || ''
+                )""",
+                timeout=60000,
+            )
+        except Exception as e:
+            await self._maybe_screenshot(page, "step6_save_record_wait_fail")
+            raise RuntimeError(f"存档确认弹窗未出现: {e}")
+        hit = await self._eval_in_frames(
+            page,
+            """() => {
+                const vis = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const roots = [...document.querySelectorAll(
+                    '.ant-modal, .ant-modal-content, [role=dialog], .modal'
+                )].filter(vis);
+                const root = roots.find(el =>
+                    /你要儲存此文件以作紀錄嗎|你要储存此文件以作纪录吗/.test(el.innerText || '')
+                ) || roots[0] || document;
+                for (const el of root.querySelectorAll(
+                    'button, a, [role=button], .ant-btn, input[type=button]'
+                )) {
+                    const compact = (el.innerText || el.value || '').replace(/\\s+/g, '');
+                    if (!/^(是|Yes)$/i.test(compact)) continue;
+                    if (!vis(el)) continue;
+                    el.click();
+                    return compact;
+                }
+                return '';
+            }""",
+        )
+        if not hit:
+            await self._maybe_screenshot(page, "step6_save_record_yes_fail")
+            raise RuntimeError("未找到存档弹窗「是」")
+        logger.info("已点击存档确认「%s」", hit)
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
+
+    async def _wait_preliminary_check_and_continue(self, page) -> None:
+        """图四：初步检查页加载完后点继续。"""
+        logger.info("NNC1 步骤6: 等待初步检查页")
+        await wait_spin_clear(page, timeout_ms=90000)
+        try:
+            await page.wait_for_function(
+                """() => {
+                    if (document.querySelector('.ant-spin-spinning')) return false;
+                    const body = document.body?.innerText || '';
+                    if (/載入中|加载中|Loading/i.test(body) && body.length < 800) {
+                        return false;
+                    }
+                    return /初步檢查|初步检查|Preliminary\\s*Check/i.test(body);
+                }""",
+                timeout=120000,
+            )
+        except Exception as e:
+            await self._maybe_screenshot(page, "step6_prelim_wait_fail")
+            raise RuntimeError(f"初步检查页加载超时: {e}")
+        await self._maybe_screenshot(page, "step6_preliminary_check")
+        await self._click_continue_only(page)
+        logger.info("NNC1 步骤6: 已在初步检查页点击继续")
+
+    async def _fill_step6_proceed_submit(self, page) -> None:
+        """两份已签署 → 继续 → 前往提交 → 存档是 → 初步检查继续。"""
+        logger.info("NNC1 步骤6: 前往提交")
+        await self._wait_step6_both_signed_continue(page)
+        await self._maybe_screenshot(page, "step6_both_signed")
+        await self._click_continue_only(page)
+        await self._click_goto_submit(page)
+        await self._click_save_record_yes(page)
+        await self._wait_preliminary_check_and_continue(page)
+        await self._maybe_screenshot(page, "step6_after_prelim_continue")
+
+    async def _fill_step6_director_consent_sign(
+        self, page, account: IcrisAccount
+    ) -> None:
+        """NNC1-6：签董事同意书、创办成员陈述书，再前往提交到初步检查继续。"""
+        logger.info("NNC1 步骤6: 簽署及提交（董事同意书）")
+
+        # --- NNC1-6.0 进入签署表（整表预览则再點繼續）---
+        await self._ensure_step6_sign_table(page)
+        await self._maybe_screenshot(page, "step6_table")
+
+        # --- NNC1-6.1 預覽並簽署 ---
+        await self._click_director_consent_preview_sign(page)
+
+        # --- NNC1-6.2 预览页滚到底 → 繼續（若已弹出签署窗则跳过）---
+        if await self._sign_modal_visible(page) != "consent":
+            await self._wait_director_consent_preview(page)
+            if await self._sign_modal_visible(page) != "consent":
+                await self._scroll_form_to_bottom(page)
+                await self._click_continue_only(page)
+        await page.wait_for_timeout(500)
+
+        # --- NNC1-6.3～6.5 弹窗签署 → 確定 ---
+        await self._complete_step6_sign_modal(page, account)
         await self._maybe_screenshot(page, "step6_director_signed")
+
+        # --- NNC1-6.6 创办成员陈述书 ---
+        await self._fill_step6_founder_statement_sign(page, account)
+        # --- NNC1-6.7 继续 → 前往提交 → 是 → 初步检查继续 ---
+        await self._fill_step6_proceed_submit(page)
 
     # ========== NNC1 入口 ==========
 
@@ -6766,8 +7134,11 @@ class IcrisNnc1FormBot:
         *,
         force_isolated: bool = False,
         screenshot_path: str = "",
+        keep_browser: bool = False,
     ) -> tuple[bool, str]:
         """登录 → NNC1 → 接受条款 → 填表。菜单与表单已兼容简繁，不再切简体。"""
+        import asyncio as _asyncio
+
         from src.browser.launcher import import_async_playwright
 
         async_playwright = import_async_playwright()
@@ -6838,7 +7209,7 @@ class IcrisNnc1FormBot:
                 await self._fill_step6_director_consent_sign(page, account)
 
                 logger.info(
-                    "IcrisNnc1FormBot: NNC1 步骤1-6 董事同意书已签署（未提交）"
+                    "IcrisNnc1FormBot: NNC1 步骤1-6 已签署并前往提交（初步检查后已点继续，未付款）"
                 )
                 return True, screenshot_path or ""
             except Exception as e:
@@ -6855,4 +7226,12 @@ class IcrisNnc1FormBot:
                         await page.screenshot(path=screenshot_path, full_page=True)
                     except Exception as shot_err:
                         logger.warning("最终截图失败: %s", shot_err)
-                await browser.close()
+                if keep_browser:
+                    logger.info("已加 --keep-browser，浏览器不关闭，按 Ctrl+C 结束")
+                    try:
+                        while True:
+                            await _asyncio.sleep(3600)
+                    except (_asyncio.CancelledError, KeyboardInterrupt):
+                        logger.info("收到中断，保留浏览器窗口")
+                else:
+                    await browser.close()

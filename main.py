@@ -179,9 +179,16 @@ def cmd_run(args: argparse.Namespace) -> None:
                 print(f"[错误] {e}")
                 sys.exit(1)
             ctx.icris_account = IcrisAccount(username=username, password=password)
+            ctx.keep_browser = bool(getattr(args, "keep_browser", False))
             print(f"[数据] 已从任务 #{int(job_id)} 加载 payload，NNC1 登录账号={username}")
+            if ctx.keep_browser:
+                print("[提示] --keep-browser：填表结束后不关闭浏览器，按 Ctrl+C 结束进程")
         elif args.step in ("register", "login", "nnc1", "package", "confirm", "notify", "email"):
             _apply_company_data(ctx, for_steps=("register", "login", "nnc1", "package", "confirm", "notify", "email"))
+            if args.step in ("login", "nnc1"):
+                ctx.keep_browser = bool(getattr(args, "keep_browser", False))
+                if ctx.keep_browser:
+                    print("[提示] --keep-browser：填表结束后不关闭浏览器，按 Ctrl+C 结束进程")
 
         ctx = agent.workflow.run_step(step_enum, ctx)
     elif args.full:
@@ -1080,6 +1087,12 @@ def main() -> None:
         dest="password",
         help="仅 --step nnc1 --job-id：NNC1 登录密码",
     )
+    run_parser.add_argument(
+        "--keep-browser",
+        action="store_true",
+        dest="keep_browser",
+        help="仅 --step nnc1：填表结束后不关闭浏览器，按 Ctrl+C 结束进程",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     steps_parser = sub.add_parser("steps", help="列出所有可用步骤")
@@ -1233,6 +1246,12 @@ def main() -> None:
         dest="_password",
         help="仅 --step nnc1 --job-id：NNC1 登录密码",
     )
+    parser.add_argument(
+        "--keep-browser",
+        action="store_true",
+        dest="_keep_browser",
+        help="仅 --step nnc1：填表结束后不关闭浏览器，按 Ctrl+C 结束进程",
+    )
 
     args = parser.parse_args()
 
@@ -1274,6 +1293,7 @@ def main() -> None:
             job_id=getattr(args, "_job_id", None),
             username=getattr(args, "_username", "") or "",
             password=getattr(args, "_password", "") or "",
+            keep_browser=bool(getattr(args, "_keep_browser", False)),
         )
         cmd_run(run_args)
     else:

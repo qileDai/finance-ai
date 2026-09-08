@@ -42,6 +42,7 @@ class WorkflowContext:
     messages: list[str] = field(default_factory=list)
     esubmit_screenshot_path: str = ""
     success_screenshot_path: str = ""
+    keep_browser: bool = False
 
     def log(self, msg: str) -> None:
         logger.info(msg)
@@ -274,6 +275,7 @@ class RegistrationWorkflow:
                     ctx.icris_account,
                     ctx.company_data,
                     force_isolated=force_isolated_browser,
+                    keep_browser=ctx.keep_browser,
                 )
             )
 
