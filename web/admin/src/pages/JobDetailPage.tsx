@@ -282,6 +282,10 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                   <dd className="mono muted">{job.run_duration || "-"}</dd>
                 </div>
                 <div>
+                  <dt>nnc1填表</dt>
+                  <dd className="mono muted">{job.nnc1_duration || "-"}</dd>
+                </div>
+                <div>
                   <dt>更新</dt>
                   <dd className="mono muted">{formatDateTime(job.updated_at)}</dd>
                 </div>

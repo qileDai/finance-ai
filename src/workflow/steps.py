@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -272,6 +273,7 @@ class RegistrationWorkflow:
 
         bot = IcrisNnc1FormBot()
         job_id = int(ctx.job_id or 0)
+        bot.job_id = job_id
         shot_path = (ctx.screenshot_path or "").strip()
         if job_id and not shot_path:
             shot_dir = PROJECT_ROOT / "data" / "icris_form_screenshots"
@@ -279,18 +281,29 @@ class RegistrationWorkflow:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             shot_path = str(shot_dir / f"form_{job_id}_{stamp}.png")
             ctx.screenshot_path = shot_path
+        bot._job_screenshot_path = shot_path
+
+        async def _run_nnc1_async() -> tuple[bool, str]:
+            result = await bot.run(
+                ctx.icris_account,
+                ctx.company_data,
+                force_isolated=force_isolated_browser,
+                screenshot_path=shot_path,
+                keep_browser=ctx.keep_browser,
+            )
+            if ctx.keep_browser:
+                ctx.log("已加 --keep-browser，浏览器不关闭，按 Ctrl+C 结束")
+                try:
+                    while True:
+                        await asyncio.sleep(3600)
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    ctx.log("收到中断，保留浏览器窗口")
+            return result
 
         def _run_nnc1() -> tuple[bool, str]:
-            return asyncio.run(
-                bot.run(
-                    ctx.icris_account,
-                    ctx.company_data,
-                    force_isolated=force_isolated_browser,
-                    screenshot_path=shot_path,
-                    keep_browser=ctx.keep_browser,
-                )
-            )
+            return asyncio.run(_run_nnc1_async())
 
+        t0 = time.monotonic()
         if force_isolated_browser:
             ok, detail = _run_nnc1()
         else:
@@ -302,16 +315,31 @@ class RegistrationWorkflow:
             else:
                 with cdp_exclusive_session("cli-nnc1"):
                     ok, detail = _run_nnc1()
-        if job_id:
-            from src.storage.db import ExternalGroupStore
+        from src.storage.db import ExternalGroupStore, format_job_run_duration
 
+        nnc1_duration = format_job_run_duration(time.monotonic() - t0)
+        if job_id:
             store = ExternalGroupStore()
-            if ok:
-                store.mark_job_form_filled(job_id, shot_path)
+            if not store.job_form_outcome_written(job_id):
+                if ok:
+                    store.mark_job_form_filled(
+                        job_id, shot_path, nnc1_duration=nnc1_duration
+                    )
+                    ctx.log(f"ICRIS NNC1 填表成功，截图已写入任务 #{job_id}")
+                else:
+                    fail_shot = (
+                        shot_path if shot_path and Path(shot_path).is_file() else ""
+                    )
+                    store.mark_job_form_failed(
+                        job_id,
+                        f"填表失败: {detail}",
+                        fail_shot,
+                        nnc1_duration=nnc1_duration,
+                    )
+                    ctx.log(f"ICRIS NNC1 填表失败: {detail}")
+            elif ok:
                 ctx.log(f"ICRIS NNC1 填表成功，截图已写入任务 #{job_id}")
             else:
-                fail_shot = shot_path if shot_path and Path(shot_path).is_file() else ""
-                store.mark_job_form_failed(job_id, f"填表失败: {detail}", fail_shot)
                 ctx.log(f"ICRIS NNC1 填表失败: {detail}")
         elif ok:
             ctx.log("ICRIS NNC1 填表完成（未提交）")

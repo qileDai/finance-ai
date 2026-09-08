@@ -92,6 +92,7 @@ export type JobRow = {
   started_at?: string;
   run_duration?: string;
   s03a_duration?: string;
+  nnc1_duration?: string;
   id_already_registered?: number | boolean;
 };
 

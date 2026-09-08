@@ -1,4 +1,4 @@
-"""registration_jobs 到 s03a / 整个任务耗时。"""
+"""registration_jobs 到 s03a / 整个任务 / NNC1 耗时。"""
 
 from __future__ import annotations
 
@@ -165,3 +165,108 @@ class TestJobRunDurationStore(unittest.TestCase):
         reset = self.store.requeue_registration_job(job_id)
         self.assertEqual(str(reset.get("s03a_duration") or ""), "")
         self.assertEqual(str(reset.get("run_duration") or ""), "")
+        self.assertEqual(str(reset.get("nnc1_duration") or ""), "")
+
+
+class TestNnc1DurationStore(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = ExternalGroupStore(
+            db_path=Path(self._tmp.name) / "nnc1_duration.db"
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _enqueued_id(self, room: str) -> int:
+        job, created = self.store.enqueue_registration_job(room, source="test")
+        self.assertTrue(created)
+        return int(job["id"])
+
+    def test_form_filled_writes_nnc1_duration(self):
+        job_id = self._enqueued_id("room-nnc1-ok")
+        self.store.mark_job_form_filled(
+            job_id, "/tmp/form.png", nnc1_duration="3分12秒"
+        )
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["form_status"], "filled")
+        self.assertEqual(row["nnc1_duration"], "3分12秒")
+
+    def test_form_failed_writes_duration_and_retry_clears(self):
+        job_id = self._enqueued_id("room-nnc1-fail")
+        self.store.mark_job_form_failed(
+            job_id,
+            "填表失败: 初步检查拒绝: 名称相同",
+            nnc1_duration="2分5秒",
+        )
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["form_status"], "failed")
+        self.assertEqual(row["nnc1_duration"], "2分5秒")
+        self.assertIn("初步检查拒绝", row["last_error"])
+        reset = self.store.reset_job_form_retry(job_id)
+        self.assertEqual(reset["form_status"], "pending")
+        self.assertEqual(str(reset.get("nnc1_duration") or ""), "")
+        self.assertEqual(str(reset.get("last_error") or ""), "")
+
+    def test_requeue_and_claim_clear_nnc1_duration(self):
+        job_id = self._enqueued_id("room-nnc1-requeue")
+        self.store.claim_next_job()
+        self.store.mark_job_form_filled(
+            job_id, "/tmp/form.png", nnc1_duration="1分1秒"
+        )
+        self.store.mark_job_failed(
+            job_id, error="done", requeue=False, run_duration="1分2秒"
+        )
+        reset = self.store.requeue_registration_job(job_id)
+        self.assertEqual(str(reset.get("nnc1_duration") or ""), "")
+        claimed = self.store.claim_next_job()
+        self.assertEqual(int(claimed["id"]), job_id)
+        self.assertEqual(str(claimed.get("nnc1_duration") or ""), "")
+
+    def test_form_error_keeps_long_reject_reason(self):
+        job_id = self._enqueued_id("room-long-err")
+        reason = "填表失败: 初步检查拒绝: " + ("名稱相同。" * 200)
+        self.assertGreater(len(reason), 500)
+        self.store.mark_job_form_failed(job_id, reason)
+        row = self.store.get_registration_job(job_id)
+        self.assertGreater(len(row["last_error"]), 500)
+        self.assertTrue(str(row["last_error"]).startswith("填表失败"))
+        self.assertLessEqual(len(row["last_error"]), 2000)
+
+    def test_bot_persist_writes_without_waiting_keep_browser(self):
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot
+
+        job_id = self._enqueued_id("room-persist-keep")
+        bot = IcrisNnc1FormBot()
+        bot.job_id = job_id
+        bot._nnc1_t0 = time.monotonic() - 65
+        bot._job_screenshot_path = "/tmp/form.png"
+        bot.persist_form_outcome(
+            False, "初步检查拒绝: 名稱相同", store=self.store
+        )
+        self.assertTrue(self.store.job_form_outcome_written(job_id))
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["form_status"], "failed")
+        self.assertIn("名稱相同", row["last_error"])
+        self.assertRegex(str(row["nnc1_duration"] or ""), _DURATION_RE)
+        bot.persist_form_outcome(True, store=self.store)
+        row2 = self.store.get_registration_job(job_id)
+        self.assertEqual(row2["form_status"], "failed")
+
+    def test_keep_browser_wait_is_after_bot_run(self):
+        import inspect
+
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot
+        from src.workflow.steps import RegistrationWorkflow
+
+        run_src = inspect.getsource(IcrisNnc1FormBot.run)
+        self.assertNotIn("while True", run_src)
+        self.assertIn("persist_form_outcome", run_src)
+        steps_src = inspect.getsource(RegistrationWorkflow.step_icris_login)
+        self.assertIn("asyncio.sleep(3600)", steps_src)
+        self.assertIn("keep_browser", steps_src)
+        self.assertIn("job_form_outcome_written", steps_src)
+
+
+if __name__ == "__main__":
+    unittest.main()

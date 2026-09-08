@@ -2,8 +2,11 @@ import unittest
 
 from src.browser.icris_nnc1_form import (
     first_real_signatory_index,
+    format_prelim_reject_error,
     is_signatory_placeholder,
+    normalize_prelim_reject_reasons,
     prelim_check_passed,
+    prelim_result_preference_score,
     resolve_nnc1_step3_names,
 )
 
@@ -106,6 +109,36 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
         self.assertTrue(prelim_check_passed("通過，請按繼續"))
         self.assertFalse(prelim_check_passed("不通过：名称已存在"))
         self.assertFalse(prelim_check_passed(""))
+        self.assertFalse(prelim_check_passed("拒絕"))
+        self.assertFalse(prelim_check_passed("拒绝"))
+        self.assertFalse(prelim_check_passed("Rejection"))
+        self.assertFalse(
+            prelim_check_passed("拒絕。通过。请按“继续”按钮以完成提交过程。")
+        )
+        self.assertGreater(
+            prelim_result_preference_score("拒絕"),
+            prelim_result_preference_score("通过。请按“继续”按钮以完成提交过程。"),
+        )
+
+    def test_format_prelim_reject_error_includes_reasons(self):
+        reasons = (
+            "1. 建議採用的公司名稱 [Humsienk Global Limited] "
+            "與另一間已註冊的公司名稱相同。\n"
+            "2. 建議採用的公司名稱 [撼世全球有限公司] "
+            "與另一間已註冊的公司名稱相同。"
+        )
+        msg = format_prelim_reject_error("拒絕", reasons)
+        self.assertIn("初步检查拒绝", msg)
+        self.assertIn("Humsienk Global Limited", msg)
+        self.assertIn("撼世全球有限公司", msg)
+        self.assertEqual(
+            format_prelim_reject_error("拒絕", ""),
+            "初步检查未通过: 拒絕",
+        )
+        self.assertEqual(
+            normalize_prelim_reject_reasons("  1. a  \n\n  2. b  "),
+            "1. a\n2. b",
+        )
 
 
 if __name__ == "__main__":

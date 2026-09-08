@@ -277,11 +277,41 @@ function nnc1FindSignatoryControl() {
 
 
 def prelim_check_passed(result_text: str) -> bool:
-    """初步检查结果含「通过」才算成功（排除「不通过」）。"""
+    """初步检查结果含「通过」才算成功（排除拒絕 / 不通过）。"""
     t = result_text or ""
+    if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
+        return False
     if re.search(r"不通过|不通過|未能通过|未能通過", t):
         return False
     return bool(re.search(r"通过|通過", t))
+
+
+def prelim_result_preference_score(text: str) -> int:
+    """多 iframe 时优先採「拒絕」单元格，避免误採「通过，请按继续」。"""
+    t = text or ""
+    if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
+        return 3
+    if re.search(r"不通过|不通過|未能通过|未能通過", t):
+        return 2
+    if re.search(r"通过|通過", t):
+        return 1
+    return 1 if t.strip() else 0
+
+
+def normalize_prelim_reject_reasons(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return "\n".join(lines)
+
+
+def format_prelim_reject_error(result: str = "", reasons: str = "") -> str:
+    """初步检查未通过时的 last_error 文案，优先帶拒絕原因全文。"""
+    reasons = normalize_prelim_reject_reasons(reasons)
+    result = (result or "").strip()
+    if reasons:
+        return f"初步检查拒绝: {reasons}"
+    if result:
+        return f"初步检查未通过: {result}"
+    return "初步检查结果未通过"
 
 
 class IcrisNnc1FormBot:
@@ -293,6 +323,42 @@ class IcrisNnc1FormBot:
         self.dry_run = settings.dry_run
         self._job_summary_shot_written = False
         self._job_screenshot_path = ""
+        self.job_id = 0
+        self._nnc1_t0 = 0.0
+        self._form_persisted = False
+        self._keep_playwright = None
+        self._keep_browser_obj = None
+
+    def persist_form_outcome(
+        self, ok: bool, detail: str = "", store: Any = None
+    ) -> None:
+        """初步检查出结果（或提前失败）立即写库，不依赖 keep-browser 结束。"""
+        if self._form_persisted or not int(self.job_id or 0):
+            return
+        from src.storage.db import ExternalGroupStore, format_job_run_duration
+
+        db = store or ExternalGroupStore()
+        shot = (self._job_screenshot_path or "").strip()
+        dur = ""
+        if self._nnc1_t0:
+            dur = format_job_run_duration(time.monotonic() - self._nnc1_t0)
+        job_id = int(self.job_id)
+        if ok:
+            db.mark_job_form_filled(job_id, shot, nnc1_duration=dur)
+        else:
+            err = (detail or "").strip() or "填表失败"
+            if not err.startswith("填表失败"):
+                err = f"填表失败: {err}"
+            db.mark_job_form_failed(
+                job_id, err, shot, nnc1_duration=dur
+            )
+        self._form_persisted = True
+        logger.info(
+            "任务 #%s 填表结果已写入 form_status=%s duration=%s",
+            job_id,
+            "filled" if ok else "failed",
+            dur or "-",
+        )
 
     async def _write_job_screenshot(self, page) -> str:
         dest = (self._job_screenshot_path or "").strip()
@@ -6168,6 +6234,26 @@ class IcrisNnc1FormBot:
                 continue
         return last
 
+    async def _eval_in_frames_best(
+        self, page, expression: str, score_fn
+    ) -> Any:
+        """多 frame 取分数最高的非空结果。"""
+        best: Any = None
+        best_score = -1
+        for frame in page.frames:
+            try:
+                val = await frame.evaluate(expression)
+            except Exception:
+                continue
+            if val in (None, False, "", [], {}):
+                continue
+            text = val if isinstance(val, str) else str(val)
+            score = int(score_fn(text) or 0)
+            if score > best_score:
+                best = val
+                best_score = score
+        return best
+
     async def _body_text(self, page) -> str:
         try:
             return str(await page.evaluate("() => document.body?.innerText || ''") or "")
@@ -7015,7 +7101,7 @@ class IcrisNnc1FormBot:
         await page.wait_for_timeout(1000)
 
     async def _read_preliminary_check_result(self, page) -> str:
-        text = await self._eval_in_frames(
+        text = await self._eval_in_frames_best(
             page,
             """() => {
                 const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
@@ -7026,21 +7112,31 @@ class IcrisNnc1FormBot:
                     if (!labelRe.test(norm(cells[0].innerText))) continue;
                     return norm(cells.slice(1).map(c => c.innerText).join(' '));
                 }
-                for (const el of document.querySelectorAll(
-                    'div, td, th, li, p, span, dt, dd'
-                )) {
-                    const t = norm(el.innerText);
-                    if (!labelRe.test(t) || t.length > 80) continue;
-                    const row = el.closest('tr, .ant-row, .ant-descriptions-item, dl, div');
-                    if (!row) continue;
-                    return norm(row.innerText).replace(labelRe, '').replace(/^[:：\\s]+/, '');
-                }
-                const body = document.body?.innerText || '';
-                const m = body.match(/初步檢查結果[:：\\s]*([^\\n]+)|初步检查结果[:：\\s]*([^\\n]+)/);
-                return ((m && (m[1] || m[2])) || '').trim();
+                return '';
             }""",
+            prelim_result_preference_score,
         )
         return str(text or "").strip()
+
+    async def _read_preliminary_check_reject_reasons(self, page) -> str:
+        text = await self._eval_in_frames_best(
+            page,
+            """() => {
+                const normLine = (s) => (s || '').replace(/[ \\t]+/g, ' ').trim();
+                const labelRe = /拒絕原因|拒绝原因|Rejection\\s*Reason/i;
+                const cellText = (el) => (el.innerText || '')
+                    .split('\\n').map(normLine).filter(Boolean).join('\\n');
+                for (const tr of document.querySelectorAll('tr')) {
+                    const cells = [...tr.querySelectorAll('th, td')];
+                    if (cells.length < 2) continue;
+                    if (!labelRe.test(normLine(cells[0].innerText))) continue;
+                    return cells.slice(1).map(cellText).filter(Boolean).join('\\n');
+                }
+                return '';
+            }""",
+            lambda t: 2 if t.strip() else 0,
+        )
+        return normalize_prelim_reject_reasons(str(text or ""))
 
     async def _wait_preliminary_check_and_continue(self, page) -> None:
         """到初步检查页：截图判定是否含通过，不点继续、不进付款页。"""
@@ -7050,8 +7146,15 @@ class IcrisNnc1FormBot:
             await page.wait_for_function(
                 """() => {
                     if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
-                    const body = document.body?.innerText || '';
-                    return /初步檢查|初步检查|Preliminary\\s*Check/i.test(body);
+                    const labelRe = /初步檢查結果|初步检查结果|Preliminary\\s*Check\\s*Result/i;
+                    const valRe = /通過|通过|拒絕|拒绝|Rejection|不通过|不通過/i;
+                    for (const tr of document.querySelectorAll('tr')) {
+                        const cells = [...tr.querySelectorAll('th, td')];
+                        if (cells.length < 2) continue;
+                        if (!labelRe.test((cells[0].innerText || '').trim())) continue;
+                        return valRe.test(cells.slice(1).map(c => c.innerText).join(' '));
+                    }
+                    return false;
                 }""",
                 timeout=120000,
             )
@@ -7060,10 +7163,13 @@ class IcrisNnc1FormBot:
             raise RuntimeError(f"初步检查页加载超时: {e}")
         await page.wait_for_timeout(500)
         result = await self._read_preliminary_check_result(page)
+        reasons = await self._read_preliminary_check_reject_reasons(page)
         await self._maybe_screenshot(page, "step6_preliminary_check")
         if not prelim_check_passed(result):
-            reason = result or "初步检查结果未通过"
-            raise RuntimeError(f"初步检查未通过: {reason}")
+            err = format_prelim_reject_error(result, reasons)
+            self.persist_form_outcome(False, err)
+            raise RuntimeError(err)
+        self.persist_form_outcome(True)
         logger.info("初步检查通过: %s", result[:120])
 
     async def _fill_step6_proceed_submit(self, page) -> None:
@@ -7115,18 +7221,27 @@ class IcrisNnc1FormBot:
         keep_browser: bool = False,
     ) -> tuple[bool, str]:
         """登录 → NNC1 → 接受条款 → 填表。菜单与表单已兼容简繁，不再切简体。"""
-        import asyncio as _asyncio
-
         from src.browser.launcher import import_async_playwright
 
+        self._nnc1_t0 = time.monotonic()
+        self._form_persisted = False
+        self._job_screenshot_path = (screenshot_path or "").strip()
+        self._job_summary_shot_written = False
+
         async_playwright = import_async_playwright()
-        async with async_playwright() as p:
-            browser = await launch_browser(p, force_isolated=force_isolated)
+        playwright = await async_playwright().start()
+        browser = None
+        page = None
+        try:
+            browser = await launch_browser(
+                playwright, force_isolated=force_isolated
+            )
+            if keep_browser:
+                self._keep_playwright = playwright
+                self._keep_browser_obj = browser
             context = await create_browser_context(browser)
             page = await context.new_page()
             await self._maximize_browser_window(page)
-            self._job_screenshot_path = (screenshot_path or "").strip()
-            self._job_summary_shot_written = False
 
             try:
                 logger.info(
@@ -7187,27 +7302,27 @@ class IcrisNnc1FormBot:
                 logger.info(
                     "IcrisNnc1FormBot: NNC1 步骤1-6 完成（初步检查通过，未进入付款页）"
                 )
+                self.persist_form_outcome(True)
                 return True, screenshot_path or ""
             except Exception as e:
                 logger.exception("IcrisNnc1FormBot 失败")
-                await self._maybe_screenshot(page, "error")
+                if page is not None:
+                    await self._maybe_screenshot(page, "error")
+                self.persist_form_outcome(False, str(e))
                 return False, str(e)
             finally:
                 if (
                     screenshot_path
                     and not self._job_summary_shot_written
+                    and page is not None
                     and not page.is_closed()
                 ):
                     try:
                         await page.screenshot(path=screenshot_path, full_page=True)
                     except Exception as shot_err:
                         logger.warning("最终截图失败: %s", shot_err)
-                if keep_browser:
-                    logger.info("已加 --keep-browser，浏览器不关闭，按 Ctrl+C 结束")
-                    try:
-                        while True:
-                            await _asyncio.sleep(3600)
-                    except (_asyncio.CancelledError, KeyboardInterrupt):
-                        logger.info("收到中断，保留浏览器窗口")
-                else:
+                if not keep_browser and browser is not None:
                     await browser.close()
+        finally:
+            if not keep_browser:
+                await playwright.stop()

@@ -330,6 +330,11 @@ class TestJobFormRetryUiContract(unittest.TestCase):
         self.assertIn("jobCanFormRetry(job.form_status)", detail)
         self.assertIn("确认重跑填表任务", jobs)
         self.assertIn("确认重跑填表任务", detail)
+        self.assertIn("nnc1_duration", jobs)
+        self.assertIn("nnc1填表", jobs)
+        self.assertIn("job-error-cell", jobs)
+        self.assertNotIn(".slice(0, 60)", jobs)
+        self.assertIn("nnc1_duration", detail)
 
 
 if __name__ == "__main__":

@@ -533,12 +533,21 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       title: "错误",
       dataIndex: "last_error",
       key: "last_error",
-      ellipsis: true,
-      render: (v: string) => (
-        <Tooltip title={v || ""}>
-          {String(v || "").slice(0, 60)}
-        </Tooltip>
-      ),
+      width: 280,
+      render: (v: string) =>
+        v ? (
+          <Tooltip
+            title={
+              <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {v}
+              </span>
+            }
+          >
+            <div className="job-error-cell">{v}</div>
+          </Tooltip>
+        ) : (
+          "-"
+        ),
     },
     {
       title: "到 s03a",
@@ -554,6 +563,15 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       dataIndex: "run_duration",
       key: "run_duration",
       width: 100,
+      render: (v: string) => (
+        <span className="mono muted">{v || "-"}</span>
+      ),
+    },
+    {
+      title: "nnc1填表",
+      dataIndex: "nnc1_duration",
+      key: "nnc1_duration",
+      width: 110,
       render: (v: string) => (
         <span className="mono muted">{v || "-"}</span>
       ),

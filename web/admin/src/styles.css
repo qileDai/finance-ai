@@ -854,6 +854,16 @@ table.data tr.clickable:hover td {
   font-size: 0.85rem;
 }
 
+.job-error-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 320px;
+  max-height: 6.5em;
+  overflow: auto;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
 .job-log {
   margin: 0;
   max-height: 480px;

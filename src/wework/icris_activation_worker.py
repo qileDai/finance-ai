@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,8 @@ class IcrisActivationWorker:
 
         account = IcrisAccount(username=username, password=password)
         bot = IcrisNnc1FormBot()
+        bot.job_id = job_id
+        bot._job_screenshot_path = str(shot_file)
         from config.settings import settings
         from src.browser.cdp_session import SessionWatchdog, hold_cdp_lock
 
@@ -202,6 +205,9 @@ class IcrisActivationWorker:
             keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
             wd = SessionWatchdog(fill + keep + 30.0)
             wd.start()
+            from src.storage.db import format_job_run_duration
+
+            t0 = time.monotonic()
             try:
                 ok, detail = asyncio.run(
                     bot.run(
@@ -224,15 +230,30 @@ class IcrisActivationWorker:
                 ok, detail = False, str(e)
             finally:
                 wd.stop()
+            nnc1_duration = format_job_run_duration(time.monotonic() - t0)
+
+        if self.store.job_form_outcome_written(job_id):
+            if ok:
+                logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
+                self._notify_form_result(job, ok=True, detail=str(shot_file))
+            else:
+                logger.error("任务 #%s 填表失败: %s", job_id, detail)
+                self._notify_form_result(job, ok=False, detail=detail)
+            return
 
         if ok:
-            self.store.mark_job_form_filled(job_id, str(shot_file))
+            self.store.mark_job_form_filled(
+                job_id, str(shot_file), nnc1_duration=nnc1_duration
+            )
             logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
             self._notify_form_result(job, ok=True, detail=str(shot_file))
         else:
             fail_shot = str(shot_file) if shot_file.is_file() else ""
             self.store.mark_job_form_failed(
-                job_id, f"填表失败: {detail}", fail_shot
+                job_id,
+                f"填表失败: {detail}",
+                fail_shot,
+                nnc1_duration=nnc1_duration,
             )
             logger.error("任务 #%s 填表失败: %s", job_id, detail)
             if fail_shot:

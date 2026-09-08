@@ -225,6 +225,7 @@ class ExternalGroupStore:
                     updated_at TEXT NOT NULL,
                     run_duration TEXT NOT NULL DEFAULT '',
                     s03a_duration TEXT NOT NULL DEFAULT '',
+                    nnc1_duration TEXT NOT NULL DEFAULT '',
                     id_already_registered INTEGER NOT NULL DEFAULT 0
                 );
 
@@ -414,6 +415,10 @@ class ExternalGroupStore:
         if "s03a_duration" not in cols:
             conn.execute(
                 "ALTER TABLE registration_jobs ADD COLUMN s03a_duration TEXT NOT NULL DEFAULT ''"
+            )
+        if "nnc1_duration" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN nnc1_duration TEXT NOT NULL DEFAULT ''"
             )
         if "id_already_registered" not in cols:
             conn.execute(
@@ -1432,6 +1437,7 @@ class ExternalGroupStore:
                     started_at = ?,
                     run_duration = '',
                     s03a_duration = '',
+                    nnc1_duration = '',
                     updated_at = ?
                 WHERE id = ? AND status = 'pending'
                   AND IFNULL(review_status, '') != 'rejected'
@@ -1998,40 +2004,63 @@ class ExternalGroupStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def mark_job_form_filled(self, job_id: int, screenshot_path: str = "") -> None:
+    def mark_job_form_filled(
+        self, job_id: int, screenshot_path: str = "", nnc1_duration: str = ""
+    ) -> None:
         """填表成功。"""
         now = _utc_now()
+        dur = (nnc1_duration or "").strip()
         with self._conn() as conn:
-            conn.execute(
-                """UPDATE registration_jobs
-                   SET form_status='filled', form_filled_at=?,
-                       form_screenshot_path=?, updated_at=?
-                   WHERE id=?""",
-                (now, screenshot_path, now, job_id),
-            )
-
-    def mark_job_form_failed(
-        self, job_id: int, error: str, screenshot_path: str = ""
-    ) -> None:
-        """填表失败。有截图则写入 form_screenshot_path。"""
-        now = _utc_now()
-        shot = (screenshot_path or "").strip()
-        with self._conn() as conn:
-            if shot:
+            if dur:
                 conn.execute(
                     """UPDATE registration_jobs
-                       SET form_status='failed', last_error=?,
-                           form_screenshot_path=?, updated_at=?
+                       SET form_status='filled', form_filled_at=?,
+                           form_screenshot_path=?, nnc1_duration=?, updated_at=?
                        WHERE id=?""",
-                    (error[:500], shot, now, job_id),
+                    (now, screenshot_path, dur, now, job_id),
                 )
             else:
                 conn.execute(
                     """UPDATE registration_jobs
-                       SET form_status='failed', last_error=?, updated_at=?
+                       SET form_status='filled', form_filled_at=?,
+                           form_screenshot_path=?, updated_at=?
                        WHERE id=?""",
-                    (error[:500], now, job_id),
+                    (now, screenshot_path, now, job_id),
                 )
+
+    def job_form_outcome_written(self, job_id: int) -> bool:
+        """填表成功或失败是否已落库（keep-browser 时 bot 会先写）。"""
+        row = self.get_registration_job(job_id)
+        if not row:
+            return False
+        return str(row.get("form_status") or "") in ("filled", "failed")
+
+    def mark_job_form_failed(
+        self,
+        job_id: int,
+        error: str,
+        screenshot_path: str = "",
+        nnc1_duration: str = "",
+    ) -> None:
+        """填表失败。有截图则写入 form_screenshot_path。"""
+        now = _utc_now()
+        shot = (screenshot_path or "").strip()
+        dur = (nnc1_duration or "").strip()
+        err = (error or "")[:2000]
+        sets = ["form_status='failed'", "last_error=?", "updated_at=?"]
+        params: list[Any] = [err, now]
+        if shot:
+            sets.append("form_screenshot_path=?")
+            params.append(shot)
+        if dur:
+            sets.append("nnc1_duration=?")
+            params.append(dur)
+        params.append(job_id)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE registration_jobs SET {', '.join(sets)} WHERE id=?",
+                params,
+            )
 
     def reset_job_form_retry(self, job_id: int) -> dict[str, Any] | None:
         """重跑填表：仅允许 form_status='failed' 的任务，重置为 pending。"""
@@ -2046,7 +2075,8 @@ class ExternalGroupStore:
                 return dict(row)
             conn.execute(
                 """UPDATE registration_jobs
-                   SET form_status='pending', last_error='', updated_at=?
+                   SET form_status='pending', last_error='',
+                       nnc1_duration='', updated_at=?
                    WHERE id = ?""",
                 (now, job_id),
             )
@@ -2210,6 +2240,7 @@ class ExternalGroupStore:
                     finished_at = NULL,
                     run_duration = '',
                     s03a_duration = '',
+                    nnc1_duration = '',
                     updated_at = ?,
                     last_error = ''
                 WHERE id = ?
