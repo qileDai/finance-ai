@@ -291,13 +291,18 @@ class RegistrationWorkflow:
                 screenshot_path=shot_path,
                 keep_browser=ctx.keep_browser,
             )
-            if ctx.keep_browser:
+            from src.browser.icris_errors import is_nnc1_loading_timeout
+
+            ok, detail = result
+            if ctx.keep_browser and not is_nnc1_loading_timeout(detail):
                 ctx.log("已加 --keep-browser，浏览器不关闭，按 Ctrl+C 结束")
                 try:
                     while True:
                         await asyncio.sleep(3600)
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     ctx.log("收到中断，保留浏览器窗口")
+            elif ctx.keep_browser:
+                ctx.log("载入中超时，已关闭浏览器并退出")
             return result
 
         def _run_nnc1() -> tuple[bool, str]:
@@ -320,7 +325,15 @@ class RegistrationWorkflow:
         nnc1_duration = format_job_run_duration(time.monotonic() - t0)
         if job_id:
             store = ExternalGroupStore()
-            if not store.job_form_outcome_written(job_id):
+            from src.browser.icris_errors import is_nnc1_loading_timeout
+
+            if not ok and is_nnc1_loading_timeout(detail):
+                store.requeue_job_form_loading_timeout(job_id)
+            row = store.get_registration_job(job_id) or {}
+            form_status = str(row.get("form_status") or "")
+            if form_status == "pending" and not ok:
+                ctx.log(f"载入中超时，任务 #{job_id} 已插队待从登录重跑")
+            elif not store.job_form_outcome_written(job_id):
                 if ok:
                     store.mark_job_form_filled(
                         job_id, shot_path, nnc1_duration=nnc1_duration

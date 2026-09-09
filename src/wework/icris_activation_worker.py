@@ -233,6 +233,19 @@ class IcrisActivationWorker:
             nnc1_duration = format_job_run_duration(time.monotonic() - t0)
 
         prelim_notified = bool(getattr(bot, "_prelim_notified", False))
+        from src.browser.icris_errors import is_nnc1_loading_timeout
+
+        if not ok and is_nnc1_loading_timeout(detail):
+            boosted = self.store.requeue_job_form_loading_timeout(job_id)
+            row = self.store.get_registration_job(job_id) or {}
+            if str(row.get("form_status") or "") == "pending":
+                logger.info(
+                    "任务 #%s 载入中超时，已插队从登录重跑 boost=%s retries=%s",
+                    job_id,
+                    (boosted or row).get("form_boost"),
+                    (boosted or row).get("nnc1_loading_retries"),
+                )
+                return
 
         if self.store.job_form_outcome_written(job_id):
             if ok:

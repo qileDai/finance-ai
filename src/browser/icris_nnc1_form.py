@@ -48,6 +48,10 @@ from src.browser.icris_ui_common import (
     wait_portal_ready,
     wait_spin_clear,
 )
+from src.browser.icris_errors import (
+    IcrisLoadingTimeoutError,
+    is_nnc1_loading_timeout,
+)
 from src.browser.launcher import create_browser_context, launch_browser
 from src.email.imap_client import IcrisAccount
 from src.materials.address_classify import (
@@ -423,8 +427,10 @@ class IcrisNnc1FormBot:
         if self._nnc1_t0:
             dur = format_job_run_duration(time.monotonic() - self._nnc1_t0)
         job_id = int(self.job_id)
+        status = "failed"
         if ok:
             db.mark_job_form_filled(job_id, shot, nnc1_duration=dur)
+            status = "filled"
         else:
             err = (detail or "").strip() or "填表失败"
             if not err.startswith("填表失败"):
@@ -432,11 +438,21 @@ class IcrisNnc1FormBot:
             db.mark_job_form_failed(
                 job_id, err, shot, nnc1_duration=dur
             )
+            if is_nnc1_loading_timeout(detail):
+                boosted = db.requeue_job_form_loading_timeout(job_id)
+                if boosted:
+                    status = "pending"
+                    logger.info(
+                        "任务 #%s 载入中超时，已插队 form_boost=%s retries=%s",
+                        job_id,
+                        boosted.get("form_boost"),
+                        boosted.get("nnc1_loading_retries"),
+                    )
         self._form_persisted = True
         logger.info(
             "任务 #%s 填表结果已写入 form_status=%s duration=%s",
             job_id,
-            "filled" if ok else "failed",
+            status,
             dur or "-",
         )
 
@@ -7338,6 +7354,7 @@ class IcrisNnc1FormBot:
         playwright = await async_playwright().start()
         browser = None
         page = None
+        loading_timeout = False
         try:
             browser = await launch_browser(
                 playwright, force_isolated=force_isolated
@@ -7412,8 +7429,12 @@ class IcrisNnc1FormBot:
                 return True, screenshot_path or ""
             except Exception as e:
                 logger.exception("IcrisNnc1FormBot 失败")
+                loading_timeout = isinstance(e, IcrisLoadingTimeoutError) or (
+                    is_nnc1_loading_timeout(e)
+                )
                 if page is not None:
-                    await self._maybe_screenshot(page, "error")
+                    shot_label = "loading_timeout" if loading_timeout else "error"
+                    await self._maybe_screenshot(page, shot_label)
                 self.persist_form_outcome(False, str(e))
                 return False, str(e)
             finally:
@@ -7427,8 +7448,17 @@ class IcrisNnc1FormBot:
                         await page.screenshot(path=screenshot_path, full_page=True)
                     except Exception as shot_err:
                         logger.warning("最终截图失败: %s", shot_err)
-                if not keep_browser and browser is not None:
-                    await browser.close()
+                force_close = (not keep_browser) or loading_timeout
+                if force_close and browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception as close_err:
+                        logger.warning("关闭浏览器失败: %s", close_err)
+                    self._keep_browser_obj = None
         finally:
-            if not keep_browser:
-                await playwright.stop()
+            if (not keep_browser) or loading_timeout:
+                try:
+                    await playwright.stop()
+                except Exception:
+                    pass
+                self._keep_playwright = None

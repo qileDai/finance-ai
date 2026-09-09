@@ -80,7 +80,12 @@ async def wait_after_nav_loading(
     timeout_ms: int = 90000,
     appear_ms: int = 1000,
 ) -> None:
-    """导航点击后：短等 loading 出现，再等到遮罩消失。"""
+    """导航点击后：短等 loading 出现，再等到遮罩消失。超时仍见「载入中」则抛错。"""
+    from src.browser.icris_errors import (
+        IcrisLoadingTimeoutError,
+        NNC1_LOADING_TIMEOUT_MSG,
+    )
+
     deadline = time.monotonic() + appear_ms / 1000.0
     while time.monotonic() < deadline:
         if await is_page_loading(page):
@@ -89,7 +94,11 @@ async def wait_after_nav_loading(
             await page.wait_for_timeout(100)
         except Exception:
             break
-    await wait_spin_clear(page, timeout_ms=timeout_ms)
+    cleared = await wait_spin_clear(page, timeout_ms=timeout_ms)
+    if cleared:
+        return
+    if await is_page_loading(page):
+        raise IcrisLoadingTimeoutError(NNC1_LOADING_TIMEOUT_MSG)
 
 
 async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:

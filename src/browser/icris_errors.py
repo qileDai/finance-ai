@@ -26,6 +26,23 @@ class IcrisStepLoadError(RuntimeError):
     """步骤关键元素长时间未出现；由 run() 关页重开后从入口重试。"""
 
 
+NNC1_LOADING_TIMEOUT_MSG = "页面载入中超时，遮罩仍在"
+NNC1_LOADING_RETRY_CAP = 1
+
+
+class IcrisLoadingTimeoutError(IcrisFlowError):
+    """储存及继续 / 继续 / 接受 之后「载入中」等到上限仍未消失。"""
+
+    def __init__(self, message: str = NNC1_LOADING_TIMEOUT_MSG, **kwargs: Any) -> None:
+        super().__init__(message or NNC1_LOADING_TIMEOUT_MSG, **kwargs)
+
+
+def is_nnc1_loading_timeout(err: object) -> bool:
+    if isinstance(err, IcrisLoadingTimeoutError):
+        return True
+    return NNC1_LOADING_TIMEOUT_MSG in str(err or "") or "载入中超时" in str(err or "")
+
+
 def normalize_id_number_key(id_number: str) -> str:
     """比对用：去空格、大写、全角括号/数字折成半角。"""
     s = unicodedata.normalize("NFKC", str(id_number or ""))

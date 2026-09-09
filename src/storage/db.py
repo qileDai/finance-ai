@@ -425,6 +425,16 @@ class ExternalGroupStore:
                 "ALTER TABLE registration_jobs ADD COLUMN id_already_registered "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "form_boost" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN form_boost "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        if "nnc1_loading_retries" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN nnc1_loading_retries "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(intent_routes)")}
@@ -1995,12 +2005,12 @@ class ExternalGroupStore:
             )
 
     def get_jobs_pending_form(self) -> list[dict[str, Any]]:
-        """查所有 activation_status='activated' AND form_status='pending' 的任务。"""
+        """待填表任务：载入超时插队（form_boost）优先，其余按 id。"""
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM registration_jobs
                    WHERE activation_status='activated' AND form_status='pending'
-                   ORDER BY id"""
+                   ORDER BY form_boost DESC, id"""
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -2076,9 +2086,39 @@ class ExternalGroupStore:
             conn.execute(
                 """UPDATE registration_jobs
                    SET form_status='pending', last_error='',
-                       nnc1_duration='', updated_at=?
+                       nnc1_duration='', form_boost=0, nnc1_loading_retries=0,
+                       updated_at=?
                    WHERE id = ?""",
                 (now, job_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def requeue_job_form_loading_timeout(self, job_id: int) -> dict[str, Any] | None:
+        """载入中超时：限一次 pending+form_boost 插队。第二次返回 None，保持 failed。"""
+        from src.browser.icris_errors import NNC1_LOADING_RETRY_CAP
+
+        now = _utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return None
+            retries = int(row["nnc1_loading_retries"] or 0)
+            status = str(row["form_status"] or "")
+            if retries >= NNC1_LOADING_RETRY_CAP:
+                return None
+            if status != "failed":
+                return None
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET form_status='pending', form_boost=1,
+                       nnc1_loading_retries=?, updated_at=?
+                   WHERE id = ?""",
+                (retries + 1, now, job_id),
             )
             row = conn.execute(
                 "SELECT * FROM registration_jobs WHERE id = ?", (job_id,)
