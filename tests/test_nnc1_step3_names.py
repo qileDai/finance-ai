@@ -112,7 +112,11 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
             prelim_check_passed("通过。请按“继续”按钮以完成提交过程。")
         )
         self.assertTrue(prelim_check_passed("通過，請按繼續"))
+        self.assertTrue(
+            prelim_check_passed("通過。請按「繼續」按鈕以完成提交過程。")
+        )
         self.assertFalse(prelim_check_passed("不通过：名称已存在"))
+        self.assertFalse(prelim_check_passed("不通過"))
         self.assertFalse(prelim_check_passed(""))
         self.assertFalse(prelim_check_passed("拒絕"))
         self.assertFalse(prelim_check_passed("拒绝"))
@@ -120,6 +124,7 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
         self.assertFalse(
             prelim_check_passed("拒絕。通过。请按“继续”按钮以完成提交过程。")
         )
+        self.assertFalse(prelim_check_passed("", "名稱相同"))
         self.assertGreater(
             prelim_result_preference_score("拒絕"),
             prelim_result_preference_score("通过。请按“继续”按钮以完成提交过程。"),
@@ -138,16 +143,22 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
             prelim_check_passed("通过。请按“继续”按钮以完成提交过程。")
         )
 
-    def test_reasons_override_pass_hint(self):
+    def test_pass_result_ignores_stray_reasons(self):
         reasons = (
             "1. 建議採用的公司名稱 [Humsienk Global Limited] "
             "與另一間已註冊的公司名稱相同。\n"
             "2. 建議採用的公司名稱 [撼世全球有限公司] "
             "與另一間已註冊的公司名稱相同。"
         )
-        self.assertFalse(
+        self.assertTrue(
             prelim_check_passed(
                 "通过。请按“继续”按钮以完成提交过程。",
+                reasons,
+            )
+        )
+        self.assertTrue(
+            prelim_check_passed(
+                "通過。請按「繼續」按鈕以完成提交過程。",
                 reasons,
             )
         )
@@ -165,6 +176,7 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
             reasons=reasons,
         )
         self.assertIn("【NNC1 初步检查拒絕】", msg)
+        self.assertIn('<font color="warning">', msg)
         self.assertIn("撼世全球有限公司", msg)
         self.assertIn("Humsienk Global Limited", msg)
         self.assertIn("拒絕原因:", msg)
@@ -173,6 +185,8 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
     def test_collect_js_scans_all_cells_and_non_acceptance(self):
         self.assertIn("cells.length - 1", _PRELIM_RESULT_COLLECT_JS)
         self.assertIn("ant-descriptions-item", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("pushSameCell", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("[:：]", _PRELIM_RESULT_COLLECT_JS)
         self.assertIn("不予接納原因", _PRELIM_REASON_COLLECT_JS)
         self.assertIn("拒絕原因", _PRELIM_REASON_COLLECT_JS)
         self.assertEqual(

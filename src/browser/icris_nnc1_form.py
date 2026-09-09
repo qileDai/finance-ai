@@ -281,15 +281,21 @@ function nnc1FindSignatoryControl() {
 
 
 def prelim_check_passed(result_text: str, reasons: str = "") -> bool:
-    """初步检查结果含「通过」才算成功（排除拒絕 / 不通过 / 已有拒絕原因）。"""
-    if (reasons or "").strip():
-        return False
+    """以「初步檢查結果」格为准：通过/通過=成功，拒絕/拒绝/不通过=失败。
+
+    结果格已明确通过时，忽略旁路刮到的拒絕原因（原因只在拒绝页附加）。
+    结果格为空时，有拒絕原因则仍判失败。
+    """
     t = result_text or ""
     if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
         return False
     if re.search(r"不通过|不通過|未能通过|未能通過", t):
         return False
-    return bool(re.search(r"通过|通過", t))
+    if re.search(r"通过|通過", t):
+        return True
+    if (reasons or "").strip():
+        return False
+    return False
 
 
 def prelim_result_preference_score(text: str) -> int:
@@ -348,7 +354,7 @@ def format_prelim_reject_error(result: str = "", reasons: str = "") -> str:
 
 
 def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: str = "") -> str:
-    """扫 tr 全部相邻单元格 + ant-descriptions，收集匹配标签的值。"""
+    """扫 tr 相邻单元格、同格「标签：值」、以及 ant-descriptions。"""
     keep = "true" if keep_newlines else "false"
     value_filter = f"if (valueRe && !valueRe.test(val)) return;" if value_re else ""
     value_decl = f"const valueRe = {value_re};" if value_re else "const valueRe = null;"
@@ -368,18 +374,33 @@ def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: s
             {value_filter}
             hits.push(val);
         }};
+        const pushSameCell = (text) => {{
+            const raw = text || '';
+            const m = raw.match(/^([\\s\\S]*?)\\s*[:：]\\s*([\\s\\S]+)$/);
+            if (!m) return;
+            if (!labelRe.test(norm(m[1]))) return;
+            const val = keepNewlines
+                ? m[2].split('\\n').map((l) => l.replace(/[ \\t]+/g, ' ').trim()).filter(Boolean).join('\\n')
+                : norm(m[2]);
+            pushVal(val);
+        }};
         for (const tr of document.querySelectorAll('tr')) {{
             const cells = [...tr.querySelectorAll('th, td')];
             for (let i = 0; i < cells.length - 1; i++) {{
                 if (!labelRe.test(norm(cells[i].innerText))) continue;
                 pushVal(cellText(cells[i + 1]));
             }}
+            for (const cell of cells) {{
+                pushSameCell(cellText(cell));
+            }}
         }}
         for (const item of document.querySelectorAll('.ant-descriptions-item')) {{
             const lab = item.querySelector('.ant-descriptions-item-label');
             const content = item.querySelector('.ant-descriptions-item-content');
-            if (!lab || !labelRe.test(norm(lab.innerText))) continue;
-            pushVal(cellText(content));
+            if (lab && content && labelRe.test(norm(lab.innerText))) {{
+                pushVal(cellText(content));
+            }}
+            pushSameCell(cellText(item));
         }}
         return hits;
     }}"""

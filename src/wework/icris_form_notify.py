@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_FONT_TAG_RE = re.compile(r"</?font(?:\s[^>]*)?>", re.I)
+
+
+def _md_status(text: str, *, passed: bool) -> str:
+    color = "info" if passed else "warning"
+    return f'<font color="{color}">{text}</font>'
+
+
+def strip_prelim_markdown(text: str) -> str:
+    """去掉企微 markdown 的 font 标签，供纯文本回退。"""
+    return _FONT_TAG_RE.sub("", text or "")
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -76,8 +89,11 @@ def format_prelim_message(
 ) -> str:
     """初步检查群通知正文。通过不含拒絕原因；拒絕追加页面抓到的全文。"""
     f = fields if isinstance(fields, dict) else {}
-    title = "【NNC1 初步检查通过】" if passed else "【NNC1 初步检查拒絕】"
-    result = "通过" if passed else "拒絕"
+    title = _md_status(
+        "【NNC1 初步检查通过】" if passed else "【NNC1 初步检查拒絕】",
+        passed=passed,
+    )
+    result = _md_status("通过" if passed else "拒絕", passed=passed)
     lines = [
         title,
         f"任务 #{int(job_id or 0)}",
@@ -142,7 +158,7 @@ def send_prelim_notify(
             return True
     if not sent and chat_id:
         try:
-            ww.send_group_text(chat_id, msg)
+            ww.send_group_text(chat_id, strip_prelim_markdown(msg))
             return True
         except Exception as e:
             logger.warning("初步检查通知应用消息发送失败: %s", e)

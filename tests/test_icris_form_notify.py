@@ -6,6 +6,7 @@ from src.wework.icris_form_notify import (
     fields_from_payload,
     format_prelim_message,
     send_prelim_notify,
+    strip_prelim_markdown,
 )
 
 
@@ -45,6 +46,7 @@ class TestPrelimNotifyMessage(unittest.TestCase):
             128, fields_from_payload(_payload()), passed=True, reasons="应被忽略"
         )
         self.assertIn("【NNC1 初步检查通过】", msg)
+        self.assertIn('<font color="info">【NNC1 初步检查通过】</font>', msg)
         self.assertIn("任务 #128", msg)
         self.assertIn("撼世全球有限公司", msg)
         self.assertIn("Humsienk Global Limited", msg)
@@ -52,9 +54,12 @@ class TestPrelimNotifyMessage(unittest.TestCase):
         self.assertIn("PRC_ID", msg)
         self.assertIn("362531199002111537", msg)
         self.assertIn("yx84925ytg11u", msg)
-        self.assertIn("初步检查结果: 通过", msg)
+        self.assertIn('初步检查结果: <font color="info">通过</font>', msg)
         self.assertNotIn("拒絕原因", msg)
         self.assertNotIn("应被忽略", msg)
+        plain = strip_prelim_markdown(msg)
+        self.assertNotIn("<font", plain)
+        self.assertIn("初步检查结果: 通过", plain)
 
     def test_reject_message_includes_reasons(self):
         reasons = "1. 公司名称与身份证明不符\n2. 地址不完整"
@@ -65,7 +70,8 @@ class TestPrelimNotifyMessage(unittest.TestCase):
             reasons=reasons,
         )
         self.assertIn("【NNC1 初步检查拒絕】", msg)
-        self.assertIn("初步检查结果: 拒絕", msg)
+        self.assertIn('<font color="warning">【NNC1 初步检查拒絕】</font>', msg)
+        self.assertIn('初步检查结果: <font color="warning">拒絕</font>', msg)
         self.assertIn("拒絕原因:", msg)
         self.assertIn("公司名称与身份证明不符", msg)
         self.assertIn("地址不完整", msg)
@@ -105,10 +111,28 @@ class TestSendPrelimNotify(unittest.TestCase):
         client.send_webhook_markdown.assert_called_once()
         content = client.send_webhook_markdown.call_args[0][1]
         self.assertIn("初步检查通过", content)
+        self.assertIn('<font color="info">', content)
         client.send_webhook_image.assert_called_once_with(
             "https://qyapi.weixin.qq.com/hook", str(shot)
         )
         client.send_group_text.assert_not_called()
+
+    def test_text_fallback_strips_font_tags(self):
+        client = MagicMock()
+        with patch("config.settings.settings") as settings:
+            settings.icris_review_webhook_url = ""
+            settings.icris_review_notify_chat_id = "chat"
+            ok = send_prelim_notify(
+                128, _payload(), passed=False, reasons="名称相同", client=client
+            )
+        self.assertTrue(ok)
+        client.send_webhook_markdown.assert_not_called()
+        client.send_group_text.assert_called_once()
+        text = client.send_group_text.call_args[0][1]
+        self.assertNotIn("<font", text)
+        self.assertIn("【NNC1 初步检查拒絕】", text)
+        self.assertIn("初步检查结果: 拒絕", text)
+        self.assertIn("名称相同", text)
 
 
 if __name__ == "__main__":
