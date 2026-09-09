@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { api, type JobRow } from "../api";
+import { Link } from "react-router-dom";
+import { api, type JobField, type JobRow } from "../api";
 import { formatDateTime } from "../format";
 import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobStatusLabel, jobStatusTagColor } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
@@ -36,6 +36,7 @@ type Props = {
 };
 
 const POLL_SEC = 20;
+const PAGE_SIZE = 10;
 
 async function copyText(text: string): Promise<boolean> {
   const cleaned = (text || "").trim();
@@ -74,12 +75,65 @@ const STATUS_OPTIONS = [
   { value: "cancelled", label: "已取消" },
 ];
 
+function JobExpandRow({ job }: { job: JobRow }) {
+  const [fields, setFields] = useState<JobField[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api
+      .job(job.id)
+      .then((d) => {
+        if (alive) setFields(d.fields || []);
+      })
+      .catch(() => {
+        if (alive) setFields([]);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [job.id]);
+
+  return (
+    <div className="job-expand">
+      <JobPipelineLights progress={job.progress} />
+      <div className="job-expand-meta">
+        来源 {job.source || "-"}
+        {" · "}
+        尝试 {job.attempts ?? 0}/{job.max_attempts ?? 0}
+        {" · "}
+        dry/submit {job.dry_run ? "Y" : "N"}/{job.allow_submit ? "Y" : "N"}
+      </div>
+      {loading ? (
+        <p className="muted">字段加载中…</p>
+      ) : fields?.length ? (
+        <dl className="job-expand-fields">
+          {fields.map((f) => (
+            <div key={f.key}>
+              <dt>{f.label || f.key}</dt>
+              <dd>{f.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="muted">无字段快照</p>
+      )}
+    </div>
+  );
+}
+
 export function JobsPage({ refreshKey, onRefresh }: Props) {
   const message = useMessageApi();
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<JobRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [busyId, setBusyId] = useState<number | null>(null);
   const sortKey = "id" as const;
   const sortAsc = false;
@@ -92,7 +146,6 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
   const [companyInput, setCompanyInput] = useState("");
   const [directorInput, setDirectorInput] = useState("");
   const [idInput, setIdInput] = useState("");
-  const nav = useNavigate();
   const folderOk = isDirectoryPickerSupported();
   const [saveDir, setSaveDir] = useState<ShotDirHandle | null>(null);
   const [zoneHover, setZoneHover] = useState(false);
@@ -111,19 +164,29 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     }
     const dateFrom = dateRange?.[0]?.format("YYYY-MM-DD") || "";
     const dateTo = dateRange?.[1]?.format("YYYY-MM-DD") || "";
+    const offset = (page - 1) * PAGE_SIZE;
     try {
       const d = await api.jobs(
         status,
-        80,
+        PAGE_SIZE,
         "",
         dateFrom,
         dateTo,
         companyName,
         directorName,
         idNumber,
+        offset,
       );
       if (gen !== loadGen.current) return;
-      setItems(d.items || []);
+      const rows = d.items || [];
+      const all = Number(d.total || 0);
+      if (rows.length === 0 && all > 0 && page > 1) {
+        const last = Math.max(1, Math.ceil(all / PAGE_SIZE));
+        setPage(last);
+        return;
+      }
+      setItems(rows);
+      setTotal(all);
       if (!silent) setError(null);
     } catch (e) {
       if (gen !== loadGen.current) return;
@@ -131,7 +194,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     } finally {
       if (gen === loadGen.current && !silent) setLoading(false);
     }
-  }, [status, companyName, directorName, idNumber, dateRange]);
+  }, [status, companyName, directorName, idNumber, dateRange, page]);
 
   const resetCountdown = useCallback(() => {
     countdownRef.current = POLL_SEC;
@@ -238,6 +301,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
   }, [loading, sorted.length]);
 
   function onSearch() {
+    setPage(1);
     setCompanyName(companyInput.trim());
     setDirectorName(directorInput.trim());
     setIdNumber(idInput.trim());
@@ -252,6 +316,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     setCompanyName("");
     setDirectorName("");
     setIdNumber("");
+    setPage(1);
   }
 
   function onManualRefresh() {
@@ -325,13 +390,22 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       return;
     }
     if (kind === "formRetry") {
-      if (!window.confirm(`确认重跑填表任务 #${id}？`)) return;
-      void runAct(id, "formRetry");
+      Modal.confirm({
+        title: "确认重跑填表？",
+        content: `确认重跑填表任务 #${id}？`,
+        okText: "重跑填表",
+        cancelText: "取消",
+        onOk: () => runAct(id, "formRetry"),
+      });
       return;
     }
-    const label = "重跑";
-    if (!window.confirm(`确认${label}任务 #${id}？`)) return;
-    void runAct(id, kind);
+    Modal.confirm({
+      title: "确认重跑？",
+      content: `确认重跑任务 #${id}？`,
+      okText: "重跑",
+      cancelText: "取消",
+      onOk: () => runAct(id, "requeue"),
+    });
   }
 
   const columns = [
@@ -685,13 +759,19 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
           />
           <Select
             value={status}
-            onChange={setStatus}
+            onChange={(v) => {
+              setPage(1);
+              setStatus(v);
+            }}
             options={STATUS_OPTIONS}
             style={{ width: 120 }}
           />
           <DatePicker.RangePicker
             value={dateRange as [dayjs.Dayjs, dayjs.Dayjs] | null}
-            onChange={(range) => setDateRange(range as [dayjs.Dayjs | null, dayjs.Dayjs | null] | null)}
+            onChange={(range) => {
+              setPage(1);
+              setDateRange(range as [dayjs.Dayjs | null, dayjs.Dayjs | null] | null);
+            }}
             style={{ width: 240 }}
           />
           <Button type="primary" icon={<SearchOutlined />} onClick={onSearch}>
@@ -741,32 +821,18 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
             rowKey="id"
             size="small"
             scroll={{ x: "max-content", ...(bodyY ? { y: bodyY } : {}) }}
-            pagination={{ pageSize: 10, showSizeChanger: false }}
+            pagination={{
+              current: page,
+              pageSize: PAGE_SIZE,
+              total,
+              showSizeChanger: false,
+              showTotal: (n) => `共 ${n} 条`,
+            }}
+            onChange={(pag) => {
+              setPage(pag.current || 1);
+            }}
             expandable={{
-              expandedRowRender: (r: JobRow) => (
-                <div className="job-expand">
-                  <JobPipelineLights progress={r.progress} />
-                  <div className="job-expand-meta">
-                    来源 {r.source || "-"}
-                    {" · "}
-                    尝试 {r.attempts ?? 0}/{r.max_attempts ?? 0}
-                    {" · "}
-                    dry/submit {r.dry_run ? "Y" : "N"}/{r.allow_submit ? "Y" : "N"}
-                  </div>
-                  {r.fields?.length ? (
-                    <dl className="job-expand-fields">
-                      {r.fields.map((f) => (
-                        <div key={f.key}>
-                          <dt>{f.label || f.key}</dt>
-                          <dd>{f.value}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  ) : (
-                    <p className="muted">无字段快照</p>
-                  )}
-                </div>
-              ),
+              expandedRowRender: (r: JobRow) => <JobExpandRow job={r} />,
             }}
           />
         </StateBox>

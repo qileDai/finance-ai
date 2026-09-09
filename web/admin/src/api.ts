@@ -95,6 +95,8 @@ export type JobsResponse = ApiOk<{
   items: JobRow[];
   status: string;
   limit: number;
+  offset: number;
+  total: number;
 }>;
 
 export type JobField = { key: string; label?: string; value: string; group?: string };
@@ -302,6 +304,7 @@ export const api = {
     companyName = "",
     directorName = "",
     idNumber = "",
+    offset = 0,
   ) => {
     const q = new URLSearchParams();
     if (status) q.set("status", status);
@@ -312,6 +315,7 @@ export const api = {
     if (directorName) q.set("director_name", directorName);
     if (idNumber) q.set("id_number", idNumber);
     q.set("limit", String(limit));
+    q.set("offset", String(Math.max(0, offset)));
     return request<JobsResponse>(`/admin/api/jobs?${q}`);
   },
   job: (id: number) =>

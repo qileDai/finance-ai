@@ -120,8 +120,13 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
       });
       return;
     }
-    if (!window.confirm(`确认重跑任务 #${jobId}？`)) return;
-    void runJobAct("requeue");
+    Modal.confirm({
+      title: "确认重跑？",
+      content: `确认重跑任务 #${jobId}？`,
+      okText: "重跑",
+      cancelText: "取消",
+      onOk: () => runJobAct("requeue"),
+    });
   }
 
   async function runJobAct(kind: "cancel" | "requeue") {
@@ -139,8 +144,17 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
     }
   }
 
+  function confirmFormRetry() {
+    Modal.confirm({
+      title: "确认重跑填表？",
+      content: `确认重跑填表任务 #${jobId}？`,
+      okText: "重跑填表",
+      cancelText: "取消",
+      onOk: () => formRetry(),
+    });
+  }
+
   async function formRetry() {
-    if (!window.confirm(`确认重跑填表任务 #${jobId}？`)) return;
     setFormRetrying(true);
     try {
       const res = await api.formRetryJob(jobId);
@@ -399,7 +413,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                     type="primary"
                     disabled={formRetrying}
                     loading={formRetrying}
-                    onClick={formRetry}
+                    onClick={confirmFormRetry}
                   >
                     重跑填表
                   </Button>

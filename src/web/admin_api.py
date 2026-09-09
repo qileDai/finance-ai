@@ -73,10 +73,15 @@ def handle_admin_api(
                 limit = int(query.get("limit", ["50"])[0])
             except ValueError:
                 limit = 50
+            try:
+                offset = int(query.get("offset", ["0"])[0])
+            except ValueError:
+                offset = 0
             return _handle_jobs_list(
                 store,
                 status=status,
                 limit=limit,
+                offset=offset,
                 keyword=keyword,
                 date_from=date_from,
                 date_to=date_to,
@@ -536,6 +541,7 @@ def _handle_jobs_list(
     *,
     status: str,
     limit: int,
+    offset: int = 0,
     keyword: str = "",
     date_from: str = "",
     date_to: str = "",
@@ -545,8 +551,20 @@ def _handle_jobs_list(
 ) -> tuple[dict[str, Any], int]:
     import json as _json
 
+    offset = max(0, int(offset or 0))
+    total = store.count_registration_jobs(
+        status=status,
+        keyword=keyword,
+        date_from=date_from,
+        date_to=date_to,
+        company_name=company_name,
+        director_name=director_name,
+        id_number=id_number,
+    )
     items = store.list_registration_jobs(
         limit=limit,
+        offset=offset,
+        omit_result_messages=True,
         status=status,
         keyword=keyword,
         date_from=date_from,
@@ -617,10 +635,15 @@ def _handle_jobs_list(
         row["contact_phone"] = str(
             contact.get("phone") or applicant.get("phone") or ""
         )
-        row["fields"] = _flatten_payload_fields(payload) if payload else []
         row["progress"] = job_pipeline_progress(row)
         slim.append(row)
-    return _ok(items=slim, status=status or "all", limit=limit)
+    return _ok(
+        items=slim,
+        status=status or "all",
+        limit=limit,
+        offset=offset,
+        total=total,
+    )
 
 
 _FIELD_LABELS: dict[str, str] = {

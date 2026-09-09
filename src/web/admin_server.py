@@ -163,18 +163,9 @@ class AdminWebServer:
                 q = parse_qs(qs)
                 shot_type = (q.get("type", ["fail"]) or ["fail"])[0].lower()
 
-                job = store.get_registration_job(job_id)
-                if not job:
+                found, file_path = store.get_job_screenshot_path(job_id, shot_type)
+                if not found:
                     return self._send_json({"ok": False, "error": "job not found"}, 404)
-
-                if shot_type == "esubmit":
-                    file_path = str(job.get("esubmit_screenshot_path") or "").strip()
-                elif shot_type == "success":
-                    file_path = str(job.get("success_screenshot_path") or "").strip()
-                elif shot_type == "form":
-                    file_path = str(job.get("form_screenshot_path") or "").strip()
-                else:
-                    file_path = str(job.get("screenshot_path") or "").strip()
 
                 if not file_path:
                     return self._send_json(
@@ -192,8 +183,18 @@ class AdminWebServer:
                         404,
                     )
 
-                data = p.read_bytes()
+                st = p.stat()
                 safe_type = re.sub(r"[^a-z0-9_-]", "", shot_type) or "fail"
+                etag = f'"{job_id}-{safe_type}-{int(st.st_mtime)}-{st.st_size}"'
+                inm = (self.headers.get("If-None-Match") or "").strip()
+                if inm == etag or inm == f"W/{etag}":
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "private, no-cache")
+                    self.end_headers()
+                    return
+
+                data = p.read_bytes()
                 filename = f"job-{job_id}-{safe_type}.png"
                 as_download = (q.get("download", ["0"]) or ["0"])[0].lower() in (
                     "1",
@@ -208,7 +209,8 @@ class AdminWebServer:
                     "Content-Disposition",
                     f'{disposition}; filename="{filename}"',
                 )
-                self.send_header("Cache-Control", "no-cache")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, no-cache")
                 self.end_headers()
                 self.wfile.write(data)
 

@@ -152,6 +152,7 @@ export function DraggableShot({
           src={src}
           width={width}
           height={height}
+          loading="lazy"
           style={{ objectFit: "cover", cursor: "pointer" }}
           preview={{
             ...JOB_SHOT_PREVIEW,

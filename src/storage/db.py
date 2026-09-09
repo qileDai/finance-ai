@@ -2405,10 +2405,9 @@ class ExternalGroupStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_registration_jobs(
+    def _registration_jobs_where(
         self,
         *,
-        limit: int = 50,
         status: str = "",
         keyword: str = "",
         date_from: str = "",
@@ -2416,8 +2415,7 @@ class ExternalGroupStore:
         company_name: str = "",
         director_name: str = "",
         id_number: str = "",
-    ) -> list[dict[str, Any]]:
-        limit = max(1, min(int(limit or 50), 200))
+    ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if status:
@@ -2466,12 +2464,98 @@ class ExternalGroupStore:
             except (ValueError, TypeError):
                 pass
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
+
+    def count_registration_jobs(
+        self,
+        *,
+        status: str = "",
+        keyword: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        company_name: str = "",
+        director_name: str = "",
+        id_number: str = "",
+    ) -> int:
+        where, params = self._registration_jobs_where(
+            status=status,
+            keyword=keyword,
+            date_from=date_from,
+            date_to=date_to,
+            company_name=company_name,
+            director_name=director_name,
+            id_number=id_number,
+        )
         with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM registration_jobs {where}",
+                params,
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def list_registration_jobs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        omit_result_messages: bool = False,
+        status: str = "",
+        keyword: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        company_name: str = "",
+        director_name: str = "",
+        id_number: str = "",
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit or 50), 200))
+        offset = max(0, int(offset or 0))
+        where, params = self._registration_jobs_where(
+            status=status,
+            keyword=keyword,
+            date_from=date_from,
+            date_to=date_to,
+            company_name=company_name,
+            director_name=director_name,
+            id_number=id_number,
+        )
+        with self._conn() as conn:
+            select_sql = "SELECT *"
+            if omit_result_messages:
+                cols = [
+                    str(r["name"])
+                    for r in conn.execute("PRAGMA table_info(registration_jobs)").fetchall()
+                    if str(r["name"]) != "result_messages"
+                ]
+                select_sql = "SELECT " + ", ".join(cols)
             rows = conn.execute(
-                f"SELECT * FROM registration_jobs {where} ORDER BY id DESC LIMIT ?",
-                (*params, limit),
+                f"{select_sql} FROM registration_jobs {where} "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_job_screenshot_path(self, job_id: int, shot_type: str) -> tuple[bool, str]:
+        """只读截图路径列。返回 (任务是否存在, 路径)。"""
+        col = {
+            "esubmit": "esubmit_screenshot_path",
+            "success": "success_screenshot_path",
+            "form": "form_screenshot_path",
+        }.get((shot_type or "").strip().lower(), "screenshot_path")
+        if col not in (
+            "esubmit_screenshot_path",
+            "success_screenshot_path",
+            "form_screenshot_path",
+            "screenshot_path",
+        ):
+            col = "screenshot_path"
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT {col} AS path FROM registration_jobs WHERE id = ?",
+                (int(job_id),),
+            ).fetchone()
+        if not row:
+            return False, ""
+        return True, str(row["path"] or "").strip()
 
     def registration_job_stats(self, *, hours: float | None = None) -> dict[str, Any]:
         """注册任务统计；hours 不为空时增加近 N 小时成功率与最近失败列表。"""
