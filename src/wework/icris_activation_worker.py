@@ -232,13 +232,17 @@ class IcrisActivationWorker:
                 wd.stop()
             nnc1_duration = format_job_run_duration(time.monotonic() - t0)
 
+        prelim_notified = bool(getattr(bot, "_prelim_notified", False))
+
         if self.store.job_form_outcome_written(job_id):
             if ok:
                 logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
-                self._notify_form_result(job, ok=True, detail=str(shot_file))
+                if not prelim_notified:
+                    self._notify_form_result(job, ok=True, detail=str(shot_file))
             else:
                 logger.error("任务 #%s 填表失败: %s", job_id, detail)
-                self._notify_form_result(job, ok=False, detail=detail)
+                if not prelim_notified:
+                    self._notify_form_result(job, ok=False, detail=detail)
             return
 
         if ok:
@@ -246,7 +250,8 @@ class IcrisActivationWorker:
                 job_id, str(shot_file), nnc1_duration=nnc1_duration
             )
             logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
-            self._notify_form_result(job, ok=True, detail=str(shot_file))
+            if not prelim_notified:
+                self._notify_form_result(job, ok=True, detail=str(shot_file))
         else:
             fail_shot = str(shot_file) if shot_file.is_file() else ""
             self.store.mark_job_form_failed(
@@ -258,7 +263,8 @@ class IcrisActivationWorker:
             logger.error("任务 #%s 填表失败: %s", job_id, detail)
             if fail_shot:
                 logger.info("任务 #%s 填表失败截图: %s", job_id, fail_shot)
-            self._notify_form_result(job, ok=False, detail=detail)
+            if not prelim_notified:
+                self._notify_form_result(job, ok=False, detail=detail)
 
     def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:
         """填表结果通知到企微内部群（无配置则跳过）。优先群机器人 Webhook。"""

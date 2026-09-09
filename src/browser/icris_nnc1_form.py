@@ -276,8 +276,10 @@ function nnc1FindSignatoryControl() {
 """
 
 
-def prelim_check_passed(result_text: str) -> bool:
-    """初步检查结果含「通过」才算成功（排除拒絕 / 不通过）。"""
+def prelim_check_passed(result_text: str, reasons: str = "") -> bool:
+    """初步检查结果含「通过」才算成功（排除拒絕 / 不通过 / 已有拒絕原因）。"""
+    if (reasons or "").strip():
+        return False
     t = result_text or ""
     if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
         return False
@@ -287,7 +289,7 @@ def prelim_check_passed(result_text: str) -> bool:
 
 
 def prelim_result_preference_score(text: str) -> int:
-    """多 iframe 时优先採「拒絕」单元格，避免误採「通过，请按继续」。"""
+    """多候选时优先採「拒絕」，避免误採「通过，请按继续」。"""
     t = text or ""
     if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
         return 3
@@ -296,6 +298,33 @@ def prelim_result_preference_score(text: str) -> int:
     if re.search(r"通过|通過", t):
         return 1
     return 1 if t.strip() else 0
+
+
+def pick_best_prelim_result(candidates: list[str] | tuple[str, ...] | None) -> str:
+    """同一页多段结果时取分數最高的（拒絕 > 不通过 > 通过）。"""
+    best = ""
+    best_score = -1
+    for raw in candidates or ():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        score = prelim_result_preference_score(text)
+        if score > best_score:
+            best = text
+            best_score = score
+    return best
+
+
+def pick_best_prelim_reasons(candidates: list[str] | tuple[str, ...] | None) -> str:
+    """多段拒絕原因取最长非空全文。"""
+    texts = [
+        normalize_prelim_reject_reasons(str(raw or ""))
+        for raw in (candidates or ())
+    ]
+    texts = [t for t in texts if t]
+    if not texts:
+        return ""
+    return max(texts, key=len)
 
 
 def normalize_prelim_reject_reasons(text: str) -> str:
@@ -314,6 +343,55 @@ def format_prelim_reject_error(result: str = "", reasons: str = "") -> str:
     return "初步检查结果未通过"
 
 
+def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: str = "") -> str:
+    """扫 tr 全部相邻单元格 + ant-descriptions，收集匹配标签的值。"""
+    keep = "true" if keep_newlines else "false"
+    value_filter = f"if (valueRe && !valueRe.test(val)) return;" if value_re else ""
+    value_decl = f"const valueRe = {value_re};" if value_re else "const valueRe = null;"
+    return f"""() => {{
+        const labelRe = {label_re};
+        {value_decl}
+        const keepNewlines = {keep};
+        const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+        const cellText = (el) => {{
+            const raw = (el && el.innerText) || '';
+            if (!keepNewlines) return norm(raw);
+            return raw.split('\\n').map((l) => l.replace(/[ \\t]+/g, ' ').trim()).filter(Boolean).join('\\n');
+        }};
+        const hits = [];
+        const pushVal = (val) => {{
+            if (!val) return;
+            {value_filter}
+            hits.push(val);
+        }};
+        for (const tr of document.querySelectorAll('tr')) {{
+            const cells = [...tr.querySelectorAll('th, td')];
+            for (let i = 0; i < cells.length - 1; i++) {{
+                if (!labelRe.test(norm(cells[i].innerText))) continue;
+                pushVal(cellText(cells[i + 1]));
+            }}
+        }}
+        for (const item of document.querySelectorAll('.ant-descriptions-item')) {{
+            const lab = item.querySelector('.ant-descriptions-item-label');
+            const content = item.querySelector('.ant-descriptions-item-content');
+            if (!lab || !labelRe.test(norm(lab.innerText))) continue;
+            pushVal(cellText(content));
+        }}
+        return hits;
+    }}"""
+
+
+_PRELIM_RESULT_COLLECT_JS = _prelim_collect_values_js(
+    r"/初步檢查結果|初步检查结果|Preliminary\s*Check\s*Result/i",
+    keep_newlines=False,
+    value_re=r"/通過|通过|拒絕|拒绝|Rejection|不通过|不通過/i",
+)
+_PRELIM_REASON_COLLECT_JS = _prelim_collect_values_js(
+    r"/拒絕原因|拒绝原因|不予接納原因|不予接纳原因|Rejection\s*Reason/i",
+    keep_newlines=True,
+)
+
+
 class IcrisNnc1FormBot:
     """阶段 3：已激活账号登录 ICRIS3EP → NNC1 填表（不最终提交）。"""
 
@@ -328,6 +406,8 @@ class IcrisNnc1FormBot:
         self._form_persisted = False
         self._keep_playwright = None
         self._keep_browser_obj = None
+        self._company_data: dict[str, Any] = {}
+        self._prelim_notified = False
 
     def persist_form_outcome(
         self, ok: bool, detail: str = "", store: Any = None
@@ -359,6 +439,29 @@ class IcrisNnc1FormBot:
             "filled" if ok else "failed",
             dur or "-",
         )
+
+    def notify_prelim_result(
+        self,
+        *,
+        passed: bool,
+        reasons: str = "",
+        screenshot_path: str = "",
+    ) -> None:
+        """初步检查出结果后立刻发审核群（失败不影响填表流程）。"""
+        try:
+            from src.wework.icris_form_notify import send_prelim_notify
+
+            self._prelim_notified = bool(
+                send_prelim_notify(
+                    int(self.job_id or 0),
+                    self._company_data,
+                    passed=passed,
+                    reasons=reasons,
+                    screenshot_path=screenshot_path,
+                )
+            )
+        except Exception as e:
+            logger.warning("初步检查群通知失败: %s", e)
 
     async def _write_job_screenshot(self, page) -> str:
         dest = (self._job_screenshot_path or "").strip()
@@ -7100,76 +7203,77 @@ class IcrisNnc1FormBot:
             pass
         await page.wait_for_timeout(1000)
 
+    async def _eval_in_frames_collect(self, page, expression: str) -> list[Any]:
+        """所有 frame 的 evaluate 结果摊平为列表。"""
+        out: list[Any] = []
+        for frame in page.frames:
+            try:
+                val = await frame.evaluate(expression)
+            except Exception:
+                continue
+            if isinstance(val, list):
+                out.extend(val)
+            elif val not in (None, False, "", [], {}):
+                out.append(val)
+        return out
+
     async def _read_preliminary_check_result(self, page) -> str:
-        text = await self._eval_in_frames_best(
-            page,
-            """() => {
-                const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-                const labelRe = /初步檢查結果|初步检查结果|Preliminary\\s*Check\\s*Result/i;
-                for (const tr of document.querySelectorAll('tr')) {
-                    const cells = [...tr.querySelectorAll('th, td')];
-                    if (cells.length < 2) continue;
-                    if (!labelRe.test(norm(cells[0].innerText))) continue;
-                    return norm(cells.slice(1).map(c => c.innerText).join(' '));
-                }
-                return '';
-            }""",
-            prelim_result_preference_score,
+        hits = await self._eval_in_frames_collect(
+            page, _PRELIM_RESULT_COLLECT_JS
         )
-        return str(text or "").strip()
+        return pick_best_prelim_result(
+            [str(h) for h in hits if str(h or "").strip()]
+        )
 
     async def _read_preliminary_check_reject_reasons(self, page) -> str:
-        text = await self._eval_in_frames_best(
-            page,
-            """() => {
-                const normLine = (s) => (s || '').replace(/[ \\t]+/g, ' ').trim();
-                const labelRe = /拒絕原因|拒绝原因|Rejection\\s*Reason/i;
-                const cellText = (el) => (el.innerText || '')
-                    .split('\\n').map(normLine).filter(Boolean).join('\\n');
-                for (const tr of document.querySelectorAll('tr')) {
-                    const cells = [...tr.querySelectorAll('th, td')];
-                    if (cells.length < 2) continue;
-                    if (!labelRe.test(normLine(cells[0].innerText))) continue;
-                    return cells.slice(1).map(cellText).filter(Boolean).join('\\n');
-                }
-                return '';
-            }""",
-            lambda t: 2 if t.strip() else 0,
+        hits = await self._eval_in_frames_collect(
+            page, _PRELIM_REASON_COLLECT_JS
         )
-        return normalize_prelim_reject_reasons(str(text or ""))
+        return pick_best_prelim_reasons(
+            [str(h) for h in hits if str(h or "").strip()]
+        )
 
     async def _wait_preliminary_check_and_continue(self, page) -> None:
         """到初步检查页：截图判定是否含通过，不点继续、不进付款页。"""
         logger.info("NNC1 步骤6: 等待初步检查页")
         await wait_spin_clear(page, timeout_ms=90000)
+        deadline = time.monotonic() + 120
+        result = ""
+        reasons = ""
         try:
-            await page.wait_for_function(
-                """() => {
-                    if (""" + ICRIS_PAGE_IS_LOADING_JS + """) return false;
-                    const labelRe = /初步檢查結果|初步检查结果|Preliminary\\s*Check\\s*Result/i;
-                    const valRe = /通過|通过|拒絕|拒绝|Rejection|不通过|不通過/i;
-                    for (const tr of document.querySelectorAll('tr')) {
-                        const cells = [...tr.querySelectorAll('th, td')];
-                        if (cells.length < 2) continue;
-                        if (!labelRe.test((cells[0].innerText || '').trim())) continue;
-                        return valRe.test(cells.slice(1).map(c => c.innerText).join(' '));
-                    }
-                    return false;
-                }""",
-                timeout=120000,
-            )
+            while time.monotonic() < deadline:
+                if await is_page_loading(page):
+                    await page.wait_for_timeout(300)
+                    continue
+                result = await self._read_preliminary_check_result(page)
+                reasons = await self._read_preliminary_check_reject_reasons(page)
+                if result or reasons:
+                    break
+                await page.wait_for_timeout(300)
+            else:
+                raise TimeoutError("初步检查结果未出现")
         except Exception as e:
             await self._maybe_screenshot(page, "step6_prelim_wait_fail")
             raise RuntimeError(f"初步检查页加载超时: {e}")
         await page.wait_for_timeout(500)
         result = await self._read_preliminary_check_result(page)
         reasons = await self._read_preliminary_check_reject_reasons(page)
-        await self._maybe_screenshot(page, "step6_preliminary_check")
-        if not prelim_check_passed(result):
+        if re.search(r"通过|通過", result or "") and (reasons or "").strip():
+            await page.wait_for_timeout(1500)
+            result = await self._read_preliminary_check_result(page)
+            reasons = await self._read_preliminary_check_reject_reasons(page)
+        shot = await self._maybe_screenshot(page, "step6_preliminary_check")
+        if not prelim_check_passed(result, reasons):
             err = format_prelim_reject_error(result, reasons)
             self.persist_form_outcome(False, err)
+            self.notify_prelim_result(
+                passed=False, reasons=reasons, screenshot_path=shot
+            )
             raise RuntimeError(err)
         self.persist_form_outcome(True)
+        self.notify_prelim_result(
+            passed=True, reasons="", screenshot_path=shot
+        )
         logger.info("初步检查通过: %s", result[:120])
 
     async def _fill_step6_proceed_submit(self, page) -> None:
@@ -7225,6 +7329,8 @@ class IcrisNnc1FormBot:
 
         self._nnc1_t0 = time.monotonic()
         self._form_persisted = False
+        self._prelim_notified = False
+        self._company_data = data if isinstance(data, dict) else {}
         self._job_screenshot_path = (screenshot_path or "").strip()
         self._job_summary_shot_written = False
 

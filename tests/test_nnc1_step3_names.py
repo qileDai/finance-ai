@@ -1,14 +1,19 @@
 import unittest
 
 from src.browser.icris_nnc1_form import (
+    _PRELIM_REASON_COLLECT_JS,
+    _PRELIM_RESULT_COLLECT_JS,
     first_real_signatory_index,
     format_prelim_reject_error,
     is_signatory_placeholder,
     normalize_prelim_reject_reasons,
+    pick_best_prelim_reasons,
+    pick_best_prelim_result,
     prelim_check_passed,
     prelim_result_preference_score,
     resolve_nnc1_step3_names,
 )
+from src.wework.icris_form_notify import format_prelim_message
 
 
 class TestResolveNnc1Step3Names(unittest.TestCase):
@@ -118,6 +123,63 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
         self.assertGreater(
             prelim_result_preference_score("拒絕"),
             prelim_result_preference_score("通过。请按“继续”按钮以完成提交过程。"),
+        )
+
+    def test_pick_best_prefers_reject_over_continue_hint(self):
+        picked = pick_best_prelim_result(
+            [
+                "通过。请按“继续”按钮以完成提交过程。",
+                "拒絕",
+            ]
+        )
+        self.assertEqual(picked, "拒絕")
+        self.assertFalse(prelim_check_passed(picked))
+        self.assertTrue(
+            prelim_check_passed("通过。请按“继续”按钮以完成提交过程。")
+        )
+
+    def test_reasons_override_pass_hint(self):
+        reasons = (
+            "1. 建議採用的公司名稱 [Humsienk Global Limited] "
+            "與另一間已註冊的公司名稱相同。\n"
+            "2. 建議採用的公司名稱 [撼世全球有限公司] "
+            "與另一間已註冊的公司名稱相同。"
+        )
+        self.assertFalse(
+            prelim_check_passed(
+                "通过。请按“继续”按钮以完成提交过程。",
+                reasons,
+            )
+        )
+        msg = format_prelim_message(
+            128,
+            {
+                "company_name_cn": "撼世全球有限公司",
+                "company_name_en": "Humsienk Global Limited",
+                "shareholder_name": "戴啟樂",
+                "id_type": "PRC_ID",
+                "id_number": "362531199002111537",
+                "icris_username": "Dq11535yt9mcf",
+            },
+            passed=False,
+            reasons=reasons,
+        )
+        self.assertIn("【NNC1 初步检查拒絕】", msg)
+        self.assertIn("撼世全球有限公司", msg)
+        self.assertIn("Humsienk Global Limited", msg)
+        self.assertIn("拒絕原因:", msg)
+        self.assertIn("與另一間已註冊的公司名稱相同", msg)
+
+    def test_collect_js_scans_all_cells_and_non_acceptance(self):
+        self.assertIn("cells.length - 1", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("ant-descriptions-item", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("不予接納原因", _PRELIM_REASON_COLLECT_JS)
+        self.assertIn("拒絕原因", _PRELIM_REASON_COLLECT_JS)
+        self.assertEqual(
+            pick_best_prelim_reasons(
+                ["短", "1. 名稱相同\n2. 中文名稱相同"]
+            ),
+            "1. 名稱相同\n2. 中文名稱相同",
         )
 
     def test_format_prelim_reject_error_includes_reasons(self):
