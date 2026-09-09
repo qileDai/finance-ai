@@ -1031,7 +1031,7 @@ table.data tr.clickable:hover td {
   align-items: flex-start;
   justify-content: flex-start;
   padding: 52px 12px 12px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .img-modal-toolbar {
