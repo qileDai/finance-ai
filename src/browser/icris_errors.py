@@ -23,11 +23,13 @@ class IcrisFlowError(RuntimeError):
 
 
 class IcrisStepLoadError(RuntimeError):
-    """步骤关键元素长时间未出现；由 run() 关页重开后从入口重试。"""
+    """步骤关键元素长时间未出现；由 worker 按 attempts 决定是否重跑。"""
 
 
 NNC1_LOADING_TIMEOUT_MSG = "页面载入中超时，遮罩仍在"
 NNC1_LOADING_RETRY_CAP = 1
+# 注册切步载入超时：第 1 次失败后重跑一次（attempts < 2），不改全局 max_attempts。
+REGISTER_LOADING_RETRY_CAP = NNC1_LOADING_RETRY_CAP
 
 
 class IcrisLoadingTimeoutError(IcrisFlowError):
@@ -43,6 +45,26 @@ def is_nnc1_loading_timeout(err: object) -> bool:
     return NNC1_LOADING_TIMEOUT_MSG in str(err or "") or "载入中超时" in str(err or "")
 
 
+def register_loading_timeout_message(step: str) -> str:
+    token = str(step or "").strip() or "页面"
+    if "载入中超时" in token:
+        return token
+    return f"{token} 页面载入中超时，遮罩仍在"
+
+
+def register_failure_should_requeue(
+    err: object,
+    attempts: int,
+    max_attempts: int,
+) -> bool:
+    """注册失败是否自动重跑。载入超时只重跑一次；其它失败走 max_attempts。"""
+    if getattr(err, "no_requeue", False):
+        return False
+    if is_nnc1_loading_timeout(err):
+        return int(attempts or 0) < (1 + REGISTER_LOADING_RETRY_CAP)
+    return int(attempts or 0) < int(max_attempts or 0)
+
+
 def normalize_id_number_key(id_number: str) -> str:
     """比对用：去空格、大写、全角括号/数字折成半角。"""
     s = unicodedata.normalize("NFKC", str(id_number or ""))
@@ -50,13 +72,39 @@ def normalize_id_number_key(id_number: str) -> str:
     return s.replace("（", "(").replace("）", ")")
 
 
+def is_icris_format_invalid_error(errs: list[str] | str | None) -> bool:
+    """表单「格式不正确/不正確」。不含证件已登记、用户名占用。"""
+    compact = _error_blob(errs).replace(" ", "").replace("\u3000", "")
+    return "格式不正确" in compact or "格式不正確" in compact
+
+
+def is_icris_username_taken_error(errs: list[str] | str | None) -> bool:
+    """s02 用户名称已被使用 / 已存在。"""
+    compact = _error_blob(errs).replace(" ", "").replace("\u3000", "")
+    if re.search(
+        r"(?:用戶名稱|用户名称).{0,16}已(?:被使用|存在|被佔用|被占用)",
+        compact,
+    ):
+        return True
+    blob = _error_blob(errs)
+    return bool(
+        re.search(
+            r"(?:user\s*id|username).{0,24}already\s+(?:been\s+)?(?:used|taken|exist)",
+            blob,
+            re.I,
+        )
+    )
+
+
+def _error_blob(errs: list[str] | str | None) -> str:
+    if isinstance(errs, str):
+        return errs
+    return "\n".join(str(x) for x in (errs or []))
+
+
 def is_id_already_registered_error(errs: list[str] | str | None) -> bool:
     """ICRIS s04：相同证件号已在系统登记（證件/證明、简繁）。"""
-    if isinstance(errs, str):
-        blob = errs
-    else:
-        blob = "\n".join(str(x) for x in (errs or []))
-    compact = blob.replace(" ", "").replace("\u3000", "")
+    compact = _error_blob(errs).replace(" ", "").replace("\u3000", "")
     return bool(
         re.search(
             r"相同的身[份分][證证][件明](?:號碼|号码)已在(?:系統|系统)中(?:登記|登记)",

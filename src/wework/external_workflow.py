@@ -93,6 +93,10 @@ class ExternalGroupWorkflow:
             id_number = str(
                 (company_data.get("identity_proof") or {}).get("id_number") or ""
             )
+        session = company_data.get("_icris_session")
+        if isinstance(session, dict):
+            session.pop("username", None)
+            session.pop("password", None)
         raw_user, raw_pwd = _generate_icris_credentials(
             person_en, id_number, retry=True
         )

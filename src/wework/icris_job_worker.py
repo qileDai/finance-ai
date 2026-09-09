@@ -227,10 +227,16 @@ class IcrisJobWorker:
                 elapsed,
                 err,
             )
-            requeue = attempts < max_attempts
-            available_at = self._backoff_iso(attempts) if requeue else ""
             screenshot_path = ""
-            from src.browser.icris_errors import IcrisFlowError
+            from src.browser.icris_errors import (
+                IcrisFlowError,
+                register_failure_should_requeue,
+            )
+
+            requeue = register_failure_should_requeue(
+                e, attempts, max_attempts
+            )
+            available_at = self._backoff_iso(attempts) if requeue else ""
 
             if isinstance(e, IcrisFlowError):
                 screenshot_path = e.screenshot_path or ""
@@ -297,6 +303,7 @@ class IcrisJobWorker:
                 available_at=available_at,
                 package_dir=package_dir,
                 screenshot_path=screenshot_path,
+                success_screenshot_path=screenshot_path,
                 result_messages=msgs or None,
                 run_duration=format_job_run_duration(elapsed),
             )

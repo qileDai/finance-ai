@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -18,11 +19,25 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_DURATION_RE = re.compile(r"^(\d+)分(\d+)秒$")
+
+
 def format_job_run_duration(seconds: float) -> str:
     """墙钟秒数 →「M分S秒」，供 registration_jobs 耗时列存储与展示。"""
     total = max(0, int(round(float(seconds or 0))))
     minutes, secs = divmod(total, 60)
     return f"{minutes}分{secs}秒"
+
+
+def parse_job_run_duration(text: str) -> int | None:
+    """「M分S秒」→ 秒。空串或格式不对返回 None。"""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    m = _DURATION_RE.fullmatch(raw)
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
 
 
 def _parse_iso_dt(value: str) -> datetime | None:
@@ -70,6 +85,84 @@ def _percentile_stats(values: list[int]) -> dict[str, Any]:
         "p95": _pct(95),
         "max": int(sorted_v[-1]),
     }
+
+
+def _seconds_stats(values: list[int]) -> dict[str, Any]:
+    """耗时样本 → count / 平均 / P50 / P95（秒与分钟）。"""
+    pct = _percentile_stats(values)
+    n = int(pct["count"])
+    avg = (sum(values) / n) if n else 0.0
+    p50 = int(pct["p50"])
+    p95 = int(pct["p95"])
+    return {
+        "count": n,
+        "avg_seconds": round(avg, 1) if n else 0,
+        "p50_seconds": p50,
+        "p95_seconds": p95,
+        "avg_minutes": round(avg / 60.0, 2) if n else 0.0,
+        "p50_minutes": round(p50 / 60.0, 2) if n else 0.0,
+        "p95_minutes": round(p95 / 60.0, 2) if n else 0.0,
+    }
+
+
+def _succ_fail_rate(success: int, failed: int) -> tuple[float, float]:
+    done = int(success) + int(failed)
+    if done <= 0:
+        return 0.0, 0.0
+    return round(success / done, 4), round(failed / done, 4)
+
+
+def _first_ts(*vals: Any) -> str:
+    for v in vals:
+        raw = str(v or "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+def _ts_in_window(ts: str, cutoff: str | None) -> bool:
+    if not cutoff:
+        return True
+    raw = (ts or "").strip()
+    if not raw:
+        return False
+    return raw >= cutoff
+
+
+def _iso_date(value: str) -> str:
+    dt = _parse_iso_dt(value)
+    if dt is not None:
+        return dt.astimezone(timezone.utc).date().isoformat()
+    raw = (value or "").strip()
+    return raw[:10] if len(raw) >= 10 else ""
+
+
+def _stage_payload(
+    success: int,
+    failed: int,
+    duration: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sr, fr = _succ_fail_rate(success, failed)
+    out: dict[str, Any] = {
+        "success": int(success),
+        "failed": int(failed),
+        "success_rate": sr,
+        "fail_rate": fr,
+        "duration": duration,
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _source_bucket(source: str) -> str:
+    src = (source or "").strip().lower()
+    if src == "admin":
+        return "admin"
+    if src == "wework":
+        return "wework"
+    return "other"
 
 
 @dataclass
@@ -2161,6 +2254,7 @@ class ExternalGroupStore:
         screenshot_path: str = "",
         result_messages: list[Any] | None = None,
         run_duration: str = "",
+        success_screenshot_path: str = "",
     ) -> None:
         import json
 
@@ -2171,6 +2265,8 @@ class ExternalGroupStore:
                 msgs = json.dumps(list(result_messages), ensure_ascii=False)
             except (TypeError, ValueError):
                 msgs = "[]"
+        shot = (screenshot_path or "").strip()
+        success_shot = (success_screenshot_path or shot).strip()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT status, review_status FROM registration_jobs WHERE id = ?",
@@ -2192,6 +2288,7 @@ class ExternalGroupStore:
                     last_error = ?,
                     package_dir = CASE WHEN ? != '' THEN ? ELSE package_dir END,
                     screenshot_path = CASE WHEN ? != '' THEN ? ELSE screenshot_path END,
+                    success_screenshot_path = CASE WHEN ? != '' THEN ? ELSE success_screenshot_path END,
                     result_messages = CASE WHEN ? != '' THEN ? ELSE result_messages END,
                     available_at = CASE WHEN ? != '' THEN ? ELSE available_at END,
                     finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END,
@@ -2204,8 +2301,10 @@ class ExternalGroupStore:
                     (error or "")[:2000],
                     package_dir,
                     package_dir,
-                    screenshot_path,
-                    screenshot_path,
+                    shot,
+                    shot,
+                    success_shot,
+                    success_shot,
                     msgs,
                     msgs,
                     available_at,
@@ -2439,6 +2538,240 @@ class ExternalGroupStore:
             out["success_rate"] = round(succ / done, 4) if done else 0.0
             out["recent_failures"] = recent_failures
         return out
+
+    def pipeline_ops_stats(self, *, hours: float | None = 24.0) -> dict[str, Any]:
+        """运营统计：积压快照 + 窗口内注册/激活/填表成功率、耗时与按日序列。
+
+        hours <= 0 表示不截时间窗（按日序列仍最多 30 天）。
+        """
+        hours_val = 0.0 if hours is None else float(hours)
+        cutoff: str | None = None
+        if hours_val > 0:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=hours_val)
+            ).isoformat()
+        daily_hours = min(hours_val, 30 * 24) if hours_val > 0 else 30 * 24
+        daily_cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=daily_hours)
+        ).isoformat()
+
+        with self._conn() as conn:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT status, activation_status, form_status, review_status,
+                           run_duration, s03a_duration, nnc1_duration,
+                           created_at, finished_at, updated_at,
+                           activation_checked_at, activation_activated_at,
+                           form_filled_at, id_already_registered,
+                           nnc1_loading_retries, form_boost, source
+                    FROM registration_jobs
+                    """
+                ).fetchall()
+            ]
+
+        backlog = {
+            "register_pending": 0,
+            "register_running": 0,
+            "awaiting_review": 0,
+            "activation_pending": 0,
+            "form_pending": 0,
+        }
+        reg_ok = 0
+        reg_fail = 0
+        act_ok = 0
+        act_fail = 0
+        form_ok = 0
+        form_fail = 0
+        run_secs: list[int] = []
+        s03a_secs: list[int] = []
+        act_secs: list[int] = []
+        nnc1_secs: list[int] = []
+        e2e_secs: list[int] = []
+        created = 0
+        e2e_filled = 0
+        review_rejected = 0
+        review_approved = 0
+        id_already = 0
+        form_retries = 0
+        source_counts = {"admin": 0, "wework": 0, "other": 0}
+        daily_map: dict[str, dict[str, int]] = {}
+
+        def _bump_daily(day: str, key: str) -> None:
+            if not day:
+                return
+            if not _ts_in_window(day, daily_cutoff[:10] if daily_cutoff else None):
+                return
+            slot = daily_map.setdefault(
+                day,
+                {
+                    "created": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "activated": 0,
+                    "form_filled": 0,
+                },
+            )
+            slot[key] = int(slot.get(key, 0)) + 1
+
+        for row in rows:
+            status = str(row.get("status") or "")
+            act_st = str(row.get("activation_status") or "")
+            form_st = str(row.get("form_status") or "")
+            review = str(row.get("review_status") or "").lower()
+            created_at = str(row.get("created_at") or "")
+            finished_at = str(row.get("finished_at") or "")
+            updated_at = str(row.get("updated_at") or "")
+            act_checked = str(row.get("activation_checked_at") or "")
+            act_at = str(row.get("activation_activated_at") or "")
+            form_at = str(row.get("form_filled_at") or "")
+
+            if status == "pending":
+                backlog["register_pending"] += 1
+            elif status == "running":
+                backlog["register_running"] += 1
+            elif status == "awaiting_review":
+                backlog["awaiting_review"] += 1
+            if act_st == "pending":
+                backlog["activation_pending"] += 1
+            if form_st == "pending":
+                backlog["form_pending"] += 1
+
+            if _ts_in_window(created_at, cutoff):
+                created += 1
+                source_counts[_source_bucket(str(row.get("source") or ""))] += 1
+
+            reg_ts = _first_ts(finished_at, updated_at, created_at)
+            if status in ("succeeded", "failed") and _ts_in_window(reg_ts, cutoff):
+                if status == "succeeded":
+                    reg_ok += 1
+                else:
+                    reg_fail += 1
+                sec = parse_job_run_duration(str(row.get("run_duration") or ""))
+                if sec is not None:
+                    run_secs.append(sec)
+                s03a = parse_job_run_duration(str(row.get("s03a_duration") or ""))
+                if s03a is not None:
+                    s03a_secs.append(s03a)
+
+            act_ts = _first_ts(act_at, updated_at)
+            if act_st in ("activated", "failed") and _ts_in_window(act_ts, cutoff):
+                if act_st == "activated":
+                    act_ok += 1
+                else:
+                    act_fail += 1
+                start_dt = _parse_iso_dt(act_checked)
+                end_dt = _parse_iso_dt(act_at)
+                if start_dt and end_dt and end_dt >= start_dt:
+                    act_secs.append(int(round((end_dt - start_dt).total_seconds())))
+
+            form_ts = _first_ts(form_at, updated_at)
+            if form_st in ("filled", "failed") and _ts_in_window(form_ts, cutoff):
+                if form_st == "filled":
+                    form_ok += 1
+                else:
+                    form_fail += 1
+                nnc1 = parse_job_run_duration(str(row.get("nnc1_duration") or ""))
+                if nnc1 is not None:
+                    nnc1_secs.append(nnc1)
+
+            if (
+                status == "succeeded"
+                and form_st == "filled"
+                and _ts_in_window(_first_ts(form_at, updated_at), cutoff)
+            ):
+                e2e_filled += 1
+                start_dt = _parse_iso_dt(created_at)
+                end_dt = _parse_iso_dt(form_at)
+                if start_dt and end_dt and end_dt >= start_dt:
+                    e2e_secs.append(int(round((end_dt - start_dt).total_seconds())))
+
+            if review == "rejected" and _ts_in_window(
+                _first_ts(finished_at, updated_at), cutoff
+            ):
+                review_rejected += 1
+            elif review == "approved" and _ts_in_window(
+                _first_ts(finished_at, updated_at), cutoff
+            ):
+                review_approved += 1
+
+            if int(row.get("id_already_registered") or 0) and _ts_in_window(
+                _first_ts(updated_at, created_at), cutoff
+            ):
+                id_already += 1
+
+            retries = int(row.get("nnc1_loading_retries") or 0)
+            if retries and _ts_in_window(updated_at, cutoff):
+                form_retries += retries
+
+            _bump_daily(_iso_date(created_at), "created")
+            if status == "succeeded":
+                _bump_daily(_iso_date(_first_ts(finished_at, updated_at, created_at)), "succeeded")
+            elif status == "failed":
+                _bump_daily(_iso_date(reg_ts), "failed")
+            if act_st == "activated":
+                _bump_daily(_iso_date(_first_ts(act_at, updated_at)), "activated")
+            if form_st == "filled":
+                _bump_daily(_iso_date(_first_ts(form_at, updated_at)), "form_filled")
+
+        daily_start = (
+            datetime.now(timezone.utc) - timedelta(hours=daily_hours)
+        ).date()
+        daily_end = datetime.now(timezone.utc).date()
+        daily: list[dict[str, Any]] = []
+        cur = daily_start
+        while cur <= daily_end:
+            key = cur.isoformat()
+            slot = daily_map.get(
+                key,
+                {
+                    "created": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "activated": 0,
+                    "form_filled": 0,
+                },
+            )
+            daily.append({"date": key, **slot})
+            cur += timedelta(days=1)
+
+        e2e_stats = _seconds_stats(e2e_secs)
+        e2e_rate = round(e2e_filled / created, 4) if created else 0.0
+        review_done = review_rejected + review_approved
+        reject_rate = (
+            round(review_rejected / review_done, 4) if review_done else 0.0
+        )
+
+        return {
+            "hours": hours_val,
+            "backlog": backlog,
+            "stages": {
+                "register": _stage_payload(
+                    reg_ok,
+                    reg_fail,
+                    _seconds_stats(run_secs),
+                    extra={"s03a_duration": _seconds_stats(s03a_secs)},
+                ),
+                "activation": _stage_payload(
+                    act_ok, act_fail, _seconds_stats(act_secs)
+                ),
+                "form": _stage_payload(form_ok, form_fail, _seconds_stats(nnc1_secs)),
+            },
+            "extras": {
+                "created": created,
+                "e2e_filled": e2e_filled,
+                "e2e_rate": e2e_rate,
+                "e2e_avg_minutes": e2e_stats["avg_minutes"],
+                "review_rejected": review_rejected,
+                "review_approved": review_approved,
+                "review_reject_rate": reject_rate,
+                "id_already_registered": id_already,
+                "form_retries": form_retries,
+                "source": source_counts,
+            },
+            "daily": daily,
+        }
 
     def repair_rejected_jobs(self) -> int:
         """把已拒绝但仍为 pending/running 的僵尸单修回 failed。"""

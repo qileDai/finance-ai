@@ -1349,3 +1349,42 @@ table.data tr.clickable:hover td {
   z-index: 2;
 }
 
+.ops-stats-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.ops-stats-meta {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ops-stats-grid,
+.ops-stats-pies {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.ops-stats-pies {
+  margin-top: 16px;
+}
+
+.ops-stats-grid .ant-card,
+.ops-stats-pies .ant-card {
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+@media (max-width: 960px) {
+  .ops-stats-grid,
+  .ops-stats-pies {
+    grid-template-columns: 1fr;
+  }
+}
+

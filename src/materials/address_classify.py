@@ -814,3 +814,41 @@ def stored_s03_address_fields(
         "country": country,
         "address_is_hk": "1" if is_hk else "0",
     }
+
+
+def s03_address_fields_for_fill(
+    director: dict[str, Any] | None = None,
+    applicant: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """s03 填表：优先已入库四段；仅缺街道/国家时用英文住址规则拆分（不调 LLM）。"""
+    stored = stored_s03_address_fields(director, applicant)
+    d = director if isinstance(director, dict) else {}
+    a = applicant if isinstance(applicant, dict) else {}
+    addr_en = str(d.get("address_en") or a.get("address_en") or "").strip()
+    addr_cn = str(d.get("address_cn") or a.get("address_cn") or "").strip()
+    need_street = not stored["street"]
+    need_country = stored["address_is_hk"] != "1" and not stored["country"]
+    if not need_street and not need_country:
+        return stored
+    if not addr_en and not addr_cn:
+        return stored
+    fb = weak_fallback_address(addr_en)
+    if chinese_address_is_hk(addr_cn):
+        fb["address_is_hk"] = "1"
+        fb["address_country"] = fb.get("address_country") or "HKG"
+        if not fb.get("director_address_region"):
+            fb["director_address_region"] = resolve_s03_hk_district(
+                "", address_en=addr_en, address_cn=addr_cn
+            )
+    return {
+        "flat": stored["flat"] or str(fb.get("director_address_flat") or ""),
+        "building": stored["building"] or str(fb.get("director_address_building") or ""),
+        "street": stored["street"] or str(fb.get("director_address_street") or ""),
+        "region": stored["region"] or str(fb.get("director_address_region") or ""),
+        "country": stored["country"] or str(fb.get("address_country") or ""),
+        "address_is_hk": (
+            stored["address_is_hk"]
+            if stored["address_is_hk"] == "1" or stored["country"]
+            else str(fb.get("address_is_hk") or "0")
+        ),
+    }

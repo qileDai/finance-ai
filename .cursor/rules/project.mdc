@@ -1,0 +1,43 @@
+---
+description: finance-ai 全项目约定：分层、ICRIS 边界、密钥与改动范围
+alwaysApply: true
+---
+
+# finance-ai
+
+香港公司注册自动化：企微客户对接 → 材料识别 → ICRIS 开户/激活 → NNC1 填表（停在初步检查，**不进付款页**）。
+
+## 分层（改哪一层就留在哪一层）
+
+| 路径 | 职责 |
+|------|------|
+| `src/wework/` | 企微客服、群状态、任务 Worker、审核群通知 |
+| `src/materials/` | 证件/姓名/地址识别与聚合 |
+| `src/browser/` | Playwright/CDP 登录、注册、NNC1 |
+| `src/storage/` | SQLite（`data/` 下），勿把 db/截图/材料提交进 git |
+| `src/web/` + `web/admin/` | 管理后台 API（8082）与 React SPA |
+| `config/settings.py` | 配置入口；密钥只来自 `.env` |
+
+Agent（`python main.py wework-external-bot`，8081）与 Admin（`python main.py admin`，8082）**分进程**。Worker / CDP 锁只在 bot 进程启用，admin 不要抢 9222。
+
+## ICRIS 硬边界
+
+- 注册与 NNC1 **共用** CDP Chrome `9222`，同时只能一方持锁（见 `docs/ICRIS_CDP_QUEUE.md`）。
+- 默认不最终提交；激活用独立浏览器，不占 9222。
+- 页面文案按**简繁都认**。NNC1 初步检查以结果格「通过/通過」vs「拒绝/拒絕」为准，细节见 `.cursor/rules/nnc1-prelim-check.mdc`。
+- 审核群通知：通过绿 `info`、拒绝橙红 `warning`，见 `.cursor/rules/wework-prelim-notify.mdc`。
+
+## 改动纪律
+
+- 只改任务相关文件；不主动 commit / push；不提交 `.env`、证件图、`data/*.db`。
+- 注释与用户可见文案用中文；测试用 `unittest`（`tests/`），改判定/通知时同步改测试。
+- 改 `web/admin` 的 UI/路由/状态后，按真实用户路径验证，不要只看截图。
+
+```python
+# ❌ BAD：填表成功后继续点「继续」进付款
+await page.get_by_text("繼續").click()
+
+# ✅ GOOD：初步检查出结果即停、落库、发群通知
+self.persist_form_outcome(True)
+self.notify_prelim_result(passed=True, screenshot_path=shot)
+```

@@ -17,6 +17,7 @@ from src.materials.address_classify import (
     split_english_street_region,
     split_hk_english_four_way,
     stored_s03_address_fields,
+    s03_address_fields_for_fill,
     weak_fallback_address,
 )
 from src.materials.countries import normalize_address_country
@@ -525,7 +526,37 @@ class TestStoredS03Address(unittest.TestCase):
         src = inspect.getsource(IcrisRegistrationBot._fill_user_info_step)
         self.assertNotIn("split_address_street_region(", src)
         self.assertNotIn("pick_hk_district_from_options(", src)
-        self.assertIn("stored_s03_address_fields", src)
+        self.assertIn("s03_address_fields_for_fill", src)
+
+    def test_s03_fill_fallback_from_english_address(self):
+        parts = s03_address_fields_for_fill(
+            {
+                "address_en": SZ_ROOM_EN,
+                "address_cn": "广东省深圳市南山区西丽南路8号110室",
+            }
+        )
+        self.assertEqual(parts["street"], "Room 110, No. 8, Xili South Road")
+        self.assertEqual(
+            parts["region"],
+            "Nanshan District, Shenzhen City, Guangdong Province",
+        )
+        self.assertEqual(parts["country"], "CHN")
+        self.assertEqual(parts["address_is_hk"], "0")
+
+    def test_s03_fill_keeps_persisted_fields(self):
+        parts = s03_address_fields_for_fill(
+            {
+                "address_en": SZ_ROOM_EN,
+                "address_street": "1 TIN WU ROAD",
+                "address_region": "天水圍",
+                "address_country": "HKG",
+                "address_is_hk": "1",
+            }
+        )
+        self.assertEqual(parts["street"], "1 TIN WU ROAD")
+        self.assertEqual(parts["region"], "天水圍")
+        self.assertEqual(parts["country"], "HKG")
+        self.assertEqual(parts["address_is_hk"], "1")
 
     def test_aggregator_persists_four_way(self):
         from src.materials.aggregator import aggregate_company_data

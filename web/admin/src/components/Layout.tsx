@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import { useAuth } from "../auth";
 import { Menu, Button, Dropdown } from "antd";
 import {
-  AppstoreOutlined,
   BarChartOutlined,
   FormOutlined,
   IdcardOutlined,
@@ -12,12 +11,11 @@ import {
   ScheduleOutlined,
   SendOutlined,
   SettingOutlined,
-  TeamOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 
 const TITLES: Record<string, string> = {
-  "/": "概览",
+  "/": "运营统计",
   "/sessions": "会话材料",
   "/register": "快速注册",
   "/id-extract": "证件识别",
@@ -37,10 +35,10 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "运营",
     items: [
-      { to: "/", label: "概览", icon: <AppstoreOutlined /> },
-      { to: "/sessions", label: "会话材料", icon: <TeamOutlined /> },
+      { to: "/", label: "运营统计", icon: <BarChartOutlined /> },
+      // { to: "/sessions", label: "会话材料", icon: <TeamOutlined /> },
       { to: "/jobs", label: "注册任务", icon: <ScheduleOutlined /> },
-      { to: "/quality", label: "回答质量", icon: <BarChartOutlined /> },
+      // { to: "/quality", label: "回答质量", icon: <BarChartOutlined /> },
     ],
   },
   {

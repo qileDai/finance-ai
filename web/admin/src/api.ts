@@ -4,11 +4,61 @@ export type ApiOk<T extends Record<string, unknown> = Record<string, unknown>> =
 
 export type ApiErr = { ok: false; error: string };
 
+export type DurationStats = {
+  count: number;
+  avg_seconds: number;
+  p50_seconds: number;
+  p95_seconds: number;
+  avg_minutes: number;
+  p50_minutes: number;
+  p95_minutes: number;
+};
+
+export type StageStats = {
+  success: number;
+  failed: number;
+  success_rate: number;
+  fail_rate: number;
+  duration: DurationStats;
+  s03a_duration?: DurationStats;
+};
+
+export type DailyPoint = {
+  date: string;
+  created: number;
+  succeeded: number;
+  failed: number;
+  activated: number;
+  form_filled: number;
+};
+
 export type OverviewResponse = ApiOk<{
   hours: number;
-  conversation: Record<string, unknown>;
-  registration: Record<string, unknown>;
-  icris_worker: Record<string, unknown>;
+  backlog: {
+    register_pending: number;
+    register_running: number;
+    awaiting_review: number;
+    activation_pending: number;
+    form_pending: number;
+  };
+  stages: {
+    register: StageStats;
+    activation: StageStats;
+    form: StageStats;
+  };
+  extras: {
+    created: number;
+    e2e_filled: number;
+    e2e_rate: number;
+    e2e_avg_minutes: number;
+    review_rejected: number;
+    review_approved: number;
+    review_reject_rate: number;
+    id_already_registered: number;
+    form_retries: number;
+    source: { admin: number; wework: number; other: number };
+  };
+  daily: DailyPoint[];
 }>;
 
 export type SessionsResponse = ApiOk<{
@@ -237,7 +287,8 @@ export const api = {
     }),
   logout: () =>
     request<ApiOk>("/admin/api/logout", { method: "POST" }),
-  overview: () => request<OverviewResponse>("/admin/api/overview"),
+  overview: (hours = 24) =>
+    request<OverviewResponse>(`/admin/api/overview?hours=${hours}`),
   sessions: (channel = "all") =>
     request<SessionsResponse>(`/admin/api/sessions?channel=${encodeURIComponent(channel)}`),
   session: (roomid: string) =>

@@ -216,6 +216,11 @@ async def dismiss_cookie_banner(page: "Page") -> None:
 
 async def dismiss_portal_modals(page: "Page") -> None:
     """关闭登录后可能出现的通知/智方便等弹窗。"""
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(200)
+    except Exception:
+        pass
     await dismiss_google_translate(page)
     close_selectors = [
         "#notification-modal .close",

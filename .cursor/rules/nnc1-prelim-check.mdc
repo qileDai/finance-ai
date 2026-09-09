@@ -1,0 +1,33 @@
+---
+description: NNC1 初步检查以结果格简繁「通过/拒绝」为准，禁止旁路原因改判通过
+globs: "**/icris_nnc1_form.py,**/test_nnc1_step3_names.py"
+alwaysApply: false
+---
+
+# NNC1 初步检查判定
+
+`prelim_check_passed` 只认「初步檢查結果 / 初步检查结果」格：
+
+- **通过**：含 `通过` / `通過`，且不是 `不通过` / `不通過` / `拒絕` / `拒绝` / `Rejection`
+- **拒绝**：含 `拒絕` / `拒绝` / `不通过` / `不通過` / `Rejection`
+- 结果格已明确通过时，**忽略**刮到的拒絕原因（原因只在拒绝页附加）
+- 结果格为空时，才用拒絕原因兜底判失败
+
+同页多段结果仍用 `pick_best_prelim_result`（拒絕优先），避免拒绝页上的「请按继续」抢先。
+
+采集须覆盖相邻单元格、Ant Design descriptions、以及同格 `初步檢查結果 ：通過。…`。
+
+```python
+# ❌ BAD：有原因就失败，会把通过页改判拒绝
+if (reasons or "").strip():
+    return False
+return bool(re.search(r"通过|通過", t))
+
+# ✅ GOOD：先按结果格判通过/拒绝，原因不得覆盖明确通过
+if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
+    return False
+if re.search(r"不通过|不通過", t):
+    return False
+if re.search(r"通过|通過", t):
+    return True
+```

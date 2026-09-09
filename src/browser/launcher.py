@@ -62,7 +62,7 @@ def import_async_playwright():
 
 
 def _ensure_chrome_profile_disable_translate(profile) -> None:
-    """写入 Chrome Preferences，禁用内置翻译（避免遮挡 ICRIS 顶栏）。"""
+    """写入 Chrome Preferences：关翻译，并清掉「未正确关闭」恢复气泡。"""
     import json
     from pathlib import Path
 
@@ -81,10 +81,16 @@ def _ensure_chrome_profile_disable_translate(profile) -> None:
     else:
         prefs["translate"] = {"enabled": False}
     prefs["translate_blocked_languages"] = ["zh-CN", "zh-TW", "zh-HK", "zh", "en"]
+    profile_prefs = prefs.setdefault("profile", {})
+    if not isinstance(profile_prefs, dict):
+        profile_prefs = {}
+        prefs["profile"] = profile_prefs
+    profile_prefs["exit_type"] = "Normal"
+    profile_prefs["exited_cleanly"] = True
     try:
         prefs_path.write_text(json.dumps(prefs, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
-        logger.debug("写入 Chrome 禁用翻译 Preferences 失败: %s", e)
+        logger.debug("写入 Chrome Preferences 失败: %s", e)
 
 
 def _cdp_profile_and_port() -> tuple[Any, int]:
@@ -210,6 +216,7 @@ def _try_launch_cdp_chrome() -> bool:
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
+        "--hide-crash-restore-bubble",
         "--disable-features=Translate,TranslateUI",
         "--start-maximized",
     ]
@@ -248,6 +255,7 @@ def _chromium_launch_args() -> list[str]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-infobars",
+        "--hide-crash-restore-bubble",
         "--disable-features=Translate,TranslateUI",
     ]
     if platform.system() == "Linux":

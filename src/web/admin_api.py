@@ -50,7 +50,11 @@ def handle_admin_api(
 
     try:
         if method == "GET" and rel == "overview":
-            return _handle_overview(store, icris_worker)
+            try:
+                hours = float(query.get("hours", ["24"])[0])
+            except (TypeError, ValueError):
+                hours = 24.0
+            return _handle_overview(store, hours=hours)
         if method == "GET" and rel == "sessions":
             channel = (query.get("channel", ["all"])[0] or "all").strip().lower()
             return _handle_sessions_list(store, channel)
@@ -437,54 +441,57 @@ def _parse_account_id(rel: str, *, suffix: str) -> int | None:
 
 
 def _handle_overview(
-    store: ExternalGroupStore, icris_worker: Any
+    store: ExternalGroupStore, *, hours: float = 24.0
 ) -> tuple[dict[str, Any], int]:
     try:
-        conversation = store.conversation_quality_stats(hours=24.0)
+        stats = store.pipeline_ops_stats(hours=hours)
     except Exception:
-        conversation = {
-            "hours": 24.0,
-            "agent_runs_total": 0,
-            "actions": {},
-            "reply_rate": 0.0,
-            "silent_rate": 0.0,
-            "abstain_rate": 0.0,
-            "human_transfer_rate": 0.0,
-            "avg_confidence": 0.0,
-            "low_confidence_count": 0,
-            "inbox_unprocessed": 0,
-            "send_failures": 0,
-            "kf_sends": 0,
-            "qa_latency_ms": {},
-            "intent_routes": {},
+        logger.exception("运营统计聚合失败")
+        empty_dur = {
+            "count": 0,
+            "avg_seconds": 0,
+            "p50_seconds": 0,
+            "p95_seconds": 0,
+            "avg_minutes": 0.0,
+            "p50_minutes": 0.0,
+            "p95_minutes": 0.0,
         }
-    try:
-        registration = store.registration_job_stats(hours=24.0)
-    except Exception:
-        registration = {
-            "counts": {},
-            "pending_count": 0,
-            "running_count": 0,
+        empty_stage = {
+            "success": 0,
+            "failed": 0,
             "success_rate": 0.0,
-            "window_counts": {},
-            "recent_failures": [],
+            "fail_rate": 0.0,
+            "duration": empty_dur,
         }
-    if icris_worker is not None and hasattr(icris_worker, "status_payload"):
-        worker = icris_worker.status_payload()
-    else:
-        worker = {
-            "enabled": bool(settings.icris_worker_enabled),
-            "alive": False,
-            "pending_count": registration.get("pending_count", 0),
-            "running_job_id": registration.get("running_job_id"),
-            "note": "ICRIS Worker 运行在 wework-external-bot 进程；此处仅反映队列 DB 状态",
+        stats = {
+            "hours": float(hours or 0),
+            "backlog": {
+                "register_pending": 0,
+                "register_running": 0,
+                "awaiting_review": 0,
+                "activation_pending": 0,
+                "form_pending": 0,
+            },
+            "stages": {
+                "register": {**empty_stage, "s03a_duration": empty_dur},
+                "activation": dict(empty_stage),
+                "form": dict(empty_stage),
+            },
+            "extras": {
+                "created": 0,
+                "e2e_filled": 0,
+                "e2e_rate": 0.0,
+                "e2e_avg_minutes": 0.0,
+                "review_rejected": 0,
+                "review_approved": 0,
+                "review_reject_rate": 0.0,
+                "id_already_registered": 0,
+                "form_retries": 0,
+                "source": {"admin": 0, "wework": 0, "other": 0},
+            },
+            "daily": [],
         }
-    return _ok(
-        conversation=conversation,
-        registration=registration,
-        icris_worker=worker,
-        hours=24.0,
-    )
+    return _ok(**stats)
 
 
 def _handle_sessions_list(

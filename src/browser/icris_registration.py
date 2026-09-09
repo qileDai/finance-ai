@@ -18,9 +18,14 @@ from config.settings import settings
 from src.browser.icris_captcha import fill_captcha as fill_icris_captcha
 from src.browser.icris_errors import (
     IcrisFlowError,
+    IcrisLoadingTimeoutError,
     IcrisStepLoadError,
+    is_icris_format_invalid_error,
+    is_icris_username_taken_error,
     is_id_already_registered_error,
+    register_loading_timeout_message,
 )
+from src.browser.icris_ui_common import ICRIS_PAGE_IS_LOADING_JS, is_page_loading
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 from src.materials.id_type_classify import (
@@ -28,7 +33,10 @@ from src.materials.id_type_classify import (
     s03_id_type_select_pattern,
     s04_identity_fill_values,
 )
-from src.materials.address_classify import stored_s03_address_fields
+from src.materials.address_classify import (
+    s03_address_fields_for_fill,
+    stored_s03_address_fields,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -577,7 +585,7 @@ class IcrisRegistrationBot:
             from config.settings import PROJECT_ROOT
             from datetime import datetime, timezone
 
-            # 1) 等待全页 loading 消失
+            # 1) 等待全页 loading /「载入中」遮罩消失
             await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
             # 2) 等待条款文案与 checkbox 渲染就绪（Vue 挂载完成）
             try:
@@ -589,15 +597,9 @@ class IcrisRegistrationBot:
                 )
             except Exception:
                 pass
-            # 3) 等待网络空闲，确保图片/异步资源加载完
-            try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                pass
-            # 4) 关掉 Cookie 横幅，避免挡住用户信息
+            # 3) 关掉 Cookie 横幅，避免挡住用户信息
             await self._dismiss_cookie_banner(page)
-            # 5) DOM 稳定后再等一小段
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(_PAGE_PAUSE_MS)
 
             shot_dir = PROJECT_ROOT / "data" / "icris_esubmit"
             shot_dir.mkdir(parents=True, exist_ok=True)
@@ -628,14 +630,9 @@ class IcrisRegistrationBot:
             from config.settings import PROJECT_ROOT
             from datetime import datetime, timezone
 
-            # 1) 等全页 loading 消失
+            # 1) 等全页 loading /「载入中」遮罩消失
             await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
-            # 2) 等 networkidle（图片/异步资源加载完）
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            # 3) 关掉 Cookie 横幅（有则关，无则跳过）
+            # 2) 关掉 Cookie 横幅（有则关，无则跳过）
             await self._dismiss_cookie_banner(page)
             # 4) DOM 稳定后再等一小段
             await page.wait_for_timeout(1000)
@@ -735,14 +732,39 @@ class IcrisRegistrationBot:
         return False
 
     async def _is_spinning(self, page: "Page") -> bool:
-        try:
-            return bool(
-                await page.evaluate(
-                    "() => !!document.querySelector('.ant-spin-spinning')"
-                )
-            )
-        except Exception:
-            return False
+        """全页 ant-spin 或「载入中」遮罩。求值失败时当仍在加载。"""
+        return await is_page_loading(page)
+
+    def _nav_step_label(self, expect_step: str | None = None, url: str = "") -> str:
+        """从 expect_step / 当前 URL 推断切步目标（s01–s04、s03a）。"""
+        text = str(expect_step or "").lower()
+        for key in ("s03a", "s05", "s01", "s02", "s04", "s03"):
+            if key in text:
+                return key
+        lower = (url or "").lower()
+        if re.search(r"registration/s01", lower):
+            return "s02"
+        if re.search(r"registration/s02", lower):
+            return "s03"
+        if re.search(r"registration/s03a", lower):
+            return "s03a"
+        if re.search(r"registration/s03", lower):
+            return "s04"
+        if re.search(r"registration/s04", lower):
+            return "s03a"
+        return (expect_step or "").strip() or "页面"
+
+    async def _raise_if_nav_loading_timeout(
+        self, page: "Page", *, step: str
+    ) -> None:
+        if await self._is_spinning(page):
+            raise IcrisLoadingTimeoutError(register_loading_timeout_message(step))
+
+    async def _raise_if_missing_registration_step(
+        self, page: "Page", *, step: str, label: str
+    ) -> None:
+        await self._raise_if_nav_loading_timeout(page, step=step)
+        raise IcrisStepLoadError(f"未进入{label}: {page.url[:160]}")
 
     async def _get_validation_errors(self, page: "Page") -> list[str]:
         try:
@@ -793,8 +815,70 @@ class IcrisRegistrationBot:
             id_already_registered=True,
         )
 
+    async def _raise_if_format_invalid(
+        self,
+        page: "Page",
+        errs: list[str] | None = None,
+        *,
+        step: str = "",
+    ) -> None:
+        """仅「格式不正确/不正確」。证件已登记须先走 _raise_if_id_already_registered。"""
+        texts = list(errs or [])
+        if not texts:
+            texts = await self._get_validation_errors(page)
+        if not is_icris_format_invalid_error(texts):
+            return
+        msg = next(
+            (t for t in texts if "格式不" in t.replace(" ", "")),
+            texts[0],
+        )
+        prefix = f"{step} " if step else ""
+        logger.error("%s格式不正确: %s", prefix, msg)
+        raise IcrisFlowError(f"{prefix}{msg}".strip(), no_requeue=True)
+
+    def _regen_s02_username(self, data: dict[str, Any]) -> tuple[str, str]:
+        """用户名已占用：清 session 后按 retry 规则换随机后缀。"""
+        from src.materials.aggregator import _generate_icris_credentials
+
+        session = data.get("_icris_session")
+        if isinstance(session, dict):
+            session.pop("username", None)
+            session.pop("password", None)
+        person_en, id_number = _person_en_and_id_from_data(data)
+        if not id_number:
+            id_number = str(
+                (data.get("identity_proof") or {}).get("id_number") or ""
+            )
+        raw_user, raw_pwd = _generate_icris_credentials(
+            person_en, id_number, retry=True
+        )
+        username, password = finalize_s02_icris_credentials(
+            data, raw_user, raw_pwd
+        )
+        logger.info("s02 用户名已占用，已换新用户名: %s", username)
+        return username, password
+
+    async def _retry_s02_if_username_taken(
+        self, page: "Page", data: dict[str, Any]
+    ) -> bool:
+        """continue 失败且用户名占用：当场换随机后缀再填一次。仍占用则抛可重跑错误。"""
+        errs = await self._get_validation_errors(page)
+        if not is_icris_username_taken_error(errs):
+            return False
+        username, password = self._regen_s02_username(data)
+        await self._fill_s02_credentials_fields(page, username, password)
+        self._persist_s02_account_to_job(data)
+        if await self._click_account_profile_continue(page):
+            await self._log_page(page, "账户资料换用户名继续后")
+            return True
+        errs2 = await self._get_validation_errors(page)
+        if is_icris_username_taken_error(errs2):
+            msg = next((t for t in errs2 if t), "用户名称已存在")
+            raise IcrisFlowError(f"s02 {msg}")
+        return False
+
     async def _wait_spin_clear(self, page: "Page", timeout_ms: int | None = None) -> bool:
-        """等待全页 loading 结束；超时则 Esc 尝试恢复（防卡死）"""
+        """等待全页 loading /「载入中」结束。超时不当成已加载完；Esc 仅作恢复尝试。"""
         self._raise_if_cancelled()
         if page.is_closed():
             return False
@@ -804,7 +888,7 @@ class IcrisRegistrationBot:
         logger.info("等待页面 loading…")
         try:
             await page.wait_for_function(
-                "() => !document.querySelector('.ant-spin-spinning')",
+                f"() => !({ICRIS_PAGE_IS_LOADING_JS})",
                 timeout=limit,
             )
             return True
@@ -824,7 +908,10 @@ class IcrisRegistrationBot:
                 pass
             if not await self._is_spinning(page):
                 return True
-        return not await self._is_spinning(page)
+        still = await self._is_spinning(page)
+        if still:
+            logger.warning("loading 遮罩仍在，不继续填")
+        return not still
 
     async def _wait_step_ready(
         self,
@@ -833,8 +920,9 @@ class IcrisRegistrationBot:
         *,
         timeout_ms: int = _STEP_READY_MS,
         label: str = "",
+        abort_on_validation: bool = False,
     ) -> bool:
-        """等待 spinner 消失且 ready_fn 为真（单轮，默认 20s）。"""
+        """等待 spinner 消失且 ready_fn 为真。校验红字时可立刻停，避免吃满超时。"""
         if page.is_closed():
             return False
         deadline = time.time() + max(0.5, timeout_ms / 1000)
@@ -845,12 +933,27 @@ class IcrisRegistrationBot:
                 return False
             remain_ms = max(200, int((deadline - time.time()) * 1000))
             await self._wait_spin_clear(page, timeout_ms=min(3000, remain_ms))
+            if await self._is_spinning(page):
+                if abort_on_validation:
+                    errs = await self._get_validation_errors(page)
+                    if errs:
+                        logger.warning("%s 表单校验失败，停止等待: %s", tag, errs[:4])
+                        return False
+                await page.wait_for_timeout(min(500, max(100, remain_ms)))
+                continue
             try:
                 if await ready_fn(page):
                     return True
             except Exception:
                 logger.debug("%s ready_fn 检查异常", tag, exc_info=True)
+            if abort_on_validation:
+                errs = await self._get_validation_errors(page)
+                if errs:
+                    logger.warning("%s 表单校验失败，停止等待: %s", tag, errs[:4])
+                    return False
             await page.wait_for_timeout(min(500, max(100, remain_ms)))
+        if await self._is_spinning(page):
+            return False
         try:
             return bool(await ready_fn(page))
         except Exception:
@@ -863,12 +966,21 @@ class IcrisRegistrationBot:
         *,
         label: str = "",
     ) -> "Page":
-        """等 20s → reload 再等 20s；仍失败则抛 IcrisStepLoadError 由 run 关页重开。"""
+        """等 20s → reload 再等 20s；仍失败则抛 IcrisStepLoadError。"""
         tag = label or "步骤"
         if await self._wait_step_ready(
             page, ready_fn, timeout_ms=_STEP_READY_MS, label=tag
         ):
             return page
+
+        errs = await self._get_validation_errors(page)
+        if errs:
+            logger.warning("%s 有校验错误，不刷新重等: %s", tag, errs[:4])
+            await self._raise_if_id_already_registered(page, errs)
+            await self._raise_if_format_invalid(
+                page, errs, step=self._nav_step_label(tag)
+            )
+            raise IcrisStepLoadError(f"{tag} 表单校验失败: {errs[0][:80]}")
 
         logger.warning("%s 未在 %dms 内就绪，刷新页面…", tag, _STEP_READY_MS)
         try:
@@ -884,9 +996,12 @@ class IcrisRegistrationBot:
             return page
 
         logger.error(
-            "%s reload 后仍未就绪，将关页从入口重跑 url=%s",
+            "%s reload 后仍未就绪 url=%s",
             tag,
             page.url[:120],
+        )
+        await self._raise_if_nav_loading_timeout(
+            page, step=self._nav_step_label(tag, page.url)
         )
         raise IcrisStepLoadError(f"{tag} 关键元素加载失败: {page.url[:160]}")
 
@@ -1201,6 +1316,11 @@ class IcrisRegistrationBot:
 
     async def _dismiss_portal_overlays(self, page: "Page") -> None:
         """关闭 Cookie 横幅、维护通知弹窗等遮挡层"""
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(200)
+        except Exception:
+            pass
         close_selectors = [
             "#notification-modal .close",
             "#notification-modal button.close",
@@ -1832,8 +1952,9 @@ class IcrisRegistrationBot:
                     pass
 
                 if not await self._wait_spin_clear(page, timeout_ms=30000):
-                    logger.warning("接受条款后 loading 未结束")
-                    return False
+                    raise IcrisLoadingTimeoutError(
+                        register_loading_timeout_message("s01")
+                    )
 
                 await self._log_page(page, "接受条款后")
                 if self._is_home_or_portal(page.url):
@@ -4008,6 +4129,7 @@ class IcrisRegistrationBot:
                 await self._log_page(page, "账户资料继续后")
             else:
                 logger.warning("账户资料填写后未能点击「继续」")
+                await self._retry_s02_if_username_taken(page, data)
         elif filled > 0:
             if not password_ok:
                 logger.warning("s02 密码仍不合规，跳过点击继续: %s", password[:20])
@@ -4323,7 +4445,8 @@ class IcrisRegistrationBot:
             director = {}
         addr_en = (director.get("address_en", "") or "").strip()
         addr_cn = (director.get("address_cn", "") or "").strip()
-        stored = stored_s03_address_fields(director, applicant)
+        raw_stored = stored_s03_address_fields(director, applicant)
+        stored = s03_address_fields_for_fill(director, applicant)
         street = stored["street"]
         region = stored["region"]
         flat = stored["flat"]
@@ -4332,8 +4455,14 @@ class IcrisRegistrationBot:
         is_hk = stored["address_is_hk"] == "1"
         if not street and not region and not flat and not building:
             logger.warning(
-                "用户资料: 缺已入库住址字段 addr_en=%s，不现场拆分",
+                "用户资料: 住址无法拆分 addr_en=%s",
                 (addr_en or addr_cn)[:80],
+            )
+        elif not raw_stored["street"] and street:
+            logger.info(
+                "用户资料: 由英文住址补全 street=%s country=%s",
+                street[:50],
+                address_country,
             )
 
         logger.info(
@@ -4630,15 +4759,18 @@ class IcrisRegistrationBot:
             ok = await self._click_continue(page, expect_step="s04")
             if not ok:
                 logger.warning("s03→s04 继续点击/等待失败 (尝试 %d/2)", attempt)
-            if await self._wait_url_step(page, "s04", timeout_ms=20000):
+            errs = await self._get_validation_errors(page)
+            if errs:
+                logger.warning("s03→s04 仍有校验: %s", errs)
+                return False
+            if await self._is_identity_proof_step(page):
+                logger.info("已从用户资料进入身份证明页")
+                return True
+            if ok and await self._wait_url_step(page, "s04", timeout_ms=8000):
                 logger.info("已从用户资料进入身份证明页")
                 return True
             if self._is_home_or_portal(page.url):
                 logger.error("s03 继续后跳转首页")
-                return False
-            errs = await self._get_validation_errors(page)
-            if errs:
-                logger.warning("s03→s04 仍有校验: %s", errs)
                 return False
             # 已点过继续且无校验：勿反复提交，改走 reload/goto
             if self._is_user_info_url(page.url):
@@ -4708,6 +4840,7 @@ class IcrisRegistrationBot:
                 return False
             errs = await self._get_validation_errors(page)
             await self._raise_if_id_already_registered(page, errs)
+            await self._raise_if_format_invalid(page, errs, step="s04")
             if errs:
                 logger.warning("s04→s03a 仍有校验: %s", errs)
                 return False
@@ -4717,6 +4850,7 @@ class IcrisRegistrationBot:
 
         if self._is_identity_proof_url(page.url):
             await self._raise_if_id_already_registered(page)
+            await self._raise_if_format_invalid(page, step="s04")
             logger.warning(
                 "s04 点继续后仍停在身份证明页（不强制跳 s03a） url=%s",
                 page.url[:120],
@@ -5848,6 +5982,7 @@ class IcrisRegistrationBot:
             logger.info("身份证明号码已填写 type=%s", fill_plan["id_type"])
             await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
             await self._raise_if_id_already_registered(page)
+            await self._raise_if_format_invalid(page, step="s04")
         else:
             logger.debug("未找到身份证明号码输入框（部分类型可能无需填写）")
 
@@ -5888,6 +6023,7 @@ class IcrisRegistrationBot:
                 await self._raise_if_id_already_registered(page)
                 errs = await self._get_validation_errors(page)
                 if errs:
+                    await self._raise_if_format_invalid(page, errs, step="s04")
                     logger.warning("s04 校验错误: %s", errs)
         return filled
 
@@ -6017,6 +6153,8 @@ class IcrisRegistrationBot:
                     logger.error("点击继续后跳转到首页")
                     return False
                 return True
+            except (IcrisLoadingTimeoutError, IcrisStepLoadError, IcrisFlowError):
+                raise
             except Exception as exc:
                 logger.debug("点击继续失败: %s", exc)
                 return False
@@ -6147,9 +6285,21 @@ class IcrisRegistrationBot:
             _ready,
             timeout_ms=_STEP_READY_MS,
             label="continue后导航",
+            abort_on_validation=True,
         ):
             await page.wait_for_timeout(_PAGE_PAUSE_MS)
             return True
+
+        errs = await self._get_validation_errors(page)
+        if errs:
+            logger.warning(
+                "继续后有校验错误，不刷新重等: %s", errs[:4]
+            )
+            await self._raise_if_id_already_registered(page, errs)
+            await self._raise_if_format_invalid(
+                page, errs, step=self._nav_step_label(expect_step, previous_url)
+            )
+            return False
 
         logger.warning(
             "继续后未在 %dms 内切换步骤，刷新重试 url=%s expect=%s",
@@ -6168,12 +6318,22 @@ class IcrisRegistrationBot:
             _ready,
             timeout_ms=_STEP_READY_MS,
             label="continue后导航(reload)",
+            abort_on_validation=True,
         ):
             await page.wait_for_timeout(_PAGE_PAUSE_MS)
             return True
 
+        errs = await self._get_validation_errors(page)
+        if errs:
+            await self._raise_if_id_already_registered(page, errs)
+            await self._raise_if_format_invalid(
+                page, errs, step=self._nav_step_label(expect_step, previous_url)
+            )
+
         if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
-            logger.error("继续后 loading 未结束，可能表单校验失败")
+            step = self._nav_step_label(expect_step, previous_url)
+            logger.error("继续后 loading 未结束 step=%s", step)
+            raise IcrisLoadingTimeoutError(register_loading_timeout_message(step))
         if want_s04:
             logger.debug(
                 "expect s04 仍未到位 url=%s", page.url[:120]
@@ -6247,7 +6407,6 @@ class IcrisRegistrationBot:
 
         t_s02 = time.monotonic()
         await self._ensure_simplified_chinese(page)
-        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         page = await self._recover_step_or_restart(
             page, self._is_account_profile_step, label="s02账户资料"
         )
@@ -6278,22 +6437,38 @@ class IcrisRegistrationBot:
 
         # Step 4: 身份证明（s04）
         t_s04 = time.monotonic()
-        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
         if not await self._is_identity_proof_step(page):
             await self._advance_from_user_info_to_identity(page)
-        page = await self._recover_step_or_restart(
-            page, self._is_identity_proof_step, label="s04身份证明"
-        )
+        if await self._is_identity_proof_step(page):
+            page = await self._recover_step_or_restart(
+                page, self._is_identity_proof_step, label="s04身份证明"
+            )
+        elif await self._get_validation_errors(page):
+            logger.warning("未进入 s04，跳过 recover（仍有校验）")
+        else:
+            page = await self._recover_step_or_restart(
+                page, self._is_identity_proof_step, label="s04身份证明"
+            )
         if await self._is_identity_proof_step(page):
             logger.info("=== 填写身份证明步骤 ===")
             await self._fill_identity_proof_step(page, data)
         else:
-            logger.info("暂未进入身份证明页, url=%s", page.url)
+            await self._raise_if_missing_registration_step(
+                page, step="s04", label="身份证明页"
+            )
         logger.info("ICRIS s04 duration=%.1fs", time.monotonic() - t_s04)
 
         # Step 4b: s03a 电子提交条款（s04 未跳转时再推进一次）
         t_s03a = time.monotonic()
-        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
+            step = (
+                "s04"
+                if await self._is_identity_proof_step(page)
+                else "s03a"
+            )
+            raise IcrisLoadingTimeoutError(
+                register_loading_timeout_message(step)
+            )
         if not await self._is_esubmit_terms_step(page):
             if self._is_identity_proof_url(page.url) or await self._is_identity_proof_step(
                 page
@@ -6335,7 +6510,10 @@ class IcrisRegistrationBot:
                 await self._accept_esubmit_terms(
                     page, submit=bool(self.allow_submit)
                 )
-                await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+                if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
+                    raise IcrisLoadingTimeoutError(
+                        register_loading_timeout_message("s03a")
+                    )
                 if (
                     await self._is_esubmit_terms_step(page)
                     and not self.allow_submit
@@ -6346,7 +6524,9 @@ class IcrisRegistrationBot:
                 if self._identity_proof_filled:
                     logger.info("仍在 s04 但已填过，尝试进入 s03a")
                     if not await self._advance_from_identity_to_esubmit(page):
-                        break
+                        await self._raise_if_missing_registration_step(
+                            page, step="s03a", label="电子提交条款页"
+                        )
                     continue
                 else:
                     await self._fill_identity_proof_step(page, data)
@@ -6356,7 +6536,9 @@ class IcrisRegistrationBot:
                         "仍在 s03 但已填过，仅尝试进入 s04（不切语言重载）"
                     )
                     if not await self._advance_from_user_info_to_identity(page):
-                        break
+                        await self._raise_if_missing_registration_step(
+                            page, step="s04", label="身份证明页"
+                        )
                     continue
                 await self._fill_user_info_step(page, data)
             elif await self._is_account_profile_step(page):
@@ -6423,8 +6605,17 @@ class IcrisRegistrationBot:
         logger.info("ICRIS s05 duration=%.1fs", time.monotonic() - t_s05)
 
         if self.allow_submit:
+            if not await self._is_success_step(page):
+                await self._raise_if_missing_registration_step(
+                    page, step="s05", label="提交成功页"
+                )
             logger.info("注册表单填写完成（已按开关尝试提交）")
         else:
+            if not await self._is_esubmit_terms_step(page):
+                await self._raise_if_missing_registration_step(
+                    page, step="s03a", label="电子提交条款页"
+                )
+            await self._raise_if_nav_loading_timeout(page, step="s03a")
             logger.info("注册表单填写完成（未提交）")
         return page
 
@@ -6468,26 +6659,10 @@ class IcrisRegistrationBot:
             )
 
             try:
-                for outer in range(1, 3):
-                    self._raise_if_cancelled()
-                    self._reset_flow_flags()
-                    try:
-                        page = await self._run_registration_attempt(page, data)
-                        self._active_page = page
-                        break
-                    except IcrisStepLoadError as e:
-                        if self._job_is_cancelled():
-                            raise IcrisFlowError(
-                                "任务已被取消", no_requeue=True
-                            ) from e
-                        logger.error(
-                            "步骤加载失败，将关页重开 outer=%d/2: %s",
-                            outer,
-                            e,
-                        )
-                        if outer >= 2:
-                            raise
-                        page = await self._reopen_fresh_page(page, context)
+                self._raise_if_cancelled()
+                self._reset_flow_flags()
+                page = await self._run_registration_attempt(page, data)
+                self._active_page = page
 
             except Exception as e:
                 if self._job_is_cancelled():
@@ -6514,6 +6689,7 @@ class IcrisRegistrationBot:
                     except Exception as shot_err:
                         logger.warning("保存失败截图失败: %s", shot_err)
                     if screenshot_path:
+                        self.success_screenshot_path = screenshot_path
                         if isinstance(e, IcrisFlowError):
                             if not e.screenshot_path:
                                 e.screenshot_path = screenshot_path

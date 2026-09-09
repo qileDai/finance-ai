@@ -1,0 +1,26 @@
+---
+description: NNC1 初步检查群通知：通过/拒绝用企微 markdown 上色，纯文本回退去掉 font
+globs: "**/icris_form_notify.py,**/test_icris_form_notify.py"
+alwaysApply: false
+---
+
+# 初步检查群通知样式
+
+Webhook 走 `send_webhook_markdown`：
+
+- **通过**：标题和「初步检查结果」用 `<font color="info">`（绿）
+- **拒绝**：用 `<font color="warning">`（橙红），并附頁面拒絕原因
+- 通过消息**不要**带拒絕原因
+
+`send_group_text` 回退时用 `strip_prelim_markdown` 去掉 font 标签。
+
+```python
+# ❌ BAD：纯文本无样式；回退通道把 HTML 原文发进群
+title = "【NNC1 初步检查通过】"
+ww.send_group_text(chat_id, msg)
+
+# ✅ GOOD
+title = _md_status("【NNC1 初步检查通过】", passed=True)
+# 结果行：<font color="info">通过</font> / <font color="warning">拒絕</font>
+ww.send_group_text(chat_id, strip_prelim_markdown(msg))
+```

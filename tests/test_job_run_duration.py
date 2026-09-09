@@ -12,6 +12,7 @@ from src.storage.db import (
     ExternalGroupStore,
     duration_since_started,
     format_job_run_duration,
+    parse_job_run_duration,
 )
 
 _DURATION_RE = re.compile(r"^\d+分\d+秒$")
@@ -49,6 +50,15 @@ class TestFormatJobRunDuration(unittest.TestCase):
             "5分23秒",
         )
         self.assertEqual(duration_since_started("", "2026-09-07T00:00:00+00:00"), "")
+
+    def test_parse_job_run_duration(self):
+        self.assertEqual(parse_job_run_duration("0分0秒"), 0)
+        self.assertEqual(parse_job_run_duration("0分41秒"), 41)
+        self.assertEqual(parse_job_run_duration("5分23秒"), 323)
+        self.assertEqual(parse_job_run_duration("70分0秒"), 70 * 60)
+        self.assertIsNone(parse_job_run_duration(""))
+        self.assertIsNone(parse_job_run_duration("  "))
+        self.assertIsNone(parse_job_run_duration("5m23s"))
 
 
 class TestJobRunDurationStore(unittest.TestCase):
