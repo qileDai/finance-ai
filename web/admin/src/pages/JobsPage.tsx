@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link } from "react-router-dom";
 import { api, type JobField, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobStatusLabel, jobStatusTagColor } from "../components/ui";
+import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobProgressTooltip } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import {
   Alert,
@@ -67,12 +67,20 @@ async function copyText(text: string): Promise<boolean> {
 
 const STATUS_OPTIONS = [
   { value: "", label: "全部" },
-  { value: "pending", label: "待处理" },
-  { value: "running", label: "进行中" },
-  { value: "awaiting_review", label: "待审核" },
-  { value: "succeeded", label: "已成功" },
+  { value: "queued", label: "排队" },
+  { value: "registering", label: "注册中" },
+  { value: "review", label: "待审核" },
+  { value: "review_rejected", label: "已拒绝" },
   { value: "failed", label: "已失败" },
   { value: "cancelled", label: "已取消" },
+  { value: "registered", label: "注册完成" },
+  { value: "activation_pending", label: "待激活" },
+  { value: "activating", label: "激活中" },
+  { value: "activation_failed", label: "激活失败" },
+  { value: "activated", label: "已激活" },
+  { value: "form_pending", label: "待填表" },
+  { value: "form_failed", label: "填表失败" },
+  { value: "form_filled", label: "已填表" },
 ];
 
 function JobExpandRow({ job }: { job: JobRow }) {
@@ -521,26 +529,23 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       },
     },
     {
-      title: "进度",
-      key: "progress",
-      width: 88,
-      onHeaderCell: () => ({ style: { maxWidth: 88 } }),
-      onCell: () => ({ style: { maxWidth: 88 } }),
-      render: (_: unknown, r: JobRow) => (
-        <Tag color={jobProgressTagColor(r.progress)}>{r.progress?.label || "-"}</Tag>
-      ),
-    },
-    {
       title: "状态",
-      dataIndex: "status",
       key: "status",
-      width: 80,
-      onHeaderCell: () => ({ style: { maxWidth: 80 } }),
-      onCell: () => ({ style: { maxWidth: 80 } }),
+      width: 100,
+      onHeaderCell: () => ({ style: { maxWidth: 100 } }),
+      onCell: () => ({ style: { maxWidth: 100 } }),
       render: (_: unknown, r: JobRow) => (
-        <Tag color={jobStatusTagColor(r.status, r.review_status)}>
-          {jobStatusLabel(r.status, r.review_status)}
-        </Tag>
+        <Tooltip
+          title={
+            <span style={{ whiteSpace: "pre-line" }}>
+              {jobProgressTooltip(r.progress)}
+            </span>
+          }
+        >
+          <Tag color={jobProgressTagColor(r.progress)}>
+            {r.progress?.label || "-"}
+          </Tag>
+        </Tooltip>
       ),
     },
     {
@@ -764,7 +769,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
               setStatus(v);
             }}
             options={STATUS_OPTIONS}
-            style={{ width: 120 }}
+            style={{ width: 150 }}
           />
           <DatePicker.RangePicker
             value={dateRange as [dayjs.Dayjs, dayjs.Dayjs] | null}

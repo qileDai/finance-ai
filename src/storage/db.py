@@ -2537,6 +2537,63 @@ class ExternalGroupStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def _registration_progress_clause(self, status: str) -> tuple[str, list[Any]] | None:
+        """列表筛选：进度 step 或旧 status。条件与 job_pipeline_progress 一致。"""
+        key = (status or "").strip().lower()
+        if not key:
+            return None
+        form_open = "IFNULL(form_status, '') NOT IN ('filled', 'failed', 'pending')"
+        if key in ("queued", "pending"):
+            return "status = ?", ["pending"]
+        if key in ("registering", "running"):
+            return "status = ?", ["running"]
+        if key in ("review", "awaiting_review"):
+            return "status = ?", ["awaiting_review"]
+        if key == "review_rejected":
+            return "IFNULL(review_status, '') = ?", ["rejected"]
+        if key == "failed":
+            return (
+                "status = ? AND IFNULL(review_status, '') != ?",
+                ["failed", "rejected"],
+            )
+        if key == "cancelled":
+            return "status = ?", ["cancelled"]
+        if key == "succeeded":
+            return "status = ?", ["succeeded"]
+        if key == "form_filled":
+            return "status = ? AND IFNULL(form_status, '') = ?", ["succeeded", "filled"]
+        if key == "form_failed":
+            return "status = ? AND IFNULL(form_status, '') = ?", ["succeeded", "failed"]
+        if key == "form_pending":
+            return "status = ? AND IFNULL(form_status, '') = ?", ["succeeded", "pending"]
+        if key == "activating":
+            return (
+                f"status = ? AND {form_open} AND IFNULL(activation_status, '') = ?",
+                ["succeeded", "activating"],
+            )
+        if key == "activation_pending":
+            return (
+                f"status = ? AND {form_open} AND IFNULL(activation_status, '') = ?",
+                ["succeeded", "pending"],
+            )
+        if key == "activation_failed":
+            return (
+                f"status = ? AND {form_open} AND IFNULL(activation_status, '') = ?",
+                ["succeeded", "failed"],
+            )
+        if key == "activated":
+            return (
+                f"status = ? AND {form_open} AND IFNULL(activation_status, '') = ?",
+                ["succeeded", "activated"],
+            )
+        if key == "registered":
+            return (
+                f"status = ? AND {form_open} AND IFNULL(activation_status, '') "
+                "NOT IN ('pending', 'activating', 'failed', 'activated')",
+                ["succeeded"],
+            )
+        return "status = ?", [key]
+
     def _registration_jobs_where(
         self,
         *,
@@ -2550,9 +2607,11 @@ class ExternalGroupStore:
     ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        if status:
-            clauses.append("status = ?")
-            params.append(status)
+        progress = self._registration_progress_clause(status)
+        if progress:
+            clause, extra = progress
+            clauses.append(clause)
+            params.extend(extra)
         if keyword:
             kw = f"%{keyword}%"
             clauses.append("(company_name LIKE ? OR payload_json LIKE ?)")

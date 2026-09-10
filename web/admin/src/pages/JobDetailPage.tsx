@@ -13,8 +13,6 @@ import {
   jobCanRequeue,
   jobProgressTagColor,
   jobProgressTooltip,
-  jobStatusLabel,
-  jobStatusTagColor,
 } from "../components/ui";
 import { useMessageApi } from "../useMessageApi";
 
@@ -233,9 +231,6 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
             <section className="reg-card">
               <h2>
                 任务 #{job.id}{" "}
-                <Tag color={jobStatusTagColor(job.status, job.review_status)}>
-                  {jobStatusLabel(job.status, job.review_status)}
-                </Tag>
                 {progress?.label ? (
                   <Tooltip
                     title={
@@ -244,7 +239,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                       </span>
                     }
                   >
-                    <Tag color={jobProgressTagColor(progress)} style={{ marginLeft: 4 }}>
+                    <Tag color={jobProgressTagColor(progress)}>
                       {progress.label}
                     </Tag>
                   </Tooltip>
