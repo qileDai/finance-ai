@@ -669,6 +669,13 @@ table.data tr.clickable:hover td {
   border-radius: 6px;
   font-size: 0.88rem;
 }
+.reg-field .ant-select {
+  width: 100%;
+}
+.reg-email-remark {
+  margin-left: 12px;
+  color: var(--muted, #888);
+}
 .reg-field input[type="file"] {
   font-size: 0.78rem;
 }

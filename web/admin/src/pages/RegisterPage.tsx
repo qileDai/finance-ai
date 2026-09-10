@@ -1,7 +1,13 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button, Modal, Select, Spin } from "antd";
-import { api, ApiError, type RunnerFile, type RunnerStatus } from "../api";
+import {
+  api,
+  ApiError,
+  type EmailAccount,
+  type RunnerFile,
+  type RunnerStatus,
+} from "../api";
 import { PASSPORT_COUNTRIES, countryLabel } from "../countries";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
@@ -27,7 +33,7 @@ const TEXT_FIELDS: TextField[] = [
     key: "contact_email",
     label: "联络邮箱",
     required: true,
-    placeholder: "默认 MATERIALS_DEFAULT_CONTACT_EMAIL",
+    placeholder: "从邮箱账号配置选择",
   },
   { key: "director_address_cn", label: "住址（中文）" },
   { key: "director_address_en", label: "住址（英文）" },
@@ -45,6 +51,47 @@ const ID_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "HKID", label: "香港身份证" },
   { value: "PASSPORT", label: "护照" },
 ];
+
+function accountEnabled(a: EmailAccount): boolean {
+  return a.enabled === true || a.enabled === 1;
+}
+
+type EmailOption = { value: string; label: string; remark?: string };
+
+function emailSelectOptions(
+  accounts: EmailAccount[],
+  defaultEmail: string,
+): EmailOption[] {
+  const seen = new Set<string>();
+  const options: EmailOption[] = [];
+  const add = (addr: string, tag?: string) => {
+    const value = (addr || "").trim();
+    if (!value) return;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const remark = (tag || "").trim();
+    options.push({
+      value,
+      remark: remark || undefined,
+      label: remark ? `${value}  ${remark}` : value,
+    });
+  };
+  for (const a of accounts) {
+    if (!accountEnabled(a)) continue;
+    add(a.email_address || "", a.label);
+  }
+  add(defaultEmail);
+  return options;
+}
+
+/** 联络邮箱入库只取地址；「邮箱  备注」里的备注仅供下拉展示。 */
+function contactEmailOnly(raw: string): string {
+  const s = (raw || "").trim();
+  if (!s) return "";
+  const token = s.split(/\s+/)[0] || "";
+  return token.includes("@") ? token : s;
+}
 
 function primaryIdFileKey(idType: string): string {
   return idType === "PASSPORT" ? "passport" : "id_card_front";
@@ -220,6 +267,7 @@ export function RegisterPage() {
   const [polling, setPolling] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [defaultEmail, setDefaultEmail] = useState("");
+  const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([]);
   const [parsing, setParsing] = useState(false);
   const [s03Countries, setS03Countries] = useState<string[]>([]);
   const [s03Districts, setS03Districts] = useState<string[]>([]);
@@ -254,6 +302,10 @@ export function RegisterPage() {
           );
         }
       })
+      .catch(() => {});
+    api.emailAccounts
+      .list()
+      .then((d) => setEmailAccounts(d.items || []))
       .catch(() => {});
     api.defaultOffice
       .get()
@@ -315,6 +367,7 @@ export function RegisterPage() {
   }, [runnerStatus?.messages]);
 
   const statusLogs = normalizeLogLines(runnerStatus?.messages || []);
+  const emailOptions = emailSelectOptions(emailAccounts, defaultEmail);
 
   function setField(key: string, value: string) {
     setFields((p) => ({ ...p, [key]: value }));
@@ -359,6 +412,9 @@ export function RegisterPage() {
       const nextIdType = parsed.id_type || "";
       const rest = { ...parsed };
       delete rest.id_type;
+      delete rest.contact_email;
+      const keepEmail =
+        (fields.contact_email || "").trim() || defaultEmail;
       const officeKeep: Record<string, string> = {};
       for (const k of [
         "office_flat_floor",
@@ -375,7 +431,7 @@ export function RegisterPage() {
       setTaiwanPassport(Boolean(taiwan));
       setFields({
         registered_capital: rest.registered_capital || "1万港币",
-        ...(defaultEmail ? { contact_email: defaultEmail } : {}),
+        ...(keepEmail ? { contact_email: keepEmail } : {}),
         ...officeKeep,
         ...rest,
       });
@@ -442,9 +498,9 @@ export function RegisterPage() {
     }
     if (!(fields.director_name || "").trim()) return "董事兼股东姓名必填";
     if (!(fields.id_number || "").trim()) return "证件号码必填";
-    const email = (fields.contact_email || "").trim();
+    const email = contactEmailOnly(fields.contact_email || "");
     if (!email) return "联络邮箱必填";
-    if (email && !email.includes("@")) return "联络邮箱格式无效";
+    if (!email.includes("@")) return "联络邮箱格式无效";
     const hasAddr = [
       "director_address_cn",
       "director_address_en",
@@ -482,6 +538,7 @@ export function RegisterPage() {
       }
       const payload = {
         ...fields,
+        contact_email: contactEmailOnly(fields.contact_email || ""),
         id_type: idType,
         issuing_country: fields.issuing_country || "",
         paste_text: pasteText,
@@ -580,13 +637,57 @@ export function RegisterPage() {
                   {f.label}
                   {f.required ? <em>*</em> : null}
                 </span>
-                <input
-                  type="text"
-                  value={fields[f.key] || ""}
-                  placeholder={f.placeholder}
-                  onChange={(e) => setField(f.key, e.target.value)}
-                  disabled={submitting}
-                />
+                {f.key === "contact_email" ? (
+                  <>
+                    <Select
+                      showSearch
+                      optionFilterProp="label"
+                      placeholder={f.placeholder}
+                      value={fields.contact_email || undefined}
+                      onChange={(v) =>
+                        setField("contact_email", contactEmailOnly(String(v || "")))
+                      }
+                      disabled={submitting}
+                      options={emailOptions}
+                      style={{ width: "100%" }}
+                      optionRender={(option) => {
+                        const remark = (option.data as EmailOption).remark;
+                        return (
+                          <>
+                            <span>{String(option.value)}</span>
+                            {remark ? (
+                              <span className="reg-email-remark">{remark}</span>
+                            ) : null}
+                          </>
+                        );
+                      }}
+                      labelRender={(item) => {
+                        const remark =
+                          emailOptions.find((o) => o.value === item.value)
+                            ?.remark || "";
+                        return (
+                          <>
+                            <span>{item.value}</span>
+                            {remark ? (
+                              <span className="reg-email-remark">{remark}</span>
+                            ) : null}
+                          </>
+                        );
+                      }}
+                    />
+                    <small className="muted">
+                      选项来自 <Link to="/email-config">邮箱账号配置</Link>
+                    </small>
+                  </>
+                ) : (
+                  <input
+                    type="text"
+                    value={fields[f.key] || ""}
+                    placeholder={f.placeholder}
+                    onChange={(e) => setField(f.key, e.target.value)}
+                    disabled={submitting}
+                  />
+                )}
                 {f.key === "director_address_en" &&
                 (fields.director_address_cn || fields.director_address_en) ? (
                   <small

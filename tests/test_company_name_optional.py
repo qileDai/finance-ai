@@ -6,7 +6,7 @@ import unittest
 
 from src.materials.checklist import MATERIAL_FIELDS, _is_field_required, progress_summary
 from src.materials.packager import collect_materials_from_dict
-from src.web.admin_runner import _validate
+from src.web.admin_runner import _contact_email_only, _validate
 
 
 def _file() -> dict:
@@ -60,6 +60,29 @@ class TestAdminValidateCompanyName(unittest.TestCase):
     def test_both_empty_fails(self):
         errs = _validate(_base_fields(), _file())
         self.assertTrue(any("中文名或英文名" in e for e in errs))
+
+    def test_contact_email_with_remark_still_valid(self):
+        self.assertEqual(
+            _validate(
+                _base_fields(
+                    company_name_cn="撼世全球有限公司",
+                    contact_email="a@b.com  主号",
+                ),
+                _file(),
+            ),
+            [],
+        )
+
+
+class TestContactEmailOnly(unittest.TestCase):
+    def test_strips_remark(self):
+        self.assertEqual(_contact_email_only("a@b.com  主号"), "a@b.com")
+
+    def test_plain_email(self):
+        self.assertEqual(_contact_email_only("a@b.com"), "a@b.com")
+
+    def test_empty(self):
+        self.assertEqual(_contact_email_only(""), "")
 
 
 class TestChecklistCompanyName(unittest.TestCase):

@@ -123,6 +123,15 @@ def defaults() -> dict[str, Any]:
     }
 
 
+def _contact_email_only(raw: str) -> str:
+    """入库只取邮箱地址；下拉展示用的「邮箱  备注」丢掉备注。"""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    token = s.split()[0]
+    return token if "@" in token else s
+
+
 def _ext_from_mime(mime: str) -> str:
     return _MIME_EXT.get((mime or "").lower(), "bin")
 
@@ -311,7 +320,7 @@ def _validate(
         errs.append("董事兼股东姓名必填")
     if not (fields.get("id_number") or "").strip():
         errs.append("身份证号码必填")
-    email = (fields.get("contact_email") or "").strip()
+    email = _contact_email_only(fields.get("contact_email") or "")
     if not email:
         errs.append("联络邮箱必填（可用 MATERIALS_DEFAULT_CONTACT_EMAIL）")
     elif "@" not in email:
@@ -679,8 +688,9 @@ def submit(
                 if v and not str(fields.get(k) or "").strip():
                     fields[k] = v
 
-    # 空邮箱回退环境变量
-    if not (fields.get("contact_email") or "").strip():
+    # 空邮箱回退环境变量；有备注只展示、不入库
+    fields["contact_email"] = _contact_email_only(fields.get("contact_email") or "")
+    if not fields["contact_email"]:
         fields["contact_email"] = (
             getattr(settings, "materials_default_contact_email", "") or ""
         ).strip()
