@@ -528,6 +528,31 @@ class ExternalGroupStore:
                 "ALTER TABLE registration_jobs ADD COLUMN nnc1_loading_retries "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "activation_url" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_url "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_username" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_username "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_url_saved_at" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_url_saved_at "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_pending_at" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_pending_at "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "activation_attempts" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_attempts "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(intent_routes)")}
@@ -2034,26 +2059,128 @@ class ExternalGroupStore:
     # ---- 账号激活状态 ----
 
     def mark_job_activation_pending(self, job_id: int) -> None:
-        """注册成功后标记待激活。"""
+        """注册成功后标记待激活。已 activated 的单不打回。"""
         now = _utc_now()
         with self._conn() as conn:
             conn.execute(
                 """UPDATE registration_jobs
-                   SET activation_status='pending', activation_checked_at='',
-                       activation_activated_at='', updated_at=?
-                   WHERE id=?""",
-                (now, job_id),
+                   SET activation_status='pending', activation_pending_at=?,
+                       activation_checked_at='', activation_activated_at='',
+                       activation_url='', activation_username='',
+                       activation_url_saved_at='', activation_attempts=0,
+                       updated_at=?
+                   WHERE id=?
+                     AND IFNULL(activation_status, '') NOT IN ('activated', 'failed')""",
+                (now, now, job_id),
             )
 
     def get_jobs_pending_activation(self) -> list[dict[str, Any]]:
-        """查所有 activation_status='pending' 的任务。"""
+        """待扫信：注册已成功且仍 pending（不含已激活/失败/取消）。"""
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM registration_jobs
                    WHERE activation_status='pending'
+                     AND status = 'succeeded'
                    ORDER BY id"""
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_jobs_ready_to_activate(self) -> list[dict[str, Any]]:
+        """已存匹配链接、尚未激活：先存的先激活。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM registration_jobs
+                   WHERE activation_status='pending'
+                     AND status = 'succeeded'
+                     AND IFNULL(activation_url, '') != ''
+                   ORDER BY
+                     CASE WHEN activation_url_saved_at = '' THEN '9999'
+                          ELSE activation_url_saved_at END,
+                     id"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_job_activation_url(
+        self, job_id: int, url: str, username: str
+    ) -> bool:
+        """把匹配该单用户名的 s06 写到该行。已有链接不覆盖。"""
+        now = _utc_now()
+        link = (url or "").strip()
+        user = (username or "").strip()
+        if not link or not user:
+            return False
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_url=?, activation_username=?,
+                       activation_url_saved_at=?, updated_at=?
+                   WHERE id=?
+                     AND status='succeeded'
+                     AND activation_status='pending'
+                     AND IFNULL(activation_url, '') = ''""",
+                (link, user, now, now, job_id),
+            )
+            return int(cur.rowcount or 0) == 1
+
+    def clear_job_activation_url(self, job_id: int) -> None:
+        """链接失效：清 URL 保持 pending，下小时重搜。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_url='', activation_username='',
+                       activation_url_saved_at='', updated_at=?
+                   WHERE id=?
+                     AND activation_status IN ('pending', 'activating')""",
+                (now, job_id),
+            )
+
+    def claim_job_activation(self, job_id: int) -> dict[str, Any] | None:
+        """认领浏览器激活，防双开。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='activating',
+                       activation_attempts=activation_attempts + 1,
+                       updated_at=?
+                   WHERE id=?
+                     AND status='succeeded'
+                     AND activation_status='pending'
+                     AND IFNULL(activation_url, '') != ''""",
+                (now, job_id),
+            )
+            if int(cur.rowcount or 0) != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def release_job_activation_claim(self, job_id: int) -> None:
+        """浏览器激活未成功：从 activating 放回 pending。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='pending', updated_at=?
+                   WHERE id=? AND activation_status='activating'""",
+                (now, job_id),
+            )
+
+    def reset_stale_activating_jobs(self) -> int:
+        """进程重启：卡住的 activating 修回 pending。"""
+        now = _utc_now()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_status='pending', updated_at=?
+                   WHERE activation_status='activating'
+                     AND status='succeeded'""",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
 
     def mark_job_activation_checked(self, job_id: int) -> None:
         now = _utc_now()
@@ -2072,7 +2199,9 @@ class ExternalGroupStore:
                 """UPDATE registration_jobs
                    SET activation_status='activated', activation_activated_at=?,
                        form_status='pending', updated_at=?
-                   WHERE id=?""",
+                   WHERE id=?
+                     AND activation_status IN ('pending', 'activating', '')
+                     AND IFNULL(form_status, '') NOT IN ('filled', 'failed')""",
                 (now, now, job_id),
             )
 
@@ -2082,7 +2211,8 @@ class ExternalGroupStore:
             conn.execute(
                 """UPDATE registration_jobs
                    SET activation_status='failed', last_error=?, updated_at=?
-                   WHERE id=?""",
+                   WHERE id=?
+                     AND IFNULL(activation_status, '') NOT IN ('activated')""",
                 (error[:500], now, job_id),
             )
 
@@ -2098,11 +2228,13 @@ class ExternalGroupStore:
             )
 
     def get_jobs_pending_form(self) -> list[dict[str, Any]]:
-        """待填表任务：载入超时插队（form_boost）优先，其余按 id。"""
+        """待填表任务：已激活且未填完。载入超时插队（form_boost）优先。"""
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM registration_jobs
-                   WHERE activation_status='activated' AND form_status='pending'
+                   WHERE activation_status='activated'
+                     AND form_status='pending'
+                     AND status='succeeded'
                    ORDER BY form_boost DESC, id"""
             ).fetchall()
         return [dict(r) for r in rows]
@@ -2717,7 +2849,7 @@ class ExternalGroupStore:
                 backlog["register_running"] += 1
             elif status == "awaiting_review":
                 backlog["awaiting_review"] += 1
-            if act_st == "pending":
+            if act_st in ("pending", "activating"):
                 backlog["activation_pending"] += 1
             if form_st == "pending":
                 backlog["form_pending"] += 1

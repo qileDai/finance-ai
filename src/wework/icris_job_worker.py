@@ -51,7 +51,7 @@ class IcrisJobWorker:
                     "ICRIS Worker 清理僵尸 awaiting_review: %d", orphans
                 )
 
-        # 启动激活检查 worker（每小时检查待激活任务的邮箱）
+        # 启动激活检查 worker（每小时扫信；队列空时 drain 激活/填表）
         from src.wework.icris_activation_worker import IcrisActivationWorker
         self._activation_worker = IcrisActivationWorker(self.store)
         self._activation_worker.start()
@@ -102,22 +102,34 @@ class IcrisJobWorker:
 
         with hold_cdp_lock("registration"):
             job = self.store.claim_next_job()
-            if not job:
-                return
-            fill = float(
-                getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
-            )
-            keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
-            wd = SessionWatchdog(
-                fill + keep + 30.0,
-                job_id=int(job["id"]),
-                store=self.store,
-            )
-            wd.start()
-            try:
-                self._process_job(job)
-            finally:
-                wd.stop()
+            if job:
+                fill = float(
+                    getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
+                )
+                keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
+                wd = SessionWatchdog(
+                    fill + keep + 30.0,
+                    job_id=int(job["id"]),
+                    store=self.store,
+                )
+                wd.start()
+                try:
+                    self._process_job(job)
+                finally:
+                    wd.stop()
+        self._drain_activation_if_queue_idle()
+
+    def _drain_activation_if_queue_idle(self) -> None:
+        """本单注册结束且没有下一单排队时，立刻用已存链接激活/填表。"""
+        worker = self._activation_worker
+        if worker is None:
+            return
+        if self.store.has_active_registration_queue():
+            return
+        try:
+            worker.drain()
+        except Exception:
+            logger.exception("注册结束后 drain 激活/填表失败")
 
     def _backoff_iso(self, attempts: int) -> str:
         base = float(settings.icris_job_retry_backoff_seconds or 30.0)

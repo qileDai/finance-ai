@@ -241,6 +241,12 @@ class TestActivationDoesNotFillAndNnc1Yields(unittest.TestCase):
                 }
             ),
         }
+        store.get_registration_job.return_value = {
+            **job,
+            "status": "succeeded",
+            "activation_status": "activated",
+            "form_status": "pending",
+        }
         with patch("src.browser.cdp_session.hold_cdp_lock") as hold_fn, patch(
             "src.browser.icris_nnc1_form.IcrisNnc1FormBot"
         ) as bot_cls, patch(

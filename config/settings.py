@@ -246,8 +246,12 @@ class Settings(BaseSettings):
     icris_job_retry_backoff_seconds: float = 30.0
     # CDP 注册/NNC1 填表墙钟超时（不含人工审核等待）
     icris_cdp_session_timeout_seconds: int = 1500
-    # 待填表轮询间隔（秒）；与激活邮件小时循环分开
+    # 待填表轮询间隔（秒）；队列空时的 drain 兜底
     icris_form_poll_seconds: float = 60.0
+    # 待激活扫信间隔（秒）；IMAP 不占浏览器
+    icris_activation_poll_seconds: float = 3600.0
+    # 浏览器激活瞬时失败最多几次后标 failed
+    icris_activation_max_attempts: int = 3
 
     # ICRIS 账号凭证生成（用户名=英文名首字母+证件后5位+yt，密码=用户名+后缀）
     icris_credential_mode: str = "yingtai"  # "yingtai" initials+id+yt | "legacy" 旧规则

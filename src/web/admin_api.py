@@ -800,6 +800,8 @@ def job_pipeline_progress(job: dict[str, Any]) -> dict[str, Any]:
             detail = last_error
         elif form == "pending":
             step, label = "form_pending", "待填表"
+        elif act == "activating":
+            step, label = "activating", "激活中"
         elif act == "pending":
             step, label = "activating", "待激活"
         elif act == "failed":

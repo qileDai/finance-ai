@@ -1,4 +1,4 @@
-"""ICRIS 账号激活 Worker — 每小时检查待激活任务的邮箱。"""
+"""ICRIS 账号激活 Worker — 每小时扫信入库；队列空时按先存链接先激活再填表。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
+
+_ACTIVATION_MAX_ATTEMPTS = 3
 
 
 def contact_email_from_payload(payload: dict) -> str:
@@ -39,31 +41,76 @@ def icris_credentials_from_payload(payload: dict) -> tuple[str, str]:
     return username, password
 
 
+def parse_job_payload(job: dict) -> dict:
+    payload_str = str(job.get("payload_json") or "")
+    if not payload_str:
+        return {}
+    try:
+        loaded = json.loads(payload_str)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _activation_fail_kind(detail: str) -> str:
+    text = detail or ""
+    lower = text.lower()
+    if "不是启动帐户链接" in text:
+        return "bad_link"
+    if "启动帐户页需要用户名和密码" in text:
+        return "missing_creds"
+    if (
+        "incorrect user" in lower
+        or "用户名称或密码不正确" in text
+        or "用戶名稱或密碼不正確" in text
+        or "用户名或密码不正确" in text
+        or "帳號或密碼不正確" in text
+        or "帐号或密码不正确" in text
+    ):
+        return "credential"
+    if "打开后不是启动帐户页" in text:
+        return "stale_page"
+    return "transient"
+
+
 class IcrisActivationWorker:
-    """扫激活邮件（小时）与待填表（约 60s）分循环，避免填表挡住收信。"""
+    """扫激活邮件（小时）与队列空时 drain（激活+填表）。"""
 
     def __init__(
         self,
         store,
-        interval_seconds: int = 3600,
+        interval_seconds: int | float | None = None,
         form_poll_seconds: float | None = None,
     ) -> None:
         from config.settings import settings
 
         self.store = store
-        self.interval = interval_seconds
+        if interval_seconds is None:
+            self.interval = float(
+                getattr(settings, "icris_activation_poll_seconds", 3600) or 3600
+            )
+        else:
+            self.interval = float(interval_seconds)
         self.form_poll = float(
             form_poll_seconds
             if form_poll_seconds is not None
             else getattr(settings, "icris_form_poll_seconds", 60.0) or 60.0
         )
+        self._max_attempts = int(
+            getattr(settings, "icris_activation_max_attempts", _ACTIVATION_MAX_ATTEMPTS)
+            or _ACTIVATION_MAX_ATTEMPTS
+        )
         self._thread: threading.Thread | None = None
         self._form_thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._drain_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        repaired = self.store.reset_stale_activating_jobs()
+        if repaired:
+            logger.warning("激活 worker 回收卡住的 activating: %d", repaired)
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._activation_loop, daemon=True, name="icris-activation"
@@ -87,19 +134,18 @@ class IcrisActivationWorker:
             self._form_thread.join(timeout=5.0)
 
     def _activation_loop(self) -> None:
-        self._stop.wait(60)
         while not self._stop.is_set():
             try:
                 self._check_pending_jobs()
+                self.drain()
             except Exception as e:
                 logger.exception("激活 worker 异常: %s", e)
             self._stop.wait(self.interval)
 
     def _form_loop(self) -> None:
-        self._stop.wait(60)
         while not self._stop.is_set():
             try:
-                self._check_form_pending_jobs()
+                self.drain()
             except Exception as e:
                 logger.exception("填表 worker 异常: %s", e)
             self._stop.wait(self.form_poll)
@@ -108,7 +154,7 @@ class IcrisActivationWorker:
         jobs = self.store.get_jobs_pending_activation()
         if not jobs:
             return
-        logger.info("待激活任务 %d 个", len(jobs))
+        logger.info("待扫信任务 %d 个", len(jobs))
 
         for job in jobs:
             if self._stop.is_set():
@@ -117,6 +163,46 @@ class IcrisActivationWorker:
                 self._process_one_job(job)
             except Exception as e:
                 logger.error("处理激活任务 #%s 异常: %s", job.get("id"), e)
+
+    def drain(self) -> None:
+        """注册队列空时：先填已激活未填的表，再按链接写入顺序激活+填表。"""
+        if not self._drain_lock.acquire(blocking=False):
+            return
+        try:
+            seen: set[int] = set()
+            while not self._stop.is_set():
+                if self.store.has_active_registration_queue():
+                    return
+                form_jobs = self.store.get_jobs_pending_form()
+                if form_jobs:
+                    jid = int(form_jobs[0].get("id") or 0)
+                    if not jid or jid in seen:
+                        return
+                    seen.add(jid)
+                    self._process_form_job(form_jobs[0])
+                    continue
+                ready = self.store.get_jobs_ready_to_activate()
+                if not ready:
+                    return
+                jid = int(ready[0].get("id") or 0)
+                if not jid or jid in seen:
+                    return
+                seen.add(jid)
+                claimed = self.store.claim_job_activation(jid)
+                if not claimed:
+                    return
+                if not self._activate_claimed_job(claimed):
+                    continue
+                if self.store.has_active_registration_queue():
+                    return
+                row = self.store.get_registration_job(jid) or {}
+                if (
+                    str(row.get("activation_status") or "") == "activated"
+                    and str(row.get("form_status") or "") == "pending"
+                ):
+                    self._process_form_job(row)
+        finally:
+            self._drain_lock.release()
 
     def _check_form_pending_jobs(self) -> None:
         """处理激活成功后待填表的任务。有可跑的注册则整轮跳过。"""
@@ -146,6 +232,14 @@ class IcrisActivationWorker:
     def _process_form_job(self, job: dict) -> None:
         job_id = int(job.get("id") or 0)
         if not job_id:
+            return
+        row = self.store.get_registration_job(job_id) or job
+        if str(row.get("form_status") or "") == "filled":
+            logger.info("任务 #%s 已填表，跳过", job_id)
+            return
+        if str(row.get("form_status") or "") != "pending":
+            return
+        if str(row.get("activation_status") or "") != "activated":
             return
 
         # 从 payload_json 取账号密码和公司材料
@@ -313,23 +407,22 @@ class IcrisActivationWorker:
             logger.warning("填表通知发送失败: %s", e)
 
     def _process_one_job(self, job: dict) -> None:
+        """扫信：只把匹配该单用户名的链接写入该行，不开浏览器。"""
         job_id = int(job.get("id") or 0)
         if not job_id:
             return
+        live = self.store.get_registration_job(job_id) or job
+        if str(live.get("status") or "") != "succeeded":
+            return
+        act = str(live.get("activation_status") or "")
+        if act in ("activated", "failed", "activating"):
+            return
+        if act != "pending":
+            return
 
-        # 从 payload_json 取登记邮箱与 ICRIS 账号
-        payload_str = str(job.get("payload_json") or "")
-        payload: dict = {}
-        if payload_str:
-            try:
-                loaded = json.loads(payload_str)
-                if isinstance(loaded, dict):
-                    payload = loaded
-            except Exception:
-                payload = {}
-
+        payload = parse_job_payload(live)
         contact_email = contact_email_from_payload(payload)
-        icris_user, icris_pass = icris_credentials_from_payload(payload)
+        icris_user, _icris_pass = icris_credentials_from_payload(payload)
 
         if not contact_email:
             logger.warning("任务 #%s 无注册邮箱，跳过激活", job_id)
@@ -340,7 +433,20 @@ class IcrisActivationWorker:
             logger.warning("任务 #%s 无 ICRIS 用户名，本轮跳过", job_id)
             return
 
-        # 按任务电邮查 IMAP 配置（只读该任务自己的邮箱）
+        stored_url = str(live.get("activation_url") or "").strip()
+        stored_user = str(live.get("activation_username") or "").strip()
+        if stored_url:
+            if stored_user.lower() == icris_user.lower():
+                logger.info("任务 #%s 已有匹配链接，跳过扫信", job_id)
+                return
+            logger.warning(
+                "任务 #%s 已存链接用户名 %s 与账号 %s 不符，清空重搜",
+                job_id,
+                stored_user,
+                icris_user,
+            )
+            self.store.clear_job_activation_url(job_id)
+
         account = self.store.get_email_account_by_address(contact_email)
         if not account:
             logger.warning("任务 #%s 邮箱 %s 未配置 IMAP", job_id, contact_email)
@@ -349,16 +455,16 @@ class IcrisActivationWorker:
             )
             return
 
-        # 注册时间
-        created_at_str = str(job.get("created_at") or "")
+        since_raw = str(
+            live.get("activation_pending_at") or live.get("created_at") or ""
+        )
         since_date: datetime | None = None
         try:
-            if created_at_str:
-                since_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            if since_raw:
+                since_date = datetime.fromisoformat(since_raw.replace("Z", "+00:00"))
         except Exception:
             pass
 
-        # 7 天超时
         if since_date:
             now_utc = datetime.now(timezone.utc)
             if now_utc - since_date > timedelta(days=7):
@@ -366,8 +472,8 @@ class IcrisActivationWorker:
                 logger.warning("任务 #%s 激活超时", job_id)
                 return
 
-        # 检查激活邮件：必须用戶名稱与入库账号一致
         from src.email.imap_client import EmailClient
+        from src.browser.icris_activation import require_s06_activation_url
 
         client = EmailClient()
         link = client.fetch_activation_link(
@@ -379,53 +485,113 @@ class IcrisActivationWorker:
             logger.info("任务 #%s 暂无匹配 %s 的激活邮件，等下次检查", job_id, icris_user)
             return
 
-        if self.store.has_active_registration_queue():
-            logger.info("注册队列未空，任务 #%s 本轮跳过激活", job_id)
-            return
-
-        # 浏览器打开 s06 启动帐户页，填入库用户名/密码后点确认
-        logger.info("任务 #%s 开始浏览器激活（账号 %s）", job_id, icris_user)
-        from src.browser.icris_activation import (
-            activate_icris_account,
-            require_s06_activation_url,
-        )
-
         open_url, url_err = require_s06_activation_url(link)
         if url_err:
             self.store.mark_job_activation_failed(job_id, url_err)
             logger.error("任务 #%s %s", job_id, url_err)
             return
 
+        saved = self.store.save_job_activation_url(job_id, open_url, icris_user)
+        if saved:
+            logger.info(
+                "任务 #%s 已写入激活链接 用户名=%s",
+                job_id,
+                icris_user,
+            )
+        else:
+            logger.info("任务 #%s 链接未写入（已激活或已有链接）", job_id)
+
+    def _activate_claimed_job(self, job: dict) -> bool:
+        """用该行已存链接+账密开浏览器。成功返回 True。"""
+        job_id = int(job.get("id") or 0)
+        payload = parse_job_payload(job)
+        icris_user, icris_pass = icris_credentials_from_payload(payload)
+        stored_url = str(job.get("activation_url") or "").strip()
+        stored_user = str(job.get("activation_username") or "").strip()
+
+        if not icris_user or not stored_url:
+            self.store.release_job_activation_claim(job_id)
+            self.store.clear_job_activation_url(job_id)
+            logger.warning("任务 #%s 认领后缺少用户名或链接，已放回", job_id)
+            return False
+
+        if stored_user.lower() != icris_user.lower():
+            self.store.release_job_activation_claim(job_id)
+            self.store.clear_job_activation_url(job_id)
+            logger.warning(
+                "任务 #%s 链接用户名 %s 与账号 %s 不符，清空",
+                job_id,
+                stored_user,
+                icris_user,
+            )
+            return False
+
+        if self.store.has_active_registration_queue():
+            self.store.release_job_activation_claim(job_id)
+            logger.info("注册队列未空，任务 #%s 放回待激活", job_id)
+            return False
+
+        from src.browser.icris_activation import require_s06_activation_url
+
+        open_url, url_err = require_s06_activation_url(stored_url)
+        if url_err:
+            self.store.mark_job_activation_failed(job_id, url_err)
+            logger.error("任务 #%s %s", job_id, url_err)
+            return False
+
         logger.info(
-            "任务 #%s 即将打开 邮箱=%s 期望用户名=%s url=%s",
+            "任务 #%s 开始浏览器激活（账号 %s）",
             job_id,
-            contact_email,
             icris_user,
-            open_url,
         )
-        try:
-            ok, detail = asyncio.run(
-                activate_icris_account(
-                    open_url, username=icris_user, password=icris_pass
-                )
-            )
-        except RuntimeError as e:
-            # 无事件循环环境，用新线程跑
-            logger.warning("无事件循环，新线程执行激活: %s", e)
-            ok, detail = self._run_in_thread(
-                activate_icris_account,
-                open_url,
-                username=icris_user,
-                password=icris_pass,
-                join_timeout=180,
-            )
+        ok, detail = self._run_activate_browser(open_url, icris_user, icris_pass)
 
         if ok:
             self.store.mark_job_activated(job_id)
             logger.info("任务 #%s 激活成功", job_id)
-        else:
+            return True
+
+        kind = _activation_fail_kind(str(detail or ""))
+        attempts = int(job.get("activation_attempts") or 0)
+        if kind in ("credential", "bad_link", "missing_creds"):
             self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
             logger.error("任务 #%s 激活失败: %s", job_id, detail)
+            return False
+
+        if kind == "stale_page" or attempts >= self._max_attempts:
+            if attempts >= self._max_attempts and kind != "stale_page":
+                self.store.mark_job_activation_failed(
+                    job_id, f"激活失败（已重试 {attempts} 次）: {detail}"
+                )
+                logger.error("任务 #%s 激活失败耗尽重试: %s", job_id, detail)
+                return False
+            self.store.release_job_activation_claim(job_id)
+            self.store.clear_job_activation_url(job_id)
+            logger.warning("任务 #%s 链接失效，已清空等下次扫信: %s", job_id, detail)
+            return False
+
+        self.store.release_job_activation_claim(job_id)
+        logger.warning("任务 #%s 激活瞬时失败，保持链接待重试: %s", job_id, detail)
+        return False
+
+    def _run_activate_browser(
+        self, url: str, username: str, password: str
+    ) -> tuple[bool, str]:
+        from src.browser.icris_activation import activate_icris_account
+
+        try:
+            return asyncio.run(
+                activate_icris_account(url, username=username, password=password)
+            )
+        except RuntimeError as e:
+            logger.warning("无事件循环，新线程执行激活: %s", e)
+            return self._run_in_thread(
+                activate_icris_account,
+                url,
+                username=username,
+                password=password,
+                join_timeout=180,
+            )
 
     def _run_in_thread(self, coro, *args, join_timeout: float = 120, **kwargs):
         """在新线程的事件循环里运行协程。"""

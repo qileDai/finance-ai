@@ -283,8 +283,10 @@ async def activate_icris_account(
             "请先安装 Playwright: pip install playwright && playwright install chromium"
         ) from e
 
+    from src.browser.cdp_lock import cdp_lock_held_here
     from src.browser.cdp_session import hold_cdp_lock
     from src.browser.icris_ui_common import wait_spin_clear
+    from contextlib import nullcontext
 
     user = (username or "").strip()
     pwd = (password or "").strip()
@@ -295,7 +297,10 @@ async def activate_icris_account(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     shot_file = shot_dir / f"activation_{stamp}.png"
 
-    with hold_cdp_lock("activation"):
+    lock_ctx = (
+        nullcontext() if cdp_lock_held_here() else hold_cdp_lock("activation")
+    )
+    with lock_ctx:
         async with async_playwright() as p:
             browser = await launch_browser(p, force_isolated=False)
             context = await create_browser_context(browser)
