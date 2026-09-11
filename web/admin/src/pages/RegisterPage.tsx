@@ -797,47 +797,73 @@ export function RegisterPage() {
                     </div>
                   </>
                 ) : (
-                  <div className="reg-address-stack">
-                    <label className="reg-field">
-                      <span>街道／屋苑／地段／村</span>
-                      <input
-                        type="text"
-                        value={fields.director_address_street || ""}
-                        onChange={(e) =>
-                          setField("director_address_street", e.target.value)
-                        }
-                        disabled={submitting}
-                      />
-                    </label>
-                    <label className="reg-field">
-                      <span>区／市／省／州／邮递区号</span>
-                      <input
-                        type="text"
-                        value={fields.director_address_region || ""}
-                        onChange={(e) =>
-                          setField("director_address_region", e.target.value)
-                        }
-                        disabled={submitting}
-                      />
-                    </label>
-                    <label className="reg-field">
-                      <span>国家／地区</span>
-                      <Select
-                        showSearch
-                        allowClear
-                        optionFilterProp="label"
-                        placeholder="搜索国家"
-                        value={fields.address_country || undefined}
-                        onChange={(v) => setField("address_country", v || "")}
-                        disabled={submitting}
-                        options={s03Countries.map((label) => ({
-                          value: label,
-                          label,
-                        }))}
-                        style={{ width: "100%" }}
-                      />
-                    </label>
-                  </div>
+                  <>
+                    <div className="reg-id-row">
+                      <label className="reg-field">
+                        <span>室／楼／座</span>
+                        <input
+                          type="text"
+                          value={fields.director_address_flat || ""}
+                          onChange={(e) =>
+                            setField("director_address_flat", e.target.value)
+                          }
+                          disabled={submitting}
+                        />
+                      </label>
+                      <label className="reg-field">
+                        <span>大厦</span>
+                        <input
+                          type="text"
+                          value={fields.director_address_building || ""}
+                          onChange={(e) =>
+                            setField("director_address_building", e.target.value)
+                          }
+                          disabled={submitting}
+                        />
+                      </label>
+                    </div>
+                    <div className="reg-address-stack">
+                      <label className="reg-field">
+                        <span>街道／屋苑／地段／村</span>
+                        <input
+                          type="text"
+                          value={fields.director_address_street || ""}
+                          onChange={(e) =>
+                            setField("director_address_street", e.target.value)
+                          }
+                          disabled={submitting}
+                        />
+                      </label>
+                      <label className="reg-field">
+                        <span>区／市／省／州／邮递区号</span>
+                        <input
+                          type="text"
+                          value={fields.director_address_region || ""}
+                          onChange={(e) =>
+                            setField("director_address_region", e.target.value)
+                          }
+                          disabled={submitting}
+                        />
+                      </label>
+                      <label className="reg-field">
+                        <span>国家／地区</span>
+                        <Select
+                          showSearch
+                          allowClear
+                          optionFilterProp="label"
+                          placeholder="搜索国家"
+                          value={fields.address_country || undefined}
+                          onChange={(v) => setField("address_country", v || "")}
+                          disabled={submitting}
+                          options={s03Countries.map((label) => ({
+                            value: label,
+                            label,
+                          }))}
+                          style={{ width: "100%" }}
+                        />
+                      </label>
+                    </div>
+                  </>
                 )
               ) : null}
               {f.key === "director_name" ? (

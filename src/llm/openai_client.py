@@ -470,6 +470,26 @@ class LLMClient:
             return coerce_address_result({}, en)
         return coerce_address_result(data, en)
 
+    def fit_non_hk_address_fields(
+        self, flat: str, building: str, street: str, region: str
+    ) -> dict:
+        """非香港四栏超 60 字时再拆室/大厦。"""
+        from src.materials.address_classify import (
+            FIT_NON_HK_SYSTEM,
+            fit_non_hk_address_user_prompt,
+        )
+
+        try:
+            data = self.chat_json(
+                FIT_NON_HK_SYSTEM,
+                fit_non_hk_address_user_prompt(flat, building, street, region),
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("非香港住址 60 字拆分 LLM 失败: %s", e)
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def pick_hk_district(self, address_en: str, options: list[str]) -> dict:
         """s03 本地地址：从下拉选项里选郵遞區號／区。"""
         from src.materials.address_classify import (

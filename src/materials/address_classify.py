@@ -20,6 +20,9 @@ S03_DISTRICTS_PATH = (
 )
 _S03_DISTRICTS: list[dict[str, Any]] | None = None
 
+# ICRIS 非香港住址四栏（室／楼／座、大厦、街道、区市省）含空格均最多 60 字
+ICRIS_ADDR_FIELD_MAX = 60
+
 CLASSIFY_HK_DISTRICT_SYSTEM = (
     "你只根据董事兼股东的个人住址，从给定的 ICRIS 下拉选项里选一个香港郵遞區號／区。"
     "不要看注册地址、公司名。"
@@ -111,6 +114,22 @@ CLASSIFY_ADDRESS_SYSTEM = (
     "5) 无英文住址则各键空/false。不要输出其它键或解释。"
 )
 
+FIT_NON_HK_SYSTEM = (
+    "你把非香港住址拆进 ICRIS 四个输入框。每栏含空格最多 60 个字符，禁止超长，"
+    "禁止丢掉原文逗号段，不要缩写。"
+    "只输出 JSON："
+    '{"flat":"...","building":"...","street":"...","region":"..."}。'
+    "先保持市县级边界：street=室/门牌/路/镇/社区等；"
+    "region=District/City/Province/State/Autonomous Region。"
+    "若 street 超过 60：把前端 Room/Rm/Flat/Apt/Unit/No.+门牌 放入 flat；"
+    "再把含 Building/Mansion/Plaza/Tower/Centre 的段放入 building；"
+    "Community/Street/Road/Lane/Town 留在 street。"
+    "若 region 超过 60：把左侧更细的镇/市/盟/地区/自治州段并入 street；"
+    "若 street 已满则并入 building 或 flat；region 尽量保留 City+Province/"
+    "State/Autonomous Region。"
+    "四栏都必须 ≤60。不要输出其它键。"
+)
+
 _HK_EN_RE = re.compile(
     r"hong\s*kong|kowloon|new\s*territories|\bhksar\b|\bhk\s*island\b|"
     r"\bN\.?\s*T\.?\b|"
@@ -158,6 +177,17 @@ _BLDG_PART_RE = re.compile(
 _STREET_PART_RE = re.compile(
     r"\b(road|rd\.?|street|st\.?|avenue|ave\.?|lane|path|"
     r"drive|dr\.?|terrace|highway|circuit)\b",
+    re.I,
+)
+_NON_HK_NO_FLAT_RE = re.compile(r"^no\.\s*\d+[a-z]?\s*$", re.I)
+_NON_HK_HASH_FLAT_RE = re.compile(r"^#\s*\d+[a-z]?\s*$", re.I)
+_NON_HK_BLDG_RE = re.compile(
+    r"\b(building|mansion|plaza|tower|centre|center)\b",
+    re.I,
+)
+_NON_HK_STREET_KEEP_RE = re.compile(
+    r"\b(community|street|road|lane|village|town|township|"
+    r"road|rd\.?|avenue|ave\.?)\b",
     re.I,
 )
 
@@ -426,6 +456,18 @@ def classify_address_user_prompt(address_en: str) -> str:
     )
 
 
+def fit_non_hk_address_user_prompt(
+    flat: str, building: str, street: str, region: str
+) -> str:
+    return (
+        "请把下列四栏拆到每栏不超过 60 字，不要丢掉逗号段。\n\n"
+        f"室／楼／座:\n{flat or '（空）'}\n\n"
+        f"大厦:\n{building or '（空）'}\n\n"
+        f"街道／屋苑／地段／村:\n{street or '（空）'}\n\n"
+        f"区／市／省／州／邮递区号:\n{region or '（空）'}"
+    )
+
+
 def _english_address_body_parts(address_en: str) -> list[str]:
     parts = [p.strip() for p in re.split(r"[,，]", address_en or "") if p.strip()]
     if not parts:
@@ -523,9 +565,15 @@ def _street_is_truncated(llm_street: str, rule_street: str) -> bool:
     return _is_truncated_vs_rule(llm_street, rule_street)
 
 
-def _dropped_comma_parts(address_en: str, street: str, region: str) -> bool:
-    """原文（不含国名）有逗号段未出现在 street+region。"""
-    combined = f"{street}, {region}".lower()
+def _dropped_comma_parts(
+    address_en: str,
+    street: str,
+    region: str,
+    flat: str = "",
+    building: str = "",
+) -> bool:
+    """原文（不含国名）有逗号段未出现在 flat+building+street+region。"""
+    combined = f"{flat}, {building}, {street}, {region}".lower()
     combined = re.sub(r"\s+", " ", combined)
     for part in _english_address_body_parts(address_en):
         token = re.sub(r"\s+", " ", part.strip().lower())
@@ -564,6 +612,310 @@ def _truthy_hk(raw: Any) -> bool:
         return True
     s = str(raw or "").strip().lower()
     return s in ("1", "true", "yes", "hk")
+
+
+def clip_icris_addr(value: str) -> str:
+    """ICRIS 单栏截到 60 字（含空格）。"""
+    return (value or "")[:ICRIS_ADDR_FIELD_MAX]
+
+
+def clip_icris_addr_fields(
+    flat: str, building: str, street: str, region: str
+) -> tuple[str, str, str, str]:
+    return (
+        clip_icris_addr(flat),
+        clip_icris_addr(building),
+        clip_icris_addr(street),
+        clip_icris_addr(region),
+    )
+
+
+def _csv_addr_parts(text: str) -> list[str]:
+    return [p.strip() for p in re.split(r"[,，]", text or "") if p.strip()]
+
+
+def _join_addr_parts(parts: list[str]) -> str:
+    return ", ".join(p for p in parts if p)
+
+
+def _append_addr_part(dest: str, part: str) -> str:
+    part = (part or "").strip()
+    dest = (dest or "").strip()
+    if not part:
+        return dest
+    dest_l = {p.lower() for p in _csv_addr_parts(dest)}
+    if part.lower() in dest_l:
+        return dest
+    return f"{dest}, {part}" if dest else part
+
+
+def _addr_part_fits(dest: str, part: str) -> bool:
+    return len(_append_addr_part(dest, part)) <= ICRIS_ADDR_FIELD_MAX
+
+
+def _is_non_hk_flat_part(part: str) -> bool:
+    token = (part or "").strip()
+    if not token:
+        return False
+    if _NON_HK_NO_FLAT_RE.match(token) or _NON_HK_HASH_FLAT_RE.match(token):
+        return True
+    if _STREET_PART_RE.search(token) and re.match(r"^no\.", token, re.I):
+        return False
+    return bool(_FLAT_PART_RE.search(token))
+
+
+def _is_non_hk_building_part(part: str) -> bool:
+    token = (part or "").strip()
+    if not token:
+        return False
+    if _STREET_PART_RE.search(token) or _NON_HK_STREET_KEEP_RE.search(token):
+        return False
+    return bool(_NON_HK_BLDG_RE.search(token))
+
+
+def _addr_fields_overflow(flat: str, building: str, street: str, region: str) -> bool:
+    return any(
+        len(x or "") > ICRIS_ADDR_FIELD_MAX
+        for x in (flat, building, street, region)
+    )
+
+
+def _addr_parts_preserved(
+    before: tuple[str, str, str, str], after: tuple[str, str, str, str]
+) -> bool:
+    blob = re.sub(r"\s+", " ", ", ".join(after).lower())
+    for field in before:
+        for part in _csv_addr_parts(field):
+            token = re.sub(r"\s+", " ", part.lower())
+            if token and token not in blob:
+                return False
+    return True
+
+
+def _non_hk_llm_fit_fields_ok(
+    flat: str, building: str, street: str, region: str
+) -> bool:
+    """LLM 不能把街道/社区或区市省写进室、大厦。"""
+    del street, region
+    for field in (flat, building):
+        for part in _csv_addr_parts(field):
+            if _NON_HK_STREET_KEEP_RE.search(part):
+                return False
+            if _ADMIN_PART_RE.search(part):
+                return False
+    return True
+
+
+def _weak_fit_non_hk_address_fields(
+    flat: str, building: str, street: str, region: str
+) -> tuple[str, str, str, str]:
+    """无 LLM：街道超长从前剥室/大厦；区市省超长从左并入街道。"""
+    flat, building, street, region = (
+        (flat or "").strip(),
+        (building or "").strip(),
+        (street or "").strip(),
+        (region or "").strip(),
+    )
+    for _ in range(48):
+        if not _addr_fields_overflow(flat, building, street, region):
+            return flat, building, street, region
+
+        if len(street) > ICRIS_ADDR_FIELD_MAX:
+            parts = _csv_addr_parts(street)
+            if not parts:
+                street = clip_icris_addr(street)
+                continue
+            if _is_non_hk_flat_part(parts[0]) and _addr_part_fits(flat, parts[0]):
+                flat = _append_addr_part(flat, parts.pop(0))
+                street = _join_addr_parts(parts)
+                continue
+            moved = False
+            for i, part in enumerate(parts):
+                if _is_non_hk_building_part(part) and _addr_part_fits(
+                    building, part
+                ):
+                    building = _append_addr_part(building, parts.pop(i))
+                    street = _join_addr_parts(parts)
+                    moved = True
+                    break
+            if moved:
+                continue
+            first = parts[0]
+            if _addr_part_fits(flat, first):
+                flat = _append_addr_part(flat, parts.pop(0))
+                street = _join_addr_parts(parts)
+                continue
+            if _addr_part_fits(building, first):
+                building = _append_addr_part(building, parts.pop(0))
+                street = _join_addr_parts(parts)
+                continue
+            street = clip_icris_addr(street)
+            continue
+
+        if len(region) > ICRIS_ADDR_FIELD_MAX:
+            parts = _csv_addr_parts(region)
+            if len(parts) <= 1:
+                region = clip_icris_addr(region)
+                continue
+            left = parts[0]
+            rest = _join_addr_parts(parts[1:])
+            if _addr_part_fits(street, left):
+                street = _append_addr_part(street, left)
+                region = rest
+                continue
+            if _addr_part_fits(building, left):
+                building = _append_addr_part(building, left)
+                region = rest
+                continue
+            if _addr_part_fits(flat, left):
+                flat = _append_addr_part(flat, left)
+                region = rest
+                continue
+            street = _append_addr_part(street, left)
+            region = rest
+            continue
+
+        if len(flat) > ICRIS_ADDR_FIELD_MAX:
+            parts = _csv_addr_parts(flat)
+            if len(parts) <= 1:
+                flat = clip_icris_addr(flat)
+                continue
+            last = parts[-1]
+            if _addr_part_fits(building, last):
+                building = _append_addr_part(building, last)
+                flat = _join_addr_parts(parts[:-1])
+                continue
+            if _addr_part_fits(street, last):
+                street = _append_addr_part(street, last)
+                flat = _join_addr_parts(parts[:-1])
+                continue
+            flat = clip_icris_addr(flat)
+            continue
+
+        if len(building) > ICRIS_ADDR_FIELD_MAX:
+            parts = _csv_addr_parts(building)
+            if len(parts) <= 1:
+                building = clip_icris_addr(building)
+                continue
+            last = parts[-1]
+            if _addr_part_fits(street, last):
+                street = _append_addr_part(street, last)
+                building = _join_addr_parts(parts[:-1])
+                continue
+            if _addr_part_fits(flat, last):
+                flat = _append_addr_part(flat, last)
+                building = _join_addr_parts(parts[:-1])
+                continue
+            building = clip_icris_addr(building)
+            continue
+
+    return clip_icris_addr_fields(flat, building, street, region)
+
+
+def _parse_fit_llm_payload(data: Any) -> tuple[str, str, str, str] | None:
+    if not isinstance(data, dict) or not data:
+        return None
+    return (
+        str(data.get("flat") or data.get("director_address_flat") or "").strip(),
+        str(
+            data.get("building") or data.get("director_address_building") or ""
+        ).strip(),
+        str(data.get("street") or data.get("director_address_street") or "").strip(),
+        str(data.get("region") or data.get("director_address_region") or "").strip(),
+    )
+
+
+def _try_llm_fit_non_hk(
+    llm: Any,
+    flat: str,
+    building: str,
+    street: str,
+    region: str,
+) -> tuple[str, str, str, str] | None:
+    if llm is None:
+        return None
+    data: Any = None
+    try:
+        fn = getattr(llm, "fit_non_hk_address_fields", None)
+        if callable(fn):
+            data = fn(flat, building, street, region)
+            parsed = _parse_fit_llm_payload(data)
+            if parsed is not None:
+                return parsed
+        chat = getattr(llm, "chat_json", None)
+        if callable(chat):
+            data = chat(
+                FIT_NON_HK_SYSTEM,
+                fit_non_hk_address_user_prompt(flat, building, street, region),
+                temperature=0.0,
+            )
+            return _parse_fit_llm_payload(data)
+    except Exception as exc:
+        logger.warning("非香港住址 60 字拆分 LLM 失败: %s", exc)
+        return None
+    return _parse_fit_llm_payload(data)
+
+
+def fit_non_hk_address_fields(
+    flat: str,
+    building: str,
+    street: str,
+    region: str,
+    *,
+    llm: Any | None = None,
+) -> tuple[str, str, str, str]:
+    """任一栏超过 60 字才拆；输出四段均 ≤60，尽量不丢逗号段。llm=None 只走弱兜底。"""
+    orig = (
+        (flat or "").strip(),
+        (building or "").strip(),
+        (street or "").strip(),
+        (region or "").strip(),
+    )
+    if not _addr_fields_overflow(*orig):
+        return orig
+    llm_out = _try_llm_fit_non_hk(llm, *orig)
+    if llm_out is not None:
+        fitted = _weak_fit_non_hk_address_fields(*llm_out)
+        if (
+            not _addr_fields_overflow(*fitted)
+            and _addr_parts_preserved(orig, fitted)
+            and _non_hk_llm_fit_fields_ok(*fitted)
+        ):
+            return fitted
+    return _weak_fit_non_hk_address_fields(*orig)
+
+
+def apply_non_hk_fit_to_result(
+    out: dict[str, str], *, llm: Any | None = None
+) -> dict[str, str]:
+    """非香港结果再按 60 字拆室/大厦；香港原样返回。"""
+    if not out or str(out.get("address_is_hk") or "") == "1":
+        return out
+    flat, building, street, region = fit_non_hk_address_fields(
+        str(out.get("director_address_flat") or ""),
+        str(out.get("director_address_building") or ""),
+        str(out.get("director_address_street") or ""),
+        str(out.get("director_address_region") or ""),
+        llm=llm,
+    )
+    updated = dict(out)
+    updated["director_address_flat"] = flat
+    updated["director_address_building"] = building
+    updated["director_address_street"] = street
+    updated["director_address_region"] = region
+    return updated
+
+
+def prepare_icris_fill_address(addr: dict[str, str] | None) -> dict[str, str]:
+    """填表用：香港原样；非香港四栏仅硬截 60，不再拆。"""
+    out = dict(addr or {})
+    if str(out.get("address_is_hk") or "") == "1":
+        return out
+    out["flat"] = clip_icris_addr(str(out.get("flat") or ""))
+    out["building"] = clip_icris_addr(str(out.get("building") or ""))
+    out["street"] = clip_icris_addr(str(out.get("street") or ""))
+    out["region"] = clip_icris_addr(str(out.get("region") or ""))
+    return out
 
 
 def coerce_address_result(
@@ -635,8 +987,6 @@ def coerce_address_result(
             region=region or fb_region,
         )
     else:
-        flat = ""
-        building = ""
         if en and (not street and not region):
             street, region = split_english_street_region(en)
         elif en:
@@ -645,9 +995,10 @@ def coerce_address_result(
                 if (
                     (rule_region and _region_is_truncated(region, rule_region))
                     or _street_is_truncated(street, rule_street)
-                    or _dropped_comma_parts(en, street, region)
+                    or _dropped_comma_parts(en, street, region, flat, building)
                 ):
                     street, region = rule_street, rule_region
+                    flat, building = "", ""
         region = _strip_country_token(region, country)
     return {
         "director_address_flat": flat,

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 import unittest
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from src.materials.address_classify import (
+    ICRIS_ADDR_FIELD_MAX,
+    apply_non_hk_fit_to_result,
     classify_director_address,
+    clip_icris_addr,
     coerce_address_result,
     english_address_is_hk,
+    fit_non_hk_address_fields,
     hk_district_select_candidates,
     load_s03_district_options,
     pick_hk_district_from_options,
+    prepare_icris_fill_address,
     resolve_s03_hk_district,
     s03_district_labels,
     split_english_street_region,
@@ -19,6 +27,7 @@ from src.materials.address_classify import (
     stored_s03_address_fields,
     s03_address_fields_for_fill,
     weak_fallback_address,
+    _english_address_body_parts,
 )
 from src.materials.countries import normalize_address_country
 from src.materials.quick_register_parse import parse_quick_register_text
@@ -65,6 +74,81 @@ HK_GF_EN = (
 )
 HK_PHASE_EN = "Flat B, 12/F, Wing A, Phase 2, Foo Court, 1 Bar Road, Tsuen Wan"
 TW_EN = "No. 1 Zhongxiao E Rd, Taipei City, Taiwan"
+HUANGSHI_EN = (
+    "Room 38, No. 9, Xiejiafan Community, Yangjiashan Community, "
+    "Laoxialu Street, Xialu District, Huangshi City, Hubei Province"
+)
+PLAZA_EN = (
+    "Room 1, 18/F, Sunshine International Commercial Plaza Tower A, "
+    "No. 88 Zhongshan Road East, Chaoyang District, Beijing City"
+)
+BOTH_OVER_EN = (
+    "Room 38, No. 9, Xiejiafan Community, Yangjiashan Community, "
+    "Laoxialu Street, Yining City, Ili Kazakh Autonomous Prefecture, "
+    "Xinjiang Uyghur Autonomous Region"
+)
+STREET_EXACT_60 = "A" * ICRIS_ADDR_FIELD_MAX
+STREET_61_ROOM = "Room 9, " + ("X" * 53)
+HK_MIRA_EN = (
+    "Shop 12, 2/F, Mira Place, 132 Nathan Road, "
+    "Tsim Sha Tsui, Kowloon, Hong Kong"
+)
+HK_LAGUNA_EN = (
+    "Unit 8, 15/F, Block C, Laguna City, "
+    "8 Laguna Street, Kwun Tong, Kowloon"
+)
+HK_QUEENS_EN = "G/F, 28 Queen's Road Central, Central, Hong Kong"
+GZ_TEEM_EN = (
+    "Room 1208, 28/F, Teemtower, 208 Tianhe Road, "
+    "Tianhe District, Guangzhou City, Guangdong Province"
+)
+CD_EN = (
+    "No. 16, Building 3, Section 4, Renmin South Road, "
+    "Wuhou District, Chengdu City, Sichuan Province"
+)
+MO_EN = "Rua de Pequim, Edificio Centro Internacional, Macau"
+SG_EN = (
+    "12 Marina Boulevard, Marina Bay Financial Centre Tower 3, "
+    "Singapore 018982"
+)
+UK_EN = "Flat 4, 10 Downing Court, Baker Street, London, NW1 6XE, United Kingdom"
+KR_EN = "Apt 1503, 88 Teheran-ro, Gangnam-gu, Seoul, Republic of Korea"
+VN_EN = (
+    "House 21, Alley 15, Nguyen Trai Street, "
+    "Thanh Xuan District, Hanoi City, Vietnam"
+)
+NON_HK_2_SH_EN = "88 Huaihai Middle Road, Huangpu District, Shanghai City"
+NON_HK_2_TW_EN = "88 Sec 2 Zhongshan N Rd, Taipei City, Taiwan"
+NON_HK_2_US_EN = "350 Fifth Avenue, New York, NY 10118"
+NON_HK_2_AU_EN = (
+    "10 George Street, Sydney, New South Wales 2000, Australia"
+)
+NON_HK_3_BJ_FLAT_EN = (
+    "Room 2101, No. 88, East Jinsong Third Community, "
+    "Panjiayuan Sub-district, Chaoyang District, Beijing City"
+)
+NON_HK_3_BJ_BLDG_EN = (
+    "Sunshine International Commercial Plaza, "
+    "No. 88 Zhongshan Road East, Chaoyang District, Beijing City"
+)
+NON_HK_3_VN_EN = (
+    "House 21, Alley 15, Nguyen Trai Street, "
+    "Thanh Xuan Ward Community, Thanh Xuan District, Hanoi City, Vietnam"
+)
+NON_HK_4_SH_EN = (
+    "Unit 3601, 36/F, Shanghai World Financial Center Tower, "
+    "100 Century Avenue West, Pudong New Area, Shanghai City"
+)
+NON_HK_4_SZ_EN = (
+    "Room 88, 12/F, Ping An International Finance Centre Tower, "
+    "5033 Yitian Road East, Futian District, Shenzhen City, "
+    "Guangdong Province"
+)
+NON_HK_4_UK_EN = (
+    "Flat 12, 3rd Floor, Westminster International Business Centre, "
+    "221B Baker Street West, City of Westminster, London, "
+    "United Kingdom"
+)
 
 
 class TestNormalizeAddressCountry(unittest.TestCase):
@@ -350,6 +434,485 @@ class TestChinaAndWorldStreetRegion(unittest.TestCase):
         fb = weak_fallback_address(AE_EN)
         self.assertEqual(fb["address_country"], "ARE")
         self.assertEqual(fb["address_is_hk"], "0")
+
+
+class TestNonHkFitSixty(unittest.TestCase):
+    def _occupied_count(self, out: dict) -> int:
+        return sum(
+            1
+            for key in (
+                "director_address_flat",
+                "director_address_building",
+                "director_address_street",
+                "director_address_region",
+            )
+            if str(out.get(key) or "").strip()
+        )
+
+    def _assert_four_le60(self, flat, building, street, region, msg=""):
+        for name, val in (
+            ("flat", flat),
+            ("building", building),
+            ("street", street),
+            ("region", region),
+        ):
+            self.assertLessEqual(
+                len(val),
+                ICRIS_ADDR_FIELD_MAX,
+                f"{msg} {name}={val!r} len={len(val)}",
+            )
+
+    def _assert_parts_kept(self, address_en, flat, building, street, region):
+        blob = re.sub(r"\s+", " ", f"{flat}, {building}, {street}, {region}".lower())
+        for part in _english_address_body_parts(address_en):
+            token = re.sub(r"\s+", " ", part.strip().lower())
+            self.assertIn(token, blob, f"丢失逗号段 {part!r}")
+
+    def _parse_fit(self, en, *, llm=None):
+        street, region = split_english_street_region(en)
+        if llm is None:
+            llm = MagicMock()
+            llm.classify_director_address.return_value = {
+                "is_hk": False,
+                "street": street,
+                "region": region,
+                "address_country": "CHN",
+            }
+        out = classify_director_address(en, llm=llm)
+        return apply_non_hk_fit_to_result(out, llm=None)
+
+    def test_short_addresses_keep_empty_flat_building(self):
+        cases = [
+            ("sz_room", SZ_ROOM_EN),
+            ("shantou", SHANTOU_EN),
+            ("pudong", PUDONG_EN),
+            ("subdistrict", SUBDISTRICT_EN),
+            ("us", US_EN),
+            ("jp", JP_EN),
+            ("ae", AE_EN),
+            ("uzb", UZB_EN),
+            ("tw", TW_EN),
+        ]
+        for name, en in cases:
+            with self.subTest(name=name, llm="none"):
+                fb = weak_fallback_address(en)
+                self.assertEqual(fb["address_is_hk"], "0")
+                self.assertEqual(fb["director_address_flat"], "")
+                self.assertEqual(fb["director_address_building"], "")
+                self._assert_parts_kept(
+                    en,
+                    fb["director_address_flat"],
+                    fb["director_address_building"],
+                    fb["director_address_street"],
+                    fb["director_address_region"],
+                )
+            with self.subTest(name=name, parse="fit"):
+                out = self._parse_fit(en)
+                self.assertEqual(out["director_address_flat"], "")
+                self.assertEqual(out["director_address_building"], "")
+                self._assert_four_le60(
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                    name,
+                )
+
+    def test_classify_and_weak_fallback_do_not_peel_huangshi(self):
+        street, region = split_english_street_region(HUANGSHI_EN)
+        fb = weak_fallback_address(HUANGSHI_EN)
+        self.assertEqual(fb["director_address_flat"], "")
+        self.assertEqual(fb["director_address_street"], street)
+        llm = MagicMock()
+        llm.classify_director_address.return_value = {
+            "is_hk": False,
+            "street": street,
+            "region": region,
+            "address_country": "CHN",
+        }
+        out = classify_director_address(HUANGSHI_EN, llm=llm)
+        self.assertEqual(out["director_address_flat"], "")
+        self.assertEqual(out["director_address_street"], street)
+
+    def test_huangshi_peels_on_parse_fit(self):
+        out = self._parse_fit(HUANGSHI_EN)
+        self.assertEqual(out["director_address_flat"], "Room 38, No. 9")
+        self.assertEqual(out["director_address_building"], "")
+        self.assertIn("Xiejiafan Community", out["director_address_street"])
+        self.assertIn("Yangjiashan Community", out["director_address_street"])
+        self.assertIn("Laoxialu Street", out["director_address_street"])
+        self.assertEqual(
+            out["director_address_region"],
+            "Xialu District, Huangshi City, Hubei Province",
+        )
+        self._assert_four_le60(
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+        self._assert_parts_kept(
+            HUANGSHI_EN,
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+
+    def test_huangshi_llm_community_in_building_rejected(self):
+        street, region = split_english_street_region(HUANGSHI_EN)
+
+        class BadLLM:
+            def fit_non_hk_address_fields(self, *args, **kwargs):
+                return {
+                    "flat": "Room 38, No. 9",
+                    "building": "Xiejiafan Community, Yangjiashan Community",
+                    "street": "Laoxialu Street",
+                    "region": region,
+                }
+
+        flat, building, street_out, region_out = fit_non_hk_address_fields(
+            "", "", street, region, llm=BadLLM()
+        )
+        self.assertEqual(flat, "Room 38, No. 9")
+        self.assertEqual(building, "")
+        self.assertIn("Xiejiafan Community", street_out)
+        self.assertIn("Yangjiashan Community", street_out)
+        self.assertIn("Laoxialu Street", street_out)
+        self.assertEqual(region_out, region)
+
+    def test_plaza_tower_peels_on_parse_fit(self):
+        out = self._parse_fit(PLAZA_EN)
+        self.assertIn("Room 1", out["director_address_flat"])
+        self.assertIn("18/F", out["director_address_flat"])
+        self.assertIn("Plaza", out["director_address_building"])
+        self.assertIn("Tower", out["director_address_building"])
+        self.assertIn("Zhongshan Road", out["director_address_street"])
+        self._assert_four_le60(
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+        self._assert_parts_kept(
+            PLAZA_EN,
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+
+    def test_street_exact_60_not_peeled(self):
+        flat, building, street, region = fit_non_hk_address_fields(
+            "", "", STREET_EXACT_60, "Nanshan District", llm=None
+        )
+        self.assertEqual(street, STREET_EXACT_60)
+        self.assertEqual(flat, "")
+        self.assertEqual(building, "")
+        self.assertEqual(len(street), 60)
+
+    def test_street_61_peels_room(self):
+        self.assertEqual(len(STREET_61_ROOM), 61)
+        flat, building, street, region = fit_non_hk_address_fields(
+            "", "", STREET_61_ROOM, "Nanshan District", llm=None
+        )
+        self.assertEqual(flat, "Room 9")
+        self.assertEqual(len(street), 53)
+        self._assert_four_le60(flat, building, street, region)
+
+    def test_long_region_yili_inner_mongolia_corps_parse_fit(self):
+        cases = [
+            (XJ_PREFECTURE_EN, "Xinjiang"),
+            (NM_EN, "Inner Mongolia"),
+            (XJ_CORPS_EN, "Xinjiang"),
+        ]
+        for en, keep in cases:
+            with self.subTest(en=en[:40]):
+                out = self._parse_fit(en)
+                self.assertIn(keep, out["director_address_region"])
+                if "Regiment" in en:
+                    self.assertIn("Regiment", out["director_address_street"])
+                self._assert_four_le60(
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                )
+                self._assert_parts_kept(
+                    en,
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                )
+
+    def test_street_and_region_both_over_60_parse_fit(self):
+        out = self._parse_fit(BOTH_OVER_EN)
+        self._assert_four_le60(
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+        self._assert_parts_kept(
+            BOTH_OVER_EN,
+            out["director_address_flat"],
+            out["director_address_building"],
+            out["director_address_street"],
+            out["director_address_region"],
+        )
+        self.assertIn("Room 38", out["director_address_flat"])
+        self.assertIn("Xinjiang", out["director_address_region"])
+
+    def test_ten_extra_addresses(self):
+        hk_cases = [
+            (HK_MIRA_EN, "Shop 12, 2/F", "Mira Place", "Nathan Road", "尖沙咀"),
+            (HK_LAGUNA_EN, "Unit 8, 15/F, Block C", "Laguna City", "Laguna Street", "觀塘"),
+            (HK_QUEENS_EN, "G/F", "", "Queen's Road Central", "中環"),
+        ]
+        for en, flat_part, bldg_part, street_part, region in hk_cases:
+            with self.subTest(en=en[:40]):
+                fb = weak_fallback_address(en)
+                rule = split_hk_english_four_way(en)
+                self.assertEqual(fb["address_is_hk"], "1")
+                self.assertEqual(fb["director_address_flat"], rule[0])
+                self.assertEqual(fb["director_address_building"], rule[1])
+                self.assertEqual(fb["director_address_street"], rule[2])
+                self.assertEqual(fb["director_address_region"], rule[3])
+                self.assertIn(flat_part, fb["director_address_flat"])
+                combined_bldg_street = (
+                    f"{fb['director_address_building']}, "
+                    f"{fb['director_address_street']}"
+                )
+                if bldg_part:
+                    self.assertIn(bldg_part, combined_bldg_street)
+                self.assertIn(street_part, fb["director_address_street"])
+                self.assertEqual(fb["director_address_region"], region)
+                with patch(
+                    "src.materials.address_classify.fit_non_hk_address_fields"
+                ) as fit:
+                    llm = MagicMock()
+                    llm.classify_director_address.return_value = {
+                        "is_hk": True,
+                        "flat": rule[0],
+                        "building": rule[1],
+                        "street": rule[2],
+                        "region": region,
+                        "address_country": "HKG",
+                    }
+                    classify_director_address(en, llm=llm)
+                    apply_non_hk_fit_to_result(
+                        {
+                            "director_address_flat": rule[0],
+                            "director_address_building": rule[1],
+                            "director_address_street": rule[2],
+                            "director_address_region": region,
+                            "address_is_hk": "1",
+                        }
+                    )
+                    fit.assert_not_called()
+
+        non_hk = [
+            GZ_TEEM_EN,
+            CD_EN,
+            MO_EN,
+            SG_EN,
+            UK_EN,
+            KR_EN,
+            VN_EN,
+        ]
+        for en in non_hk:
+            with self.subTest(en=en[:40]):
+                fb = weak_fallback_address(en)
+                self.assertEqual(fb["address_is_hk"], "0")
+                out = self._parse_fit(en)
+                self.assertEqual(out["address_is_hk"], "0")
+                self._assert_four_le60(
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                    en[:20],
+                )
+                self._assert_parts_kept(
+                    en,
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                )
+        mo = weak_fallback_address(MO_EN)
+        self.assertEqual(mo["address_country"], "MAC")
+
+    def test_ten_non_hk_segment_mix(self):
+        cases = [
+            (2, NON_HK_2_SH_EN, "CHN"),
+            (2, NON_HK_2_TW_EN, "TWN"),
+            (2, NON_HK_2_US_EN, ""),
+            (2, NON_HK_2_AU_EN, "AUS"),
+            (3, NON_HK_3_BJ_FLAT_EN, "CHN"),
+            (3, NON_HK_3_BJ_BLDG_EN, "CHN"),
+            (3, NON_HK_3_VN_EN, "VNM"),
+            (4, NON_HK_4_SH_EN, "CHN"),
+            (4, NON_HK_4_SZ_EN, "CHN"),
+            (4, NON_HK_4_UK_EN, "GBR"),
+        ]
+        self.assertEqual(len(cases), 10)
+        for occupied, en, country in cases:
+            with self.subTest(en=en[:50], occupied=occupied):
+                fb = weak_fallback_address(en)
+                self.assertEqual(fb["address_is_hk"], "0")
+                self.assertNotEqual(fb.get("address_country"), "HKG")
+                if country:
+                    self.assertEqual(fb["address_country"], country)
+                rule_street, _rule_region = split_english_street_region(en)
+                if occupied >= 3:
+                    self.assertEqual(fb["director_address_flat"], "")
+                    self.assertEqual(fb["director_address_street"], rule_street)
+                out = self._parse_fit(en)
+                self.assertEqual(out["address_is_hk"], "0")
+                self._assert_four_le60(
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                    en[:20],
+                )
+                self._assert_parts_kept(
+                    en,
+                    out["director_address_flat"],
+                    out["director_address_building"],
+                    out["director_address_street"],
+                    out["director_address_region"],
+                )
+                self.assertEqual(self._occupied_count(out), occupied)
+                if occupied == 2:
+                    self.assertEqual(out["director_address_flat"], "")
+                    self.assertEqual(out["director_address_building"], "")
+                elif occupied == 4:
+                    self.assertTrue(out["director_address_flat"])
+                    self.assertTrue(out["director_address_building"])
+                    self.assertTrue(out["director_address_street"])
+                    self.assertTrue(out["director_address_region"])
+
+    def test_hk_does_not_call_non_hk_fit(self):
+        llm = MagicMock()
+        llm.classify_director_address.return_value = {
+            "is_hk": True,
+            "flat": "RM D, 11/F, BLK 5",
+            "building": "LOCWOOD COURT",
+            "street": "1 TIN WU ROAD",
+            "region": "天水圍",
+            "address_country": "HKG",
+        }
+        with patch(
+            "src.materials.address_classify.fit_non_hk_address_fields"
+        ) as fit:
+            out = classify_director_address(NT_EN, llm=llm)
+            fit.assert_not_called()
+        self.assertEqual(out["director_address_flat"], "RM D, 11/F, BLK 5")
+        self.assertEqual(out["director_address_building"], "LOCWOOD COURT")
+        gf = weak_fallback_address(HK_GF_EN)
+        self.assertEqual(gf["address_is_hk"], "1")
+        self.assertIn("Hang Seng", gf["director_address_building"])
+        hk = weak_fallback_address(HK_EN)
+        self.assertEqual(hk["director_address_flat"], "Flat A, 9/F")
+
+    def test_mock_llm_overflow_still_clamped(self):
+        class OverflowLLM:
+            def fit_non_hk_address_fields(self, *args, **kwargs):
+                return {
+                    "flat": "Z" * 70,
+                    "building": "Y" * 70,
+                    "street": "X" * 70,
+                    "region": "W" * 70,
+                }
+
+        street, region = split_english_street_region(HUANGSHI_EN)
+        flat, building, street, region = fit_non_hk_address_fields(
+            "", "", street, region, llm=OverflowLLM()
+        )
+        self._assert_four_le60(flat, building, street, region)
+        self._assert_parts_kept(HUANGSHI_EN, flat, building, street, region)
+        self.assertEqual(flat, "Room 38, No. 9")
+
+    def test_prepare_fill_clips_only_non_hk(self):
+        addr = prepare_icris_fill_address(
+            {
+                "flat": "",
+                "building": "",
+                "street": STREET_61_ROOM,
+                "region": "Nanshan District",
+                "address_is_hk": "0",
+            }
+        )
+        self.assertEqual(addr["flat"], "")
+        self.assertEqual(addr["street"], STREET_61_ROOM[:60])
+        self.assertEqual(clip_icris_addr("A" * 80), "A" * 60)
+        hk = prepare_icris_fill_address(
+            {
+                "flat": "RM D, 11/F, BLK 5",
+                "building": "LOCWOOD COURT",
+                "street": "1 TIN WU ROAD",
+                "region": "天水圍",
+                "address_is_hk": "1",
+            }
+        )
+        self.assertEqual(hk["flat"], "RM D, 11/F, BLK 5")
+        self.assertEqual(hk["region"], "天水圍")
+
+    def test_s03_fill_does_not_peel_stored_street(self):
+        street, region = split_english_street_region(HUANGSHI_EN)
+        parts = s03_address_fields_for_fill(
+            {
+                "address_street": street,
+                "address_region": region,
+                "address_country": "CHN",
+                "address_is_hk": "0",
+            }
+        )
+        self.assertEqual(parts["flat"], "")
+        self.assertEqual(parts["street"], street)
+
+    def test_s03_nnc1_fill_non_hk_flat_and_clip(self):
+        from src.browser.icris_nnc1_form import IcrisNnc1FormBot
+        from src.browser.icris_registration import IcrisRegistrationBot
+
+        s03_src = inspect.getsource(IcrisRegistrationBot._fill_user_info_step)
+        self.assertNotIn("prepare_icris_fill_address", s03_src)
+        self.assertIn("if is_hk:", s03_src)
+        self.assertIn("clip_icris_addr", s03_src)
+        nnc1_src = inspect.getsource(IcrisNnc1FormBot._fill_nnc1_address_section)
+        self.assertNotIn("prepare_icris_fill_address", nnc1_src)
+        non_hk = nnc1_src.split("await self._wait_country_region_options")[1]
+        self.assertIn("室.*樓", non_hk)
+        self.assertIn("大廈|大厦|Building", non_hk)
+        order_src = inspect.getsource(
+            IcrisNnc1FormBot._fill_address_fields_by_order
+        )
+        self.assertIn('clip_icris_addr(addr.get("flat"', order_src)
+        self.assertIn("(0, clip_icris_addr", order_src)
+
+    def test_admin_parse_page_not_submit_fit(self):
+        runner = Path("src/web/admin_runner.py").read_text(encoding="utf-8")
+        self.assertNotIn("fit_non_hk_address_fields", runner)
+        page = Path("web/admin/src/pages/RegisterPage.tsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(page.count("室／楼／座"), 2)
+        self.assertIn("director_address_building", page)
+
+    def test_parse_paste_huangshi_fits(self):
+        class Fake:
+            def parse_quick_register_text(self, text: str) -> dict:
+                return {"director_address_en": HUANGSHI_EN}
+
+        result = parse_quick_register_text("x", llm=Fake())
+        self.assertEqual(result.get("director_address_flat"), "Room 38, No. 9")
+        self.assertLessEqual(
+            len(result.get("director_address_street") or ""),
+            ICRIS_ADDR_FIELD_MAX,
+        )
 
 
 class TestParseAttachesAddress(unittest.TestCase):

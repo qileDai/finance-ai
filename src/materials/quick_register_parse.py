@@ -6,7 +6,10 @@ import logging
 import re
 from typing import Any
 
-from src.materials.address_classify import classify_director_address
+from src.materials.address_classify import (
+    apply_non_hk_fit_to_result,
+    classify_director_address,
+)
 from src.materials.countries import is_taiwan_issuing, normalize_issuing_iso
 from src.materials.id_type_classify import (
     ICRIS_ID_TYPES,
@@ -126,6 +129,8 @@ def attach_director_structure(
     cn = str(result.get("director_address_cn") or "").strip()
     if en or cn:
         addr = classify_director_address(en, cn, llm=llm)
+        if str(addr.get("address_is_hk") or "") != "1":
+            addr = apply_non_hk_fit_to_result(addr, llm=llm)
         result["director_address_flat"] = str(addr.get("director_address_flat") or "")
         result["director_address_building"] = str(
             addr.get("director_address_building") or ""

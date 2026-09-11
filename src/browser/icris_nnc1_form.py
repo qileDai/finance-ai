@@ -55,6 +55,7 @@ from src.browser.icris_errors import (
 from src.browser.launcher import create_browser_context, launch_browser
 from src.email.imap_client import IcrisAccount
 from src.materials.address_classify import (
+    clip_icris_addr,
     load_s03_district_options,
     stored_s03_address_fields,
 )
@@ -3648,12 +3649,14 @@ class IcrisNnc1FormBot:
     async def _fill_address_fields_by_order(
         self, block, addr: dict[str, str]
     ) -> int:
-        """兜底：只填街道(第3项)、区省市(第4项)，跳过室/楼/座与大廈。"""
+        """兜底：按顺序填室/楼/座、大廈、街道、区省市。"""
         textareas = block.locator("textarea")
         n = await textareas.count()
         targets = [
-            (2, addr.get("street", "")),
-            (3, addr.get("region", "")),
+            (0, clip_icris_addr(addr.get("flat", ""))),
+            (1, clip_icris_addr(addr.get("building", ""))),
+            (2, clip_icris_addr(addr.get("street", ""))),
+            (3, clip_icris_addr(addr.get("region", ""))),
         ]
         filled = 0
         for idx, val in targets:
@@ -3948,6 +3951,22 @@ class IcrisNnc1FormBot:
             return filled > 0
 
         await self._wait_country_region_options(page, block)
+        if not is_hk:
+            addr = {
+                **addr,
+                "flat": clip_icris_addr(addr.get("flat") or ""),
+                "building": clip_icris_addr(addr.get("building") or ""),
+                "street": clip_icris_addr(addr.get("street") or ""),
+                "region": clip_icris_addr(addr.get("region") or ""),
+            }
+        if await self._fill_textarea_in_block(
+            block, r"室.*樓|室.*楼|室／樓|Flat.*Floor", addr.get("flat", "")
+        ):
+            filled += 1
+        if await self._fill_textarea_in_block(
+            block, r"大廈|大厦|Building", addr.get("building", "")
+        ):
+            filled += 1
         if await self._fill_textarea_in_block(
             block, r"街道.*屋苑|街道.*地段|街道.*村", addr.get("street", "")
         ):

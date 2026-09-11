@@ -34,6 +34,7 @@ from src.materials.id_type_classify import (
     s04_identity_fill_values,
 )
 from src.materials.address_classify import (
+    clip_icris_addr,
     s03_address_fields_for_fill,
     stored_s03_address_fields,
 )
@@ -4453,6 +4454,11 @@ class IcrisRegistrationBot:
         building = stored["building"]
         address_country = stored["country"]
         is_hk = stored["address_is_hk"] == "1"
+        if not is_hk:
+            flat = clip_icris_addr(flat)
+            building = clip_icris_addr(building)
+            street = clip_icris_addr(street)
+            region = clip_icris_addr(region)
         if not street and not region and not flat and not building:
             logger.warning(
                 "用户资料: 住址无法拆分 addr_en=%s",
@@ -4540,7 +4546,7 @@ class IcrisRegistrationBot:
             pass
         await page.wait_for_timeout(_FORM_PAUSE_MS)
 
-        # 香港：室／樓／座、大廈、街道、郵遞區號均填已入库字段；非香港：街道 + 区文本 + 国家
+        # 香港：室／樓／座、大廈；非香港：仅当入库已有室/大厦才填
         if is_hk:
             if flat:
                 ok = await self._fill_by_placeholder(page, r"室.*樓|室.*楼|Flat.*Floor", flat)
@@ -4560,6 +4566,21 @@ class IcrisRegistrationBot:
                 await _inc(ok, "大厦")
             else:
                 logger.info("用户资料: 无大厦字段，跳过")
+        else:
+            if flat:
+                ok = await self._fill_by_placeholder(page, r"室.*樓|室.*楼|Flat.*Floor", flat)
+                if not ok:
+                    ok = await self._fill_enabled_field_by_label(
+                        page, r"室／樓／座|室/楼/座|Flat / Floor", flat
+                    )
+                await _inc(ok, "室/楼/座")
+            if building:
+                ok = await self._fill_by_placeholder(page, r"大廈|大厦|Building", building)
+                if not ok:
+                    ok = await self._fill_enabled_field_by_label(
+                        page, r"大廈|大厦|Building", building
+                    )
+                await _inc(ok, "大厦")
         if street:
             ok = await self._fill_by_placeholder(page, r"街道|屋苑|地段|村", street)
             if not ok:
