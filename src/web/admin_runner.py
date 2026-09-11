@@ -256,7 +256,7 @@ def _save_uploaded_files(
 
 
 def _strip_unparsed_director_english(fields: dict[str, str]) -> None:
-    """原文无拉丁字母时丢掉英文姓/名，不入库。"""
+    """董事姓名纯中文时：空的英文姓/名不入库；用户已填的英文栏保留。"""
     from src.materials.name_classify import (
         cjk_only_director_name,
         director_raw_is_cjk_only,
@@ -269,7 +269,147 @@ def _strip_unparsed_director_english(fields: dict[str, str]) -> None:
     if not (fields.get("director_name_cn") or "").strip():
         fields["director_name_cn"] = fields["director_name"]
     for k in ("director_surname_en", "director_given_en", "director_name_en"):
-        fields.pop(k, None)
+        if not str(fields.get(k) or "").strip():
+            fields.pop(k, None)
+
+
+def _prepare_submit_fields(fields: dict[str, str]) -> dict[str, str]:
+    """跑注册入库前整理字段：表单已填项不覆盖，空栏才补。"""
+    fields = dict(fields or {})
+    fields.pop("id_type_user_edited", None)
+    paste_text = str(fields.pop("paste_text", "") or "")
+    id_number = (fields.get("id_number") or "").strip()
+    id_type = (fields.get("id_type") or "").strip().upper()
+    if paste_text and (not id_type or not id_number):
+        from src.materials.id_type_classify import classify_id_from_text
+
+        classified = classify_id_from_text(paste_text, id_number)
+        if not id_type and classified.get("id_type"):
+            id_type = str(classified["id_type"])
+        if not id_number and classified.get("id_number"):
+            id_number = str(classified["id_number"]).strip()
+            fields["id_number"] = id_number
+    from src.materials.id_type_classify import ICRIS_ID_TYPES, normalize_stored_id_type
+
+    if id_type not in ICRIS_ID_TYPES:
+        id_type = normalize_stored_id_type(id_type, id_number)
+    fields["id_type"] = id_type
+
+    from src.materials.address_classify import classify_director_address
+    from src.materials.countries import resolve_s03_address_country
+    from src.materials.name_classify import classify_director_name
+
+    addr_en = (fields.get("director_address_en") or "").strip()
+    addr_cn = (fields.get("director_address_cn") or "").strip()
+    need_addr = (addr_en or addr_cn) and (
+        not str(fields.get("director_address_street") or "").strip()
+        or not str(fields.get("director_address_region") or "").strip()
+        or str(fields.get("address_is_hk") or "") not in ("0", "1")
+    )
+    if need_addr:
+        addr = classify_director_address(addr_en, addr_cn)
+        for k, v in addr.items():
+            if v and not str(fields.get(k) or "").strip():
+                fields[k] = str(v)
+    if fields.get("address_country"):
+        fields["address_country"] = resolve_s03_address_country(
+            fields["address_country"]
+        )
+    _strip_unparsed_director_english(fields)
+    raw_name = (fields.get("director_name") or "").strip()
+    if raw_name:
+        need_cn = not (fields.get("director_name_cn") or "").strip()
+        need_en = bool(re.search(r"[A-Za-z]", raw_name)) and not (
+            fields.get("director_surname_en") or ""
+        ).strip()
+        if need_cn or need_en:
+            named = classify_director_name(raw_name)
+            for k, v in named.items():
+                if v and not str(fields.get(k) or "").strip():
+                    fields[k] = v
+    return fields
+
+
+_FORM_TO_PERSON = (
+    ("director_name_cn", "name_cn"),
+    ("director_name_en", "name_en"),
+    ("director_surname_en", "surname_en"),
+    ("director_given_en", "given_en"),
+    ("director_address_cn", "address_cn"),
+    ("director_address_en", "address_en"),
+    ("director_address_flat", "address_flat"),
+    ("director_address_building", "address_building"),
+    ("director_address_street", "address_street"),
+    ("director_address_region", "address_region"),
+    ("address_country", "address_country"),
+    ("address_is_hk", "address_is_hk"),
+    ("id_type", "id_type"),
+    ("id_number", "id_number"),
+    ("issuing_country", "issuing_country"),
+)
+
+
+def _apply_submitted_form_to_company_data(
+    company_data: dict[str, Any], fields: dict[str, str]
+) -> None:
+    """聚合后把跑注册表单非空字段写回 payload，避免二次规则盖掉用户修改。"""
+    if not isinstance(company_data, dict):
+        return
+    cn = str(fields.get("company_name_cn") or "").strip()
+    en = str(fields.get("company_name_en") or "").strip()
+    if cn:
+        company_data["company_name_cn"] = cn
+    if en:
+        company_data["company_name_en"] = en
+    email = _contact_email_only(fields.get("contact_email") or "")
+    if email:
+        contact = company_data.get("contact")
+        if not isinstance(contact, dict):
+            contact = {}
+            company_data["contact"] = contact
+        contact["email"] = email
+
+    patch: dict[str, Any] = {}
+    for src, dest in _FORM_TO_PERSON:
+        val = str(fields.get(src) or "").strip()
+        if val:
+            patch[dest] = val
+    surname = str(fields.get("director_surname_en") or "").strip()
+    given = str(fields.get("director_given_en") or "").strip()
+    if (surname or given) and not str(patch.get("name_en") or "").strip():
+        patch["name_en"] = " ".join(p for p in (surname, given) if p)
+    director_name = str(fields.get("director_name") or "").strip()
+
+    def _write_person(person: dict[str, Any], *, is_applicant: bool = False) -> None:
+        person.update(patch)
+        if director_name and is_applicant:
+            person["director_name"] = director_name
+        if email:
+            person["email"] = email
+
+    applicant = company_data.get("applicant")
+    if not isinstance(applicant, dict):
+        applicant = {}
+        company_data["applicant"] = applicant
+    _write_person(applicant, is_applicant=True)
+
+    for key in ("directors", "founder_members"):
+        items = company_data.get(key)
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            _write_person(items[0])
+        elif patch and (director_name or patch.get("name_cn") or patch.get("name_en")):
+            row: dict[str, Any] = {"raw": True}
+            _write_person(row)
+            company_data[key] = [row]
+
+    proof = company_data.get("identity_proof")
+    if not isinstance(proof, dict):
+        proof = {}
+        company_data["identity_proof"] = proof
+    for k in ("id_type", "id_number", "issuing_country"):
+        val = str(fields.get(k) or "").strip()
+        if val:
+            proof[k] = val
 
 
 def _build_materials(
@@ -632,63 +772,9 @@ def submit(
     global _state
     fields = dict(fields or {})
     files = dict(files or {})
-    user_edited = _truthy(fields.pop("id_type_user_edited", False))
-    paste_text = str(fields.pop("paste_text", "") or "")
+    fields = _prepare_submit_fields(fields)
     id_number = (fields.get("id_number") or "").strip()
     id_type = (fields.get("id_type") or "").strip().upper()
-    if not user_edited:
-        from src.materials.id_type_classify import classify_id_from_text
-
-        classified = classify_id_from_text(paste_text, id_number)
-        if classified.get("id_type"):
-            id_type = classified["id_type"]
-        if classified.get("id_number") and not id_number:
-            id_number = classified["id_number"]
-            fields["id_number"] = id_number
-        logger.info(
-            "[快速注册] LLM 判定证件类型=%s user_edited=%s num=%s",
-            id_type,
-            user_edited,
-            id_number[:12],
-        )
-    from src.materials.id_type_classify import ICRIS_ID_TYPES, normalize_stored_id_type
-
-    if id_type not in ICRIS_ID_TYPES:
-        id_type = normalize_stored_id_type(id_type, id_number)
-    fields["id_type"] = id_type
-
-    from src.materials.address_classify import classify_director_address
-    from src.materials.countries import resolve_s03_address_country
-    from src.materials.name_classify import classify_director_name
-
-    addr_en = (fields.get("director_address_en") or "").strip()
-    addr_cn = (fields.get("director_address_cn") or "").strip()
-    need_addr = (addr_en or addr_cn) and (
-        not str(fields.get("director_address_street") or "").strip()
-        or not str(fields.get("director_address_region") or "").strip()
-        or str(fields.get("address_is_hk") or "") not in ("0", "1")
-    )
-    if need_addr:
-        addr = classify_director_address(addr_en, addr_cn)
-        for k, v in addr.items():
-            if k == "address_is_hk" or (v and not str(fields.get(k) or "").strip()):
-                fields[k] = str(v)
-    if fields.get("address_country"):
-        fields["address_country"] = resolve_s03_address_country(fields["address_country"])
-    _strip_unparsed_director_english(fields)
-    raw_name = (fields.get("director_name") or "").strip()
-    if raw_name:
-        need_cn = not (fields.get("director_name_cn") or "").strip()
-        need_en = bool(re.search(r"[A-Za-z]", raw_name)) and not (
-            fields.get("director_surname_en") or ""
-        ).strip()
-        if need_cn or need_en:
-            named = classify_director_name(raw_name)
-            for k, v in named.items():
-                if v and not str(fields.get(k) or "").strip():
-                    fields[k] = v
-
-    # 空邮箱回退环境变量；有备注只展示、不入库
     fields["contact_email"] = _contact_email_only(fields.get("contact_email") or "")
     if not fields["contact_email"]:
         fields["contact_email"] = (
@@ -717,6 +803,7 @@ def submit(
     materials = _build_materials(fields, file_paths)
     try:
         company_data = aggregate_company_data(materials)
+        _apply_submitted_form_to_company_data(company_data, fields)
     except Exception as e:
         logger.exception("aggregate_company_data 失败")
         return {"ok": False, "error": f"资料聚合失败: {e}"}, 500

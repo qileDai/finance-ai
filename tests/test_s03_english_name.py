@@ -119,7 +119,7 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertRegex(username.lower(), r"^hd")
         self.assertIn("yt", username.lower())
 
-    def test_build_materials_omits_unparsed_english(self):
+    def test_build_materials_keeps_user_english(self):
         from src.web.admin_runner import (
             _build_materials,
             _strip_unparsed_director_english,
@@ -135,13 +135,12 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
             "id_number": "340421198611163844",
         }
         _strip_unparsed_director_english(fields)
-        self.assertNotIn("director_surname_en", fields)
-        self.assertNotIn("director_given_en", fields)
-        self.assertNotIn("director_name_en", fields)
+        self.assertEqual(fields["director_surname_en"], "HU")
+        self.assertEqual(fields["director_given_en"], "Dandong")
+        self.assertEqual(fields["director_name_en"], "HU Dandong")
         mats = _build_materials(fields, {})
-        self.assertNotIn("director_surname_en", mats)
-        self.assertNotIn("director_given_en", mats)
-        self.assertNotIn("director_name_en", mats)
+        self.assertEqual(mats["director_surname_en"]["field_value"], "HU")
+        self.assertEqual(mats["director_given_en"]["field_value"], "Dandong")
         self.assertEqual(mats["director_name"]["field_value"], "胡丹东")
 
     def test_strip_keeps_bracket_english(self):
