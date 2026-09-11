@@ -10,7 +10,9 @@ from src.browser.icris_activation import (
     normalize_s06_activation_url,
     require_s06_activation_url,
     s06_credential_error,
+    s06_fail_banner,
 )
+
 
 
 class _Locator:
@@ -126,7 +128,28 @@ class TestS06CredentialError(unittest.TestCase):
         self.assertIn("不正确", s06_credential_error("用戶名稱或密碼不正確"))
 
     def test_success_not_error(self):
-        self.assertEqual(s06_credential_error("Account activation successful"), "")
+        self.assertEqual(
+            s06_credential_error("You have successfully activated your user account!"),
+            "",
+        )
+
+
+class TestS06FailBanner(unittest.TestCase):
+    def test_cancelled_user(self):
+        self.assertEqual(s06_fail_banner("用户名称已取消！"), "用户名称已取消")
+        self.assertEqual(s06_fail_banner("用戶名稱已取消"), "用户名称已取消")
+
+    def test_bad_hyperlink(self):
+        self.assertEqual(
+            s06_fail_banner("该连结不正确，请通过电子邮件中的超链接进行启动！"),
+            "激活链接不正确",
+        )
+
+    def test_success_not_banner(self):
+        self.assertEqual(
+            s06_fail_banner("You have successfully activated your user account!"),
+            "",
+        )
 
 
 class TestFillS06Form(unittest.TestCase):
@@ -161,20 +184,87 @@ class TestFillS06Form(unittest.TestCase):
         page.evaluate.assert_awaited()
 
 
-class TestPageLooksActivated(unittest.TestCase):
-    def test_incorrect_password_not_success(self):
-        page = AsyncMock()
-        page.inner_text = AsyncMock(
-            return_value=(
-                "Incorrect User ID or Password "
-                "[For incorrect password, account will be locked "
-                "after 5 unsuccessful attempts]"
-            )
-        )
-        page.url = (
+_S06_FORM_BODY = (
+    "用户登记\n启动帐户\n用户名称\n密码\n确认\n"
+    "Account Activation\nUser ID\nPassword\nConfirm"
+)
+_S06_SUCCESS_EN = (
+    "User Registration\nAccount Activation\n"
+    "You have successfully activated your user account!\n"
+    "Please click 'Continue' to use the functions in our e-Services Portal.\n"
+    "Back to Home\nContinue"
+)
+_S06_SUCCESS_TC = (
+    "用戶登記\n啟動帳戶\n"
+    "你已成功啟動你的用戶帳戶！\n"
+    "請按「繼續」以使用電子服務網站的功能。\n"
+    "返回主頁\n繼續"
+)
+_S06_SUCCESS_SC = (
+    "用户登记\n启动帐户\n"
+    "你已成功启动你的用户帐户！\n"
+    "请按「继续」以使用电子服务网站的功能。\n"
+    "返回首页\n继续"
+)
+
+
+class _LookPage:
+    def __init__(self, body: str, url: str = "", *, password=False):
+        self._body = body
+        self.url = url or (
             "https://e-services.cr.gov.hk/ICRIS3EF/system/"
             "registration/s06.do?code=x"
         )
+        self._password = _Locator(visible=password)
+
+    async def inner_text(self, _sel):
+        return self._body
+
+    def locator(self, sel):
+        if sel == "input[type='password']":
+            return self._password
+        return _Locator(visible=False)
+
+
+class TestPageLooksActivated(unittest.TestCase):
+    def test_incorrect_password_not_success(self):
+        page = _LookPage(
+            "Incorrect User ID or Password "
+            "[For incorrect password, account will be locked "
+            "after 5 unsuccessful attempts]",
+            password=True,
+        )
+        self.assertFalse(
+            asyncio.run(_page_looks_activated(page, after_submit=True))
+        )
+
+    def test_english_official_success(self):
+        page = _LookPage(_S06_SUCCESS_EN)
+        self.assertTrue(asyncio.run(_page_looks_activated(page)))
+
+    def test_traditional_chinese_success(self):
+        page = _LookPage(_S06_SUCCESS_TC)
+        self.assertTrue(asyncio.run(_page_looks_activated(page)))
+
+    def test_simplified_chinese_success(self):
+        page = _LookPage(_S06_SUCCESS_SC)
+        self.assertTrue(asyncio.run(_page_looks_activated(page)))
+
+    def test_form_page_not_success(self):
+        page = _LookPage(_S06_FORM_BODY, password=True)
+        self.assertFalse(asyncio.run(_page_looks_activated(page)))
+        self.assertFalse(
+            asyncio.run(_page_looks_activated(page, after_submit=True))
+        )
+
+    def test_cancelled_user_not_success(self):
+        page = _LookPage("用户名称已取消！\n启动帐户\n确认", password=True)
+        self.assertFalse(
+            asyncio.run(_page_looks_activated(page, after_submit=True))
+        )
+
+    def test_buttons_without_success_sentence_not_success(self):
+        page = _LookPage("Account Activation\nBack to Home\nContinue")
         self.assertFalse(
             asyncio.run(_page_looks_activated(page, after_submit=True))
         )
@@ -216,8 +306,9 @@ class TestWaitActivationResult(unittest.TestCase):
 
     def test_success_keyword_stops_waiting(self):
         page = _WaitPage(
-            "Account activation successful",
-            url="https://e-services.cr.gov.hk/ICRIS3EF/system/home.do",
+            "You have successfully activated your user account!",
+            url="https://e-services.cr.gov.hk/ICRIS3EF/system/"
+            "registration/s06.do?code=x",
         )
 
         async def _run():
@@ -230,3 +321,17 @@ class TestWaitActivationResult(unittest.TestCase):
         status, detail = asyncio.run(_run())
         self.assertEqual(status, "success")
         self.assertEqual(detail, "")
+
+    def test_fail_banner_stops_waiting(self):
+        page = _WaitPage("用户名称已取消！")
+
+        async def _run():
+            with patch(
+                "src.browser.icris_ui_common.wait_spin_clear",
+                new_callable=AsyncMock,
+            ):
+                return await _wait_activation_result(page, timeout_ms=5000)
+
+        status, detail = asyncio.run(_run())
+        self.assertEqual(status, "page_error")
+        self.assertIn("已取消", detail)

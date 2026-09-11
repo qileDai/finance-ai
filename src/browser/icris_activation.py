@@ -11,25 +11,16 @@ from config.settings import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
+# 官方成功页正文（简报第 17 页）；不用短词，以免命中填表页「啟動帳戶」。
 _SUCCESS_KEYWORDS = [
-    "activated",
-    "已激活",
-    "已啟用",
-    "已启用",
-    "账户已激活",
-    "帳戶已啟用",
-    "registration complete",
-    "activation successful",
-    "activation complete",
-    "啟動成功",
-    "启动成功",
-    "已啟動",
-    "已启动",
-    "already activated",
-    "已經啟動",
-    "已经启动",
-    "帳戶已經啟動",
-    "账户已经启动",
+    "successfully activated your user account",
+    "你已成功啟動你的用戶帳戶",
+    "您已成功啟動您的用戶帳戶",
+    "你已成功启动你的用户帐户",
+    "您已成功启动您的用户帐户",
+    "please click 'continue' to use the functions",
+    "請按「繼續」以使用電子服務網站",
+    "请按「继续」以使用电子服务网站",
 ]
 
 _CREDENTIAL_ERROR_RE = re.compile(
@@ -38,6 +29,11 @@ _CREDENTIAL_ERROR_RE = re.compile(
     r"用户名或密码不正确|用戶名或密碼不正確|"
     r"帐号或密码不正确|帳號或密碼不正確",
     re.I,
+)
+
+_CANCELLED_USER_RE = re.compile(r"用戶名稱已取消|用户名称已取消")
+_BAD_LINK_RE = re.compile(
+    r"超連結|超链接|連結不正確|连结不正确|链接不正确|連結不正确"
 )
 
 _CONFIRM_NAME_RE = re.compile(r"^(Confirm|确认|確認)$", re.I)
@@ -61,6 +57,16 @@ def s06_credential_error(body: str) -> str:
     return "用户名或密码不正确"
 
 
+def s06_fail_banner(body: str) -> str:
+    """启动帐户红条失败（用户已取消、链接失效）；无则空串。"""
+    text = body or ""
+    if _CANCELLED_USER_RE.search(text):
+        return "用户名称已取消"
+    if _BAD_LINK_RE.search(text):
+        return "激活链接不正确"
+    return ""
+
+
 async def _page_body(page) -> str:
     try:
         return await page.inner_text("body")
@@ -69,8 +75,11 @@ async def _page_body(page) -> str:
 
 
 async def _has_visible_password(page) -> bool:
-    inp = page.locator("input[type='password']").first
-    return await inp.count() > 0 and await inp.is_visible()
+    try:
+        inp = page.locator("input[type='password']").first
+        return await inp.count() > 0 and await inp.is_visible()
+    except Exception:
+        return False
 
 
 async def _is_s06_activation_form(page) -> bool:
@@ -90,20 +99,16 @@ async def _is_s06_activation_form(page) -> bool:
 
 
 async def _page_looks_activated(page, *, after_submit: bool = False) -> bool:
+    """仅官方成功页文案。填表页、失败红条不算。"""
+    del after_submit
     try:
-        body_text = (await page.inner_text("body")).lower()
+        body_raw = await page.inner_text("body")
     except Exception:
-        body_text = ""
-    if s06_credential_error(body_text):
+        body_raw = ""
+    body_text = (body_raw or "").lower()
+    if s06_credential_error(body_raw) or s06_fail_banner(body_raw):
         return False
-    if any(k in body_text for k in _SUCCESS_KEYWORDS):
-        return True
-    if not after_submit:
-        return False
-    url_now = (page.url or "").lower()
-    if "e-services.cr.gov.hk" in url_now and "s06.do" not in url_now:
-        return True
-    return False
+    return any(k.lower() in body_text for k in _SUCCESS_KEYWORDS)
 
 
 async def _wait_activation_result(page, timeout_ms: int = 45000) -> tuple[str, str]:
@@ -123,6 +128,10 @@ async def _wait_activation_result(page, timeout_ms: int = 45000) -> tuple[str, s
         if cred_err:
             logger.error("启动帐户失败: %s", cred_err)
             return "credential_error", cred_err
+        banner = s06_fail_banner(body)
+        if banner:
+            logger.error("启动帐户失败: %s", banner)
+            return "page_error", banner
         if await _page_looks_activated(page, after_submit=True):
             logger.info("启动帐户已成功 url=%s", url_now[:160])
             return "success", ""
@@ -265,6 +274,7 @@ async def activate_icris_account(
 ) -> tuple[bool, str]:
     """打开邮件 s06 启动帐户页，填账号密码并点确认。探测与自动激活共用。
 
+    命中官方成功页后只截图返回，不点 Continue / 繼續。
     返回: (成功与否, 截图路径或错误消息)
     """
     open_url, url_err = require_s06_activation_url(activation_url)
@@ -321,18 +331,16 @@ async def activate_icris_account(
                     status, wait_detail = await _wait_activation_result(
                         page, timeout_ms=45000
                     )
-                    if status == "credential_error":
-                        await page.screenshot(path=str(shot_file), full_page=True)
-                        return (False, f"{wait_detail} | {open_url}")
-                    is_success = status == "success"
-                    if status == "timeout":
+                    if status != "success":
                         await page.screenshot(path=str(shot_file), full_page=True)
                         logger.warning("%s", wait_detail)
                         return (False, f"{wait_detail} | {open_url}")
+                    is_success = True
 
                 await page.screenshot(path=str(shot_file), full_page=True)
                 logger.info("激活页面截图: %s (success=%s)", shot_file, is_success)
                 if is_success:
+                    logger.info("激活成功，停在成功页，不点繼續")
                     return (True, f"{shot_file} | {open_url}")
                 if not await _is_s06_activation_form(page):
                     return (

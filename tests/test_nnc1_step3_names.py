@@ -5,6 +5,7 @@ from src.browser.icris_nnc1_form import (
     _PRELIM_RESULT_COLLECT_JS,
     first_real_signatory_index,
     format_prelim_reject_error,
+    is_clean_prelim_reject,
     is_signatory_placeholder,
     normalize_prelim_reject_reasons,
     pick_best_prelim_reasons,
@@ -125,9 +126,22 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
             prelim_check_passed("拒絕。通过。请按“继续”按钮以完成提交过程。")
         )
         self.assertFalse(prelim_check_passed("", "名稱相同"))
+        self.assertTrue(is_clean_prelim_reject("拒絕"))
+        self.assertTrue(is_clean_prelim_reject("拒绝。"))
+        self.assertFalse(
+            is_clean_prelim_reject("如初步檢查結果為拒絕，請修改後再提交。")
+        )
         self.assertGreater(
             prelim_result_preference_score("拒絕"),
             prelim_result_preference_score("通过。请按“继续”按钮以完成提交过程。"),
+        )
+        self.assertGreater(
+            prelim_result_preference_score(
+                "通過。請按「繼續」按鈕以完成提交過程。"
+            ),
+            prelim_result_preference_score(
+                "如初步檢查結果為拒絕，請修改資料後再提交。"
+            ),
         )
 
     def test_pick_best_prefers_reject_over_continue_hint(self):
@@ -141,6 +155,22 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
         self.assertFalse(prelim_check_passed(picked))
         self.assertTrue(
             prelim_check_passed("通过。请按“继续”按钮以完成提交过程。")
+        )
+
+    def test_pick_best_prefers_pass_over_stray_reject_blob(self):
+        picked = pick_best_prelim_result(
+            [
+                "通過。請按「繼續」按鈕以完成提交過程。",
+                "如初步檢查結果為拒絕，請修改資料後再提交。",
+            ]
+        )
+        self.assertIn("通過", picked)
+        self.assertTrue(prelim_check_passed(picked))
+        self.assertTrue(
+            prelim_check_passed(
+                "通過。請按「繼續」按鈕以完成提交過程。",
+                "旁路拒絕原因不应改判",
+            )
         )
 
     def test_pass_result_ignores_stray_reasons(self):
@@ -187,6 +217,10 @@ class TestNnc1SignatoryAndPrelim(unittest.TestCase):
         self.assertIn("ant-descriptions-item", _PRELIM_RESULT_COLLECT_JS)
         self.assertIn("pushSameCell", _PRELIM_RESULT_COLLECT_JS)
         self.assertIn("[:：]", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("isShortLabel", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("getBoundingClientRect", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("getComputedStyle", _PRELIM_RESULT_COLLECT_JS)
+        self.assertIn("nextElementSibling", _PRELIM_RESULT_COLLECT_JS)
         self.assertIn("不予接納原因", _PRELIM_REASON_COLLECT_JS)
         self.assertIn("拒絕原因", _PRELIM_REASON_COLLECT_JS)
         self.assertEqual(
