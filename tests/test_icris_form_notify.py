@@ -57,9 +57,26 @@ class TestPrelimNotifyMessage(unittest.TestCase):
         self.assertIn('初步检查结果: <font color="info">通过</font>', msg)
         self.assertNotIn("拒絕原因", msg)
         self.assertNotIn("应被忽略", msg)
+        self.assertNotIn("填表耗时", msg)
         plain = strip_prelim_markdown(msg)
         self.assertNotIn("<font", plain)
         self.assertIn("初步检查结果: 通过", plain)
+
+    def test_includes_nnc1_duration(self):
+        msg = format_prelim_message(
+            128,
+            fields_from_payload(_payload()),
+            passed=True,
+            nnc1_duration="3分12秒",
+        )
+        self.assertIn("填表耗时：3分12秒", msg)
+        self.assertLess(msg.find("填表耗时："), msg.find("公司中文名:"))
+
+    def test_empty_nnc1_duration_omitted(self):
+        msg = format_prelim_message(
+            128, fields_from_payload(_payload()), passed=True, nnc1_duration="  "
+        )
+        self.assertNotIn("填表耗时", msg)
 
     def test_reject_message_includes_reasons(self):
         reasons = "1. 公司名称与身份证明不符\n2. 地址不完整"
@@ -105,6 +122,7 @@ class TestSendPrelimNotify(unittest.TestCase):
                 _payload(),
                 passed=True,
                 screenshot_path=str(shot),
+                nnc1_duration="3分12秒",
                 client=client,
             )
         self.assertTrue(ok)
@@ -112,6 +130,7 @@ class TestSendPrelimNotify(unittest.TestCase):
         content = client.send_webhook_markdown.call_args[0][1]
         self.assertIn("初步检查通过", content)
         self.assertIn('<font color="info">', content)
+        self.assertIn("填表耗时：3分12秒", content)
         client.send_webhook_image.assert_called_once_with(
             "https://qyapi.weixin.qq.com/hook", str(shot)
         )

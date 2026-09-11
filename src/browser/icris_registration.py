@@ -321,8 +321,10 @@ def format_s03a_review_message(
     data: dict[str, Any] | None = None,
     *,
     admin_public_url: str | None = None,
+    s03a_duration: str = "",
 ) -> str:
-    """s03a 审核 webhook 正文（企微 markdown）。空字段跳过。"""
+    """s03a 审核 webhook 正文（企微 markdown）。空字段跳过。不含后台链接。"""
+    _ = admin_public_url  # 保留兼容；企微内置浏览器打开，组文不再带链接
     payload = data if isinstance(data, dict) else {}
     applicant = payload.get("applicant") or {}
     if not isinstance(applicant, dict):
@@ -355,14 +357,14 @@ def format_s03a_review_message(
         or str(applicant.get("email") or "").strip()
     )
 
-    if admin_public_url is None:
-        admin_public_url = str(getattr(settings, "admin_public_url", "") or "")
-    admin_url = _admin_job_review_url(job_id, admin_public_url)
+    duration = str(s03a_duration or "").strip()
 
     lines = [
         f"【ICRIS 注册审核】任务 #{job_id}",
         "请到管理后台核对后点「提交」或「拒绝」",
     ]
+    if duration:
+        lines.append(f"耗时：{duration}")
     if company:
         lines.append(f"公司：{company}")
     if person:
@@ -373,8 +375,6 @@ def format_s03a_review_message(
         lines.append(f"账号：{account}")
     if email:
         lines.append(f"邮箱：{email}")
-    if admin_url:
-        lines.append(f"后台：[打开任务 #{job_id}]({admin_url})")
     text = "\n".join(lines)
     if len(text) > 4000:
         text = text[:3990] + "…"
@@ -684,7 +684,11 @@ class IcrisRegistrationBot:
         # 2) 通知审核人
         if self.on_review_needed:
             try:
-                msg = format_s03a_review_message(self.job_id, self._company_data)
+                job = store.get_registration_job(self.job_id) or {}
+                duration = str(job.get("s03a_duration") or "").strip()
+                msg = format_s03a_review_message(
+                    self.job_id, self._company_data, s03a_duration=duration
+                )
                 self.on_review_needed(self.job_id, msg)
             except Exception as e:
                 logger.warning("s03a 审核通知发送失败: %s", e)

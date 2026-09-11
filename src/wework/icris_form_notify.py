@@ -86,6 +86,7 @@ def format_prelim_message(
     *,
     passed: bool,
     reasons: str = "",
+    nnc1_duration: str = "",
 ) -> str:
     """初步检查群通知正文。通过不含拒絕原因；拒絕追加页面抓到的全文。"""
     f = fields if isinstance(fields, dict) else {}
@@ -94,17 +95,24 @@ def format_prelim_message(
         passed=passed,
     )
     result = _md_status("通过" if passed else "拒絕", passed=passed)
+    duration = str(nnc1_duration or "").strip()
     lines = [
         title,
         f"任务 #{int(job_id or 0)}",
-        f"公司中文名: {f.get('company_name_cn') or ''}",
-        f"公司英文名: {f.get('company_name_en') or ''}",
-        f"股东姓名: {f.get('shareholder_name') or ''}",
-        f"证件类型: {f.get('id_type') or ''}",
-        f"证件号码: {f.get('id_number') or ''}",
-        f"ICRIS账号: {f.get('icris_username') or ''}",
-        f"初步检查结果: {result}",
     ]
+    if duration:
+        lines.append(f"填表耗时：{duration}")
+    lines.extend(
+        [
+            f"公司中文名: {f.get('company_name_cn') or ''}",
+            f"公司英文名: {f.get('company_name_en') or ''}",
+            f"股东姓名: {f.get('shareholder_name') or ''}",
+            f"证件类型: {f.get('id_type') or ''}",
+            f"证件号码: {f.get('id_number') or ''}",
+            f"ICRIS账号: {f.get('icris_username') or ''}",
+            f"初步检查结果: {result}",
+        ]
+    )
     if not passed:
         reasons_text = (reasons or "").strip()
         if reasons_text:
@@ -122,6 +130,7 @@ def send_prelim_notify(
     passed: bool,
     reasons: str = "",
     screenshot_path: str = "",
+    nnc1_duration: str = "",
     client: Any = None,
 ) -> bool:
     """发审核群：先 markdown 文字，再 webhook 截图。无通道则直接返回。"""
@@ -139,6 +148,7 @@ def send_prelim_notify(
         fields_from_payload(payload),
         passed=passed,
         reasons=reasons,
+        nnc1_duration=nnc1_duration,
     )
     ww = client or WeWorkClient()
     sent = False

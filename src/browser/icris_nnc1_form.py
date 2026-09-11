@@ -538,8 +538,12 @@ class IcrisNnc1FormBot:
     ) -> None:
         """初步检查出结果后立刻发审核群（失败不影响填表流程）。"""
         try:
+            from src.storage.db import format_job_run_duration
             from src.wework.icris_form_notify import send_prelim_notify
 
+            dur = ""
+            if self._nnc1_t0:
+                dur = format_job_run_duration(time.monotonic() - self._nnc1_t0)
             self._prelim_notified = bool(
                 send_prelim_notify(
                     int(self.job_id or 0),
@@ -547,6 +551,7 @@ class IcrisNnc1FormBot:
                     passed=passed,
                     reasons=reasons,
                     screenshot_path=screenshot_path,
+                    nnc1_duration=dur,
                 )
             )
         except Exception as e:
