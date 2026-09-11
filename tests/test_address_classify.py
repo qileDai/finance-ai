@@ -98,6 +98,127 @@ HK_LAGUNA_EN = (
     "8 Laguna Street, Kwun Tong, Kowloon"
 )
 HK_QUEENS_EN = "G/F, 28 Queen's Road Central, Central, Hong Kong"
+HK_CHAI_WAN_ESTATE_EN = (
+    "FLT 2505, 25/F, MAN FU HOUSE, HING MAN ESTATE, CHAI WAN, HK"
+)
+HK_HSE_EST_EN = "RM 1, 3/F, Foo HSE, Bar EST, Chai Wan, H.K."
+HK_BLDG_KLN_EN = "Flat A, 8/F, Foo BLDG, 88 Bar Rd, Mong Kok, KLN"
+HK_FLT_ESTATE_NT_EN = "FLT 12, 6/F, Sun HSE, Foo Estate, Sha Tin, N.T."
+HK_TSUEN_EN = "No. 12, Foo Tsuen, Yuen Long, NT"
+HK_HUNG_HOM_EN = "RM 5, 10/F, Bar Court, 1 Foo Road, Hung Hom, Kowloon"
+HK_WANCHAI_LGF_EN = (
+    "Shop 1, LG/F, Foo Centre, 9 Bar Street, Wan Chai, Hong Kong"
+)
+HK_TKO_TOWER_EN = "Flat C, 20/F, Tower 2, Foo Plaza, Tseung Kwan O, NT"
+
+# mock LLM 目标四段：纠偏必须原样保留（屋苑进街道，HK/KLN/NT 不进街道）
+HK_LLM_KEEP_CASES = [
+    (
+        HK_CHAI_WAN_ESTATE_EN,
+        "FLT 2505, 25/F",
+        "MAN FU HOUSE",
+        "HING MAN ESTATE",
+        "柴灣",
+    ),
+    (
+        HK_HSE_EST_EN,
+        "RM 1, 3/F",
+        "Foo HSE",
+        "Bar EST",
+        "柴灣",
+    ),
+    (
+        HK_BLDG_KLN_EN,
+        "Flat A, 8/F",
+        "Foo BLDG",
+        "88 Bar Rd",
+        "旺角",
+    ),
+    (
+        HK_FLT_ESTATE_NT_EN,
+        "FLT 12, 6/F",
+        "Sun HSE",
+        "Foo Estate",
+        "沙田",
+    ),
+    (
+        NT_EN,
+        "RM D, 11/F, BLK 5",
+        "LOCWOOD COURT",
+        "1 TIN WU ROAD",
+        "天水圍",
+    ),
+    (
+        HK_EN,
+        "Flat A, 9/F",
+        "",
+        "Tai Yip Street",
+        "觀塘",
+    ),
+    (
+        HK_GF_EN,
+        "Shop 3, G/F",
+        "Hang Seng Building",
+        "83 Des Voeux Road Central",
+        "中環",
+    ),
+    (
+        HK_PHASE_EN,
+        "Flat B, 12/F, Wing A, Phase 2",
+        "Foo Court",
+        "1 Bar Road",
+        "荃灣",
+    ),
+    (
+        HK_MIRA_EN,
+        "Shop 12, 2/F",
+        "Mira Place",
+        "132 Nathan Road",
+        "尖沙咀",
+    ),
+    (
+        HK_LAGUNA_EN,
+        "Unit 8, 15/F, Block C",
+        "Laguna City",
+        "8 Laguna Street",
+        "觀塘",
+    ),
+    (
+        HK_QUEENS_EN,
+        "G/F",
+        "",
+        "28 Queen's Road Central",
+        "中環",
+    ),
+    (
+        HK_TSUEN_EN,
+        "No. 12",
+        "",
+        "Foo Tsuen",
+        "元朗",
+    ),
+    (
+        HK_HUNG_HOM_EN,
+        "RM 5, 10/F",
+        "Bar Court",
+        "1 Foo Road",
+        "紅磡",
+    ),
+    (
+        HK_WANCHAI_LGF_EN,
+        "Shop 1, LG/F",
+        "Foo Centre",
+        "9 Bar Street",
+        "灣仔",
+    ),
+    (
+        HK_TKO_TOWER_EN,
+        "Flat C, 20/F, Tower 2",
+        "Foo Plaza",
+        "",
+        "將軍澳",
+    ),
+]
 GZ_TEEM_EN = (
     "Room 1208, 28/F, Teemtower, 208 Tianhe Road, "
     "Tianhe District, Guangzhou City, Guangdong Province"
@@ -215,6 +336,9 @@ class TestEnglishSplitAndHk(unittest.TestCase):
         self.assertTrue(english_address_is_hk(NT_EN))
         self.assertTrue(english_address_is_hk("TIN SHUI WAI NT"))
         self.assertTrue(english_address_is_hk("1 Foo Road, N.T."))
+        self.assertTrue(english_address_is_hk(HK_CHAI_WAN_ESTATE_EN))
+        self.assertTrue(english_address_is_hk("Chai Wan, H.K."))
+        self.assertTrue(english_address_is_hk("Mong Kok, KLN"))
         self.assertFalse(english_address_is_hk(SZ_EN))
         self.assertFalse(english_address_is_hk(UZB_EN))
         hk = weak_fallback_address(HK_EN)
@@ -296,7 +420,7 @@ class TestHkFourWay(unittest.TestCase):
         self.assertEqual(street, "1 TIN WU ROAD")
         self.assertEqual(region, "天水圍")
 
-    def test_llm_only_room_coerced_to_floor_block(self):
+    def test_llm_partial_flat_kept_when_other_fields_complete(self):
         llm = MagicMock()
         llm.classify_director_address.return_value = {
             "is_hk": True,
@@ -307,11 +431,55 @@ class TestHkFourWay(unittest.TestCase):
             "address_country": "HKG",
         }
         out = classify_director_address(NT_EN, llm=llm)
-        self.assertEqual(out["director_address_flat"], "RM D, 11/F, BLK 5")
+        self.assertEqual(out["director_address_flat"], "RM D")
         self.assertEqual(out["director_address_building"], "LOCWOOD COURT")
         self.assertEqual(out["director_address_street"], "1 TIN WU ROAD")
         self.assertEqual(out["director_address_region"], "天水圍")
         self.assertEqual(out["address_is_hk"], "1")
+
+    def test_llm_keep_four_way_table(self):
+        tails = ("HK", "H.K.", "HKG", "KLN", "NT", "N.T.", "Hong Kong", "Kowloon")
+        for en, flat, building, street, region in HK_LLM_KEEP_CASES:
+            with self.subTest(keep=en[:48]):
+                llm = MagicMock()
+                llm.classify_director_address.return_value = {
+                    "is_hk": True,
+                    "flat": flat,
+                    "building": building,
+                    "street": street,
+                    "region": region,
+                    "address_country": "HKG",
+                }
+                out = classify_director_address(en, llm=llm)
+                self.assertEqual(out["director_address_flat"], flat)
+                self.assertEqual(out["director_address_building"], building)
+                self.assertEqual(out["director_address_street"], street)
+                self.assertEqual(out["director_address_region"], region)
+                self.assertEqual(out["address_is_hk"], "1")
+                self.assertEqual(out["address_country"], "HKG")
+                got_street = out["director_address_street"]
+                for tail in tails:
+                    if tail.casefold() not in street.casefold():
+                        self.assertNotIn(
+                            tail,
+                            got_street,
+                            f"{tail!r} leaked into street for {en!r}",
+                        )
+            with self.subTest(fallback=en[:48]):
+                fb = weak_fallback_address(en)
+                self.assertEqual(fb["address_is_hk"], "1")
+                self.assertEqual(fb["director_address_region"], region)
+                self.assertEqual(fb["address_country"], "HKG")
+
+    def test_chai_wan_estate_rule_fallback_four_way(self):
+        flat, building, street, region = split_hk_english_four_way(
+            HK_CHAI_WAN_ESTATE_EN
+        )
+        self.assertEqual(flat, "FLT 2505, 25/F")
+        self.assertEqual(building, "MAN FU HOUSE")
+        self.assertEqual(street, "HING MAN ESTATE")
+        self.assertEqual(region, "柴灣")
+        self.assertNotIn("HK", street)
 
     def test_gf_shop_in_flat(self):
         flat, building, street, region = split_hk_english_four_way(HK_GF_EN)

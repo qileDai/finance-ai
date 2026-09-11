@@ -65,13 +65,19 @@ CLASSIFY_ADDRESS_SYSTEM = (
     '{"is_hk":true|false,"flat":"...","building":"...","street":"...","region":"...","address_country":"ISO3"}。'
     "规则："
     "1) is_hk 仅当该个人住址在香港特区。"
-    "Hong Kong / Kowloon / New Territories / NT / N.T. / Tin Shui Wai / Kwun Tong 等均为香港，is_hk=true。"
+    "Hong Kong / HK / H.K. / HKG / HKSAR / Kowloon / KLN / "
+    "New Territories / NT / N.T. / Tin Shui Wai / Kwun Tong 等均为香港，is_hk=true。"
     "内地、澳门、台湾、国外都是 false。注册地址在香港不能当成个人住址在香港。"
     "2) 香港（is_hk=true）必须拆四段，所有逗号段必须进入其中一段，禁止丢掉樓/座。"
-    "flat=室／樓／座（RM/Flat/Shop、11/F、G/F、LG/F、BLK/Block、Phase/Wing 全部并入 flat）；"
-    "building=大廈（Court/Mansion/Building 等），没有大厦则空；"
-    "street=街道／屋苑／地段／村，不要把大厦或郵遞區放进 street；"
-    "region 必须从用户消息里的郵遞區號选项抄一项原文，如「天水圍」「紅磡」「觀塘」。"
+    "末尾 HK / H.K. / HKG / KLN / NT / N.T. / Hong Kong / Kowloon 只表示香港，"
+    "不要写入 flat/building/street。"
+    "flat=室／樓／座（FLT/Flat/RM/Room/Shop、11/F、G/F、LG/F、BLK/Block、"
+    "Phase/Wing、Tower+座号 全部并入 flat）；"
+    "building=大廈（House/HSE、Building/BLDG、Court、Mansion、Centre、Plaza 等），"
+    "没有大厦则空；Estate/EST 不是大厦；"
+    "street=街道／屋苑／地段／村（Estate/EST、Tsuen/Village、Road 等），"
+    "不要把大厦或郵遞區放进 street；无 Road 时街道可以只有屋苑名；"
+    "region 必须从用户消息里的郵遞區號选项抄一项原文，如「天水圍」「紅磡」「觀塘」「柴灣」。"
     "禁止自造 TIN SHUI WAI NT 或只写区英文。"
     "address_country=HKG。"
     "例："
@@ -82,7 +88,10 @@ CLASSIFY_ADDRESS_SYSTEM = (
     'flat="Flat A, 9/F", building="", street="Tai Yip Street", region="觀塘"；'
     "Shop 3, G/F, Hang Seng Building, 83 Des Voeux Road Central, Central → "
     'flat="Shop 3, G/F", building="Hang Seng Building", '
-    'street="83 Des Voeux Road Central", region="中環"。'
+    'street="83 Des Voeux Road Central", region="中環"；'
+    "FLT 2505, 25/F, MAN FU HOUSE, HING MAN ESTATE, CHAI WAN, HK → "
+    'flat="FLT 2505, 25/F", building="MAN FU HOUSE", '
+    'street="HING MAN ESTATE", region="柴灣"。'
     "3) 非香港（内地/国外）不要套香港四段：flat 与 building 输出空字符串。"
     "street=市县级以下全部逗号段（室/门牌、路、镇/乡、村、片区、社区、团场/连等）；"
     "region=从第一段市县级及以上起到省/州/邮编："
@@ -132,7 +141,7 @@ FIT_NON_HK_SYSTEM = (
 
 _HK_EN_RE = re.compile(
     r"hong\s*kong|kowloon|new\s*territories|\bhksar\b|\bhk\s*island\b|"
-    r"\bN\.?\s*T\.?\b|"
+    r"\bhkg\b|\bkln\b|\bhk\b|\bh\.k\.?|\bN\.?\s*T\.?\b|"
     r"tin\s*shui\s*wai|yuen\s*long|tuen\s*mun|sha\s*tin|kwun\s*tong|"
     r"tsuen\s*wan|kwai\s*chung|tai\s*po|fanling|sheung\s*shui|"
     r"tseung\s*kwan\s*o|sai\s*kung|tung\s*chung|mong\s*kok|"
@@ -157,12 +166,13 @@ _ADMIN_PART_RE = re.compile(
 _SUBDISTRICT_RE = re.compile(r"sub[-\s]?districts?", re.I)
 _NEW_AREA_RE = re.compile(r"\bnew\s+area\b", re.I)
 _HK_REGION_TAIL_RE = re.compile(
-    r"hong\s*kong|kowloon|new\s*territories|\bhksar\b|\bN\.?\s*T\.?\b",
+    r"hong\s*kong|kowloon|new\s*territories|\bhksar\b|\bN\.?\s*T\.?\b|"
+    r"\bhkg\b|\bkln\b|\bhk\b|\bh\.k\.?",
     re.I,
 )
 _FLAT_PART_RE = re.compile(
-    r"^(rm|room|flat|unit|apt|ste|suite|shop|office|"
-    r"blk|block|phase|ph\.?|wing)\b|"
+    r"^(rm|room|flat|flt|unit|apt|ste|suite|shop|office|"
+    r"blk|block|phase|ph\.?|wing|tower)\b|"
     r"^(lg|ug|g|m|u)\s*/\s*f\b|"
     r"^\d+\s*/\s*f\b|"
     r"^\d+\s*(st|nd|rd|th)?\s*(fl\.?|floor)\b|"
@@ -170,13 +180,15 @@ _FLAT_PART_RE = re.compile(
     re.I,
 )
 _BLDG_PART_RE = re.compile(
-    r"\b(court|mansion|building|tower|centre|center|plaza|gardens?|"
-    r"house|villa|heights|residence|park|estate)\b",
+    r"\b(court|crt|mansion|building|bldg|bld|tower|twr|"
+    r"centre|center|plaza|gardens?|gdns?|"
+    r"house|hse|villa|heights|residence|park)\b",
     re.I,
 )
 _STREET_PART_RE = re.compile(
     r"\b(road|rd\.?|street|st\.?|avenue|ave\.?|lane|path|"
-    r"drive|dr\.?|terrace|highway|circuit)\b",
+    r"drive|dr\.?|terrace|highway|circuit|"
+    r"estates?|est\.?|vill(?:age)?)\b",
     re.I,
 )
 _NON_HK_NO_FLAT_RE = re.compile(r"^no\.\s*\d+[a-z]?\s*$", re.I)
@@ -968,18 +980,14 @@ def coerce_address_result(
         fb_flat, fb_bldg, fb_street, fb_region = split_hk_english_four_way(en)
         if not en:
             fb_region = resolve_s03_hk_district("", address_cn=cn) or fb_region
-        if en and (fb_flat or fb_bldg or fb_street):
-            if (
-                _is_truncated_vs_rule(flat, fb_flat)
-                or _is_truncated_vs_rule(building, fb_bldg)
-                or _is_truncated_vs_rule(street, fb_street)
-                or _hk_dropped_address_parts(en, flat, building, street)
-            ):
-                flat, building, street = fb_flat, fb_bldg, fb_street
-        else:
-            flat = flat or fb_flat
-            building = building or fb_bldg
-            street = street or fb_street
+        if flat or building or street:
+            # 模型已拆则保留；只给空栏补规则，禁止整段覆盖
+            if _hk_dropped_address_parts(en, flat, building, street):
+                flat = flat or fb_flat
+                building = building or fb_bldg
+                street = street or fb_street
+        elif en:
+            flat, building, street = fb_flat, fb_bldg, fb_street
         region = resolve_s03_hk_district(
             region or fb_region,
             address_en=en,
