@@ -281,6 +281,21 @@ function nnc1FindSignatoryControl() {
 """
 
 
+_PRELIM_REJECT_RE = re.compile(r"拒絕|拒绝|\bRejection\b", re.I)
+_PRELIM_FAIL_RE = re.compile(r"不通过|不通過|未能通过|未能通過")
+_PRELIM_PASS_RE = re.compile(r"通过|通過")
+_PRELIM_CLEAN_REJECT_RE = re.compile(
+    r"^(拒絕|拒绝|Rejection)[。．.]*$",
+    re.I,
+)
+
+
+def is_clean_prelim_reject(text: str) -> bool:
+    """结果格几乎只有「拒絕/拒绝/Rejection」，不是长文案里顺带出现。"""
+    compact = re.sub(r"\s+", "", text or "")
+    return bool(_PRELIM_CLEAN_REJECT_RE.fullmatch(compact))
+
+
 def prelim_check_passed(result_text: str, reasons: str = "") -> bool:
     """以「初步檢查結果」格为准：通过/通過=成功，拒絕/拒绝/不通过=失败。
 
@@ -288,11 +303,11 @@ def prelim_check_passed(result_text: str, reasons: str = "") -> bool:
     结果格为空时，有拒絕原因则仍判失败。
     """
     t = result_text or ""
-    if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
+    if _PRELIM_REJECT_RE.search(t):
         return False
-    if re.search(r"不通过|不通過|未能通过|未能通過", t):
+    if _PRELIM_FAIL_RE.search(t):
         return False
-    if re.search(r"通过|通過", t):
+    if _PRELIM_PASS_RE.search(t):
         return True
     if (reasons or "").strip():
         return False
@@ -300,19 +315,21 @@ def prelim_check_passed(result_text: str, reasons: str = "") -> bool:
 
 
 def prelim_result_preference_score(text: str) -> int:
-    """多候选时优先採「拒絕」，避免误採「通过，请按继续」。"""
+    """真拒绝格 > 不通过 > 通过句；长文案里的「拒絕」不得压过通过句。"""
     t = text or ""
-    if re.search(r"拒絕|拒绝|\bRejection\b", t, re.I):
+    if is_clean_prelim_reject(t):
+        return 4
+    if _PRELIM_FAIL_RE.search(t):
         return 3
-    if re.search(r"不通过|不通過|未能通过|未能通過", t):
+    if _PRELIM_PASS_RE.search(t) and not _PRELIM_REJECT_RE.search(t):
         return 2
-    if re.search(r"通过|通過", t):
+    if _PRELIM_REJECT_RE.search(t):
         return 1
     return 1 if t.strip() else 0
 
 
 def pick_best_prelim_result(candidates: list[str] | tuple[str, ...] | None) -> str:
-    """同一页多段结果时取分數最高的（拒絕 > 不通过 > 通过）。"""
+    """同一页多段结果：真拒绝格优先于通过句，避免拒绝页误採「请按继续」。"""
     best = ""
     best_score = -1
     for raw in candidates or ():
@@ -355,7 +372,7 @@ def format_prelim_reject_error(result: str = "", reasons: str = "") -> str:
 
 
 def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: str = "") -> str:
-    """扫 tr 相邻单元格、同格「标签：值」、以及 ant-descriptions。"""
+    """扫可见短标签格：直接子 th/td、下一兄弟、同格「标签：值」、ant-descriptions。"""
     keep = "true" if keep_newlines else "false"
     value_filter = f"if (valueRe && !valueRe.test(val)) return;" if value_re else ""
     value_decl = f"const valueRe = {value_re};" if value_re else "const valueRe = null;"
@@ -363,7 +380,28 @@ def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: s
         const labelRe = {label_re};
         {value_decl}
         const keepNewlines = {keep};
+        const vis = (n) => {{
+            if (!n) return false;
+            const r = n.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            let cur = n;
+            for (let i = 0; i < 8 && cur && cur !== document.body; i++) {{
+                if (cur.hidden || cur.getAttribute?.('aria-hidden') === 'true') return false;
+                const st = window.getComputedStyle(cur);
+                if (!st) break;
+                if (st.display === 'none' || st.visibility === 'hidden') return false;
+                if (st.opacity === '0') return false;
+                cur = cur.parentElement;
+            }}
+            return true;
+        }};
         const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+        const isShortLabel = (t) => {{
+            const n = norm(t);
+            if (!n || !n.match(labelRe)) return false;
+            const rest = n.replace(labelRe, '').replace(/[:：*＊\\s]/g, '');
+            return rest.length <= 8;
+        }};
         const cellText = (el) => {{
             const raw = (el && el.innerText) || '';
             if (!keepNewlines) return norm(raw);
@@ -379,29 +417,42 @@ def _prelim_collect_values_js(label_re: str, *, keep_newlines: bool, value_re: s
             const raw = text || '';
             const m = raw.match(/^([\\s\\S]*?)\\s*[:：]\\s*([\\s\\S]+)$/);
             if (!m) return;
-            if (!labelRe.test(norm(m[1]))) return;
+            if (!isShortLabel(m[1])) return;
             const val = keepNewlines
                 ? m[2].split('\\n').map((l) => l.replace(/[ \\t]+/g, ' ').trim()).filter(Boolean).join('\\n')
                 : norm(m[2]);
             pushVal(val);
         }};
         for (const tr of document.querySelectorAll('tr')) {{
-            const cells = [...tr.querySelectorAll('th, td')];
+            if (!vis(tr)) continue;
+            const cells = [...tr.children].filter((el) => {{
+                const tag = (el.tagName || '').toUpperCase();
+                return tag === 'TH' || tag === 'TD';
+            }});
             for (let i = 0; i < cells.length - 1; i++) {{
-                if (!labelRe.test(norm(cells[i].innerText))) continue;
+                if (!vis(cells[i]) || !isShortLabel(cells[i].innerText)) continue;
+                if (!vis(cells[i + 1])) continue;
                 pushVal(cellText(cells[i + 1]));
             }}
             for (const cell of cells) {{
+                if (!vis(cell)) continue;
                 pushSameCell(cellText(cell));
             }}
         }}
         for (const item of document.querySelectorAll('.ant-descriptions-item')) {{
             const lab = item.querySelector('.ant-descriptions-item-label');
             const content = item.querySelector('.ant-descriptions-item-content');
-            if (lab && content && labelRe.test(norm(lab.innerText))) {{
+            if (lab && content && vis(lab) && vis(content) && isShortLabel(lab.innerText)) {{
                 pushVal(cellText(content));
             }}
-            pushSameCell(cellText(item));
+            if (vis(item)) pushSameCell(cellText(item));
+        }}
+        for (const el of document.querySelectorAll(
+            'td, th, div, span, label, dt, .ant-descriptions-item-label'
+        )) {{
+            if (!vis(el) || !isShortLabel(el.innerText)) continue;
+            const sib = el.nextElementSibling;
+            if (sib && vis(sib)) pushVal(cellText(sib));
         }}
         return hits;
     }}"""
@@ -7277,9 +7328,14 @@ class IcrisNnc1FormBot:
         hits = await self._eval_in_frames_collect(
             page, _PRELIM_RESULT_COLLECT_JS
         )
-        return pick_best_prelim_result(
-            [str(h) for h in hits if str(h or "").strip()]
+        texts = [str(h) for h in hits if str(h or "").strip()]
+        picked = pick_best_prelim_result(texts)
+        logger.info(
+            "初步检查结果候选=%s 採用=%s",
+            texts[:8],
+            (picked or "")[:160],
         )
+        return picked
 
     async def _read_preliminary_check_reject_reasons(self, page) -> str:
         hits = await self._eval_in_frames_collect(
@@ -7319,7 +7375,14 @@ class IcrisNnc1FormBot:
             result = await self._read_preliminary_check_result(page)
             reasons = await self._read_preliminary_check_reject_reasons(page)
         shot = await self._maybe_screenshot(page, "step6_preliminary_check")
-        if not prelim_check_passed(result, reasons):
+        passed = prelim_check_passed(result, reasons)
+        logger.info(
+            "初步检查判定 passed=%s result=%s reasons=%s",
+            passed,
+            (result or "")[:160],
+            (reasons or "")[:160],
+        )
+        if not passed:
             err = format_prelim_reject_error(result, reasons)
             self.persist_form_outcome(False, err)
             self.notify_prelim_result(
