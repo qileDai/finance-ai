@@ -27,6 +27,7 @@ class IcrisJobWorker:
     last_job_id: int | None = None
     last_error: str = ""
     _activation_worker: Any = None
+    _log_cleanup_worker: Any = None
 
     def start(self, *, blocking: bool = False) -> None:
         if not settings.icris_worker_enabled:
@@ -55,6 +56,9 @@ class IcrisJobWorker:
         from src.wework.icris_activation_worker import IcrisActivationWorker
         self._activation_worker = IcrisActivationWorker(self.store)
         self._activation_worker.start()
+        from src.wework.job_log_cleanup import JobLogCleanupWorker
+        self._log_cleanup_worker = JobLogCleanupWorker(self.store)
+        self._log_cleanup_worker.start()
 
         self._stop.clear()
 
@@ -91,6 +95,8 @@ class IcrisJobWorker:
         self._stop.set()
         if self._activation_worker:
             self._activation_worker.stop()
+        if self._log_cleanup_worker:
+            self._log_cleanup_worker.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
         self.alive = False
@@ -168,7 +174,7 @@ class IcrisJobWorker:
             allow_submit,
         )
         package_dir = str(job.get("package_dir") or "")
-        capture = JobLogCapture()
+        capture = JobLogCapture(phase="register")
         capture.install()
         stop_flush = threading.Event()
 

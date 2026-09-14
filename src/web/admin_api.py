@@ -1047,6 +1047,9 @@ def _normalize_job_messages(
                     t = str(item.get("time") or "").strip()
                     if t:
                         entry["time"] = t
+                    phase = str(item.get("phase") or "").strip()
+                    if phase:
+                        entry["phase"] = phase
                     messages.append(entry)
                 else:
                     text = str(item or "").strip()

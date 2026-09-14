@@ -50,9 +50,62 @@ export function normalizeLogLines(
 
     const timeRaw = (item as JobLogLine).time;
     const time = timeRaw != null && String(timeRaw).trim() ? String(timeRaw).trim() : undefined;
-    out.push(time ? { level, message, time } : { level, message });
+    const phaseRaw = (item as JobLogLine).phase ?? (item as Record<string, unknown>).phase;
+    const phase =
+      phaseRaw != null && String(phaseRaw).trim() ? String(phaseRaw).trim() : undefined;
+    const line: JobLogLine = { level, message };
+    if (time) line.time = time;
+    if (phase) line.phase = phase;
+    out.push(line);
   }
   return out;
+}
+
+export const ACTIVATION_LOG_BANNER = "—— 账号激活开始 ——";
+export const NNC1_LOG_BANNER = "—— NNC1 填表开始 ——";
+
+export type JobLogPhase = "register" | "activation" | "nnc1";
+
+export function splitLogPhases(
+  lines: JobLogLine[],
+  opts?: { formStatus?: string; activationStatus?: string }
+): Record<JobLogPhase, JobLogLine[]> {
+  const buckets: Record<JobLogPhase, JobLogLine[]> = {
+    register: [],
+    activation: [],
+    nnc1: [],
+  };
+  let current: JobLogPhase = "register";
+  const formSt = (opts?.formStatus || "").trim().toLowerCase();
+  const actSt = (opts?.activationStatus || "").trim().toLowerCase();
+  const failBucket: JobLogPhase | "" =
+    formSt === "failed" ? "nnc1" : actSt === "failed" ? "activation" : "";
+  const lastI = lines.length - 1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const msg = asLogText(line.message).trim();
+    if (msg.includes(ACTIVATION_LOG_BANNER) || msg === ACTIVATION_LOG_BANNER) {
+      current = "activation";
+      continue;
+    }
+    if (msg.includes(NNC1_LOG_BANNER) || msg === NNC1_LOG_BANNER) {
+      current = "nnc1";
+      continue;
+    }
+    const phase = (line.phase || "").trim();
+    if (phase === "register" || phase === "activation" || phase === "nnc1") {
+      current = phase;
+      buckets[phase].push(line);
+      continue;
+    }
+    const lv = (line.level || "").toUpperCase();
+    if (i === lastI && failBucket && (lv === "ERROR" || lv === "CRITICAL")) {
+      buckets[failBucket].push(line);
+      continue;
+    }
+    buckets[current].push(line);
+  }
+  return buckets;
 }
 
 export function logLineClass(level: string): string {

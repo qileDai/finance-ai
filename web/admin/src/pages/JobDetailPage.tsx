@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Image, Tag, Button, Modal, Tooltip } from "antd";
-import { api, type JobDetailResponse, type JobField } from "../api";
+import { api, type JobDetailResponse, type JobField, type JobLogLine } from "../api";
 import { formatDateTime } from "../format";
-import { asLogText, logLineClass, normalizeLogLines } from "../jobLog";
+import { asLogText, logLineClass, normalizeLogLines, splitLogPhases } from "../jobLog";
 import {
   JOB_FIELD_GROUP_LABELS,
   JOB_SHOT_PREVIEW,
@@ -49,6 +49,93 @@ type Props = {
   onRefresh: () => void;
 };
 
+function JobLogBlock({
+  title,
+  lines,
+  live,
+}: {
+  title: string;
+  lines: JobLogLine[];
+  live?: boolean;
+}) {
+  return (
+    <section className="reg-card">
+      <h2>
+        {title}
+        {live ? (
+          <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 400 }}>
+            {" "}
+            · 自动刷新中
+          </span>
+        ) : null}
+      </h2>
+      {lines.length ? (
+        <div className="job-log" role="log">
+          {lines.map((line, i) => {
+            const msg = asLogText(line.message);
+            const level = asLogText(line.level) || "INFO";
+            const time = asLogText(line.time);
+            return (
+              <div
+                key={`${i}-${time}-${msg.slice(0, 24)}`}
+                className={logLineClass(level)}
+              >
+                {time ? <span className="job-log-time">{time}</span> : null}
+                <span className="job-log-level">[{level}]</span>{" "}
+                <span className="job-log-msg">{msg}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="muted">暂无日志</p>
+      )}
+    </section>
+  );
+}
+
+function SummaryPairs({
+  items,
+}: {
+  items: Array<{ k: string; v: ReactNode; mono?: boolean }>;
+}) {
+  return (
+    <dl>
+      {items.map((it) => (
+        <div key={it.k}>
+          <dt>{it.k}</dt>
+          <dd className={it.mono ? "mono" : undefined}>{it.v || "-"}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function SummaryShot({
+  label,
+  src,
+}: {
+  label: string;
+  src: string | null;
+}) {
+  return (
+    <div className="job-summary-shot">
+      <span>{label}</span>
+      {src ? (
+        <Image
+          src={src}
+          width={96}
+          height={96}
+          style={{ objectFit: "cover" }}
+          preview={JOB_SHOT_PREVIEW}
+        />
+      ) : (
+        <span className="job-summary-shot-empty">无</span>
+      )}
+    </div>
+  );
+}
+
 export function JobDetailPage({ refreshKey, onRefresh }: Props) {
   const message = useMessageApi();
   const { id } = useParams();
@@ -85,9 +172,17 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
   }, [jobId, refreshKey]);
 
   const jobStatus = detail?.job?.status;
+  const activationStatus = detail?.job?.activation_status;
+  const formStatus = detail?.job?.form_status;
+  const logsLive =
+    jobStatus === "pending" ||
+    jobStatus === "running" ||
+    activationStatus === "pending" ||
+    activationStatus === "activating" ||
+    formStatus === "pending";
   useEffect(() => {
     if (!Number.isFinite(jobId) || jobId <= 0) return;
-    if (jobStatus !== "pending" && jobStatus !== "running") return;
+    if (!logsLive) return;
     let alive = true;
     const tick = () => {
       api
@@ -104,7 +199,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
       alive = false;
       window.clearInterval(id);
     };
-  }, [jobId, jobStatus]);
+  }, [jobId, logsLive]);
 
   function act(kind: "cancel" | "requeue") {
     if (kind === "cancel") {
@@ -168,6 +263,10 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
   const job = detail?.job;
   const fields: JobField[] = detail?.fields || [];
   const messages = normalizeLogLines(detail?.messages);
+  const logPhases = splitLogPhases(messages, {
+    formStatus: job?.form_status,
+    activationStatus: job?.activation_status,
+  });
   const progress = job?.progress || detail?.progress;
 
   const groupedFields: { group: string; label: string; items: JobField[] }[] = [];
@@ -228,7 +327,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
       <StateBox loading={loading} error={error} empty={!job}>
         {job ? (
           <div className="job-detail">
-            <section className="reg-card">
+            <section className="reg-card job-summary-card">
               <h2>
                 任务 #{job.id}{" "}
                 {progress?.label ? (
@@ -245,111 +344,83 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                   </Tooltip>
                 ) : null}
               </h2>
-              <dl className="job-meta">
-                <div>
-                  <dt>来源</dt>
-                  <dd className="mono">{job.source || "-"}</dd>
+              <div className="job-summary">
+                <div className="job-summary-row">
+                  <span>概要</span>
+                  <SummaryPairs
+                    items={[
+                      { k: "来源", v: job.source || "-", mono: true },
+                      { k: "公司", v: job.company_name || "-" },
+                      {
+                        k: "尝试",
+                        v: `${job.attempts ?? 0}/${job.max_attempts ?? 0}`,
+                        mono: true,
+                      },
+                      {
+                        k: "dry / submit",
+                        v: `${job.dry_run ? "Y" : "N"} / ${job.allow_submit ? "Y" : "N"}`,
+                        mono: true,
+                      },
+                    ]}
+                  />
                 </div>
-                <div>
-                  <dt>公司</dt>
-                  <dd>{job.company_name || "-"}</dd>
+                <div className="job-summary-row">
+                  <span>时间</span>
+                  <SummaryPairs
+                    items={[
+                      { k: "创建", v: formatDateTime(job.created_at), mono: true },
+                      { k: "开始", v: formatDateTime(job.started_at), mono: true },
+                      { k: "结束", v: formatDateTime(job.finished_at), mono: true },
+                      { k: "更新", v: formatDateTime(job.updated_at), mono: true },
+                    ]}
+                  />
                 </div>
-                <div>
-                  <dt>roomid</dt>
-                  <dd className="mono">{job.roomid}</dd>
+                <div className="job-summary-row">
+                  <span>耗时</span>
+                  <SummaryPairs
+                    items={[
+                      { k: "到 s03a", v: job.s03a_duration || "-", mono: true },
+                      { k: "整个任务", v: job.run_duration || "-", mono: true },
+                      { k: "nnc1填表", v: job.nnc1_duration || "-", mono: true },
+                    ]}
+                  />
                 </div>
-                <div>
-                  <dt>尝试</dt>
-                  <dd className="mono">
-                    {job.attempts ?? 0}/{job.max_attempts ?? 0}
-                  </dd>
+                <div className="job-summary-row">
+                  <span>路径</span>
+                  <SummaryPairs
+                    items={[
+                      { k: "roomid", v: job.roomid || "-", mono: true },
+                      { k: "材料包", v: job.package_dir || "-", mono: true },
+                    ]}
+                  />
                 </div>
-                <div>
-                  <dt>dry / submit</dt>
-                  <dd className="mono">
-                    {job.dry_run ? "Y" : "N"} / {job.allow_submit ? "Y" : "N"}
-                  </dd>
+                <div className="job-summary-shots">
+                  <SummaryShot
+                    label="核对截图"
+                    src={
+                      job.esubmit_screenshot_path
+                        ? api.jobScreenshotUrl(job.id, "esubmit")
+                        : null
+                    }
+                  />
+                  <SummaryShot
+                    label="成功截图"
+                    src={
+                      job.success_screenshot_path
+                        ? api.jobScreenshotUrl(job.id, "success")
+                        : null
+                    }
+                  />
+                  <SummaryShot
+                    label="失败截图"
+                    src={
+                      job.screenshot_path
+                        ? api.jobScreenshotUrl(job.id, "fail")
+                        : null
+                    }
+                  />
                 </div>
-                <div>
-                  <dt>创建</dt>
-                  <dd className="mono muted">{formatDateTime(job.created_at)}</dd>
-                </div>
-                <div>
-                  <dt>开始</dt>
-                  <dd className="mono muted">{formatDateTime(job.started_at)}</dd>
-                </div>
-                <div>
-                  <dt>结束</dt>
-                  <dd className="mono muted">{formatDateTime(job.finished_at)}</dd>
-                </div>
-                <div>
-                  <dt>到 s03a</dt>
-                  <dd className="mono muted">{job.s03a_duration || "-"}</dd>
-                </div>
-                <div>
-                  <dt>整个任务</dt>
-                  <dd className="mono muted">{job.run_duration || "-"}</dd>
-                </div>
-                <div>
-                  <dt>nnc1填表</dt>
-                  <dd className="mono muted">{job.nnc1_duration || "-"}</dd>
-                </div>
-                <div>
-                  <dt>更新</dt>
-                  <dd className="mono muted">{formatDateTime(job.updated_at)}</dd>
-                </div>
-                <div>
-                  <dt>材料包</dt>
-                  <dd className="mono muted">{job.package_dir || "-"}</dd>
-                </div>
-                <div>
-                  <dt>核对截图</dt>
-                  <dd>
-                    {job.esubmit_screenshot_path ? (
-                      <Image
-                        src={api.jobScreenshotUrl(job.id, "esubmit")}
-                        width={100}
-                        height={100}
-                        style={{ objectFit: "cover" }}
-                        preview={JOB_SHOT_PREVIEW}
-                      />
-                    ) : (
-                      "-"
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt>成功截图</dt>
-                  <dd>
-                    {job.success_screenshot_path ? (
-                      <Image
-                        src={api.jobScreenshotUrl(job.id, "success")}
-                        width={100}
-                        height={100}
-                        style={{ objectFit: "cover" }}
-                        preview={JOB_SHOT_PREVIEW}
-                      />
-                    ) : (
-                      "-"
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt>失败截图</dt>
-                  <dd>
-                    {job.screenshot_path ? (
-                      <Image
-                        src={api.jobScreenshotUrl(job.id, "fail")}
-                        width={400}
-                        style={{ objectFit: "contain" }}
-                        preview={JOB_SHOT_PREVIEW}
-                      />
-                    ) : (
-                      "-"
-                    )}
-                  </dd>
-                </div>
-              </dl>
+              </div>
               {job.last_error ? (
                 <div className="job-error">
                   <strong>失败原因</strong>
@@ -416,18 +487,18 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
               ) : null}
             </section>
 
-            <section className="reg-card">
+            <section className="reg-card job-fields-card">
               <h2>填写字段</h2>
               {groupedFields.length ? (
                 <div className="job-field-groups">
                   {groupedFields.map((g) => (
-                    <div key={g.group}>
+                    <div key={g.group} className="job-field-group">
                       <h3>{g.label}</h3>
-                      <dl className="job-meta">
+                      <dl className="job-field-list">
                         {g.items.map((f) => (
                           <div key={f.key}>
                             <dt>{f.label || f.key}</dt>
-                            <dd style={{ wordBreak: "break-all" }}>{f.value}</dd>
+                            <dd>{f.value}</dd>
                           </div>
                         ))}
                       </dl>
@@ -439,38 +510,24 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
               )}
             </section>
 
-            <section className="reg-card">
-              <h2>
-                步骤日志
-                {job.status === "running" || job.status === "pending" ? (
-                  <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 400 }}>
-                    {" "}
-                    · 自动刷新中
-                  </span>
-                ) : null}
-              </h2>
-              {messages.length ? (
-                <div className="job-log" role="log">
-                  {messages.map((line, i) => {
-                    const msg = asLogText(line.message);
-                    const level = asLogText(line.level) || "INFO";
-                    const time = asLogText(line.time);
-                    return (
-                      <div
-                        key={`${i}-${time}-${msg.slice(0, 24)}`}
-                        className={logLineClass(level)}
-                      >
-                        {time ? <span className="job-log-time">{time}</span> : null}
-                        <span className="job-log-level">[{level}]</span>{" "}
-                        <span className="job-log-msg">{msg}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="muted">暂无日志</p>
-              )}
-            </section>
+            <JobLogBlock
+              title="注册日志"
+              lines={logPhases.register}
+              live={job.status === "pending" || job.status === "running"}
+            />
+            <JobLogBlock
+              title="账号激活日志"
+              lines={logPhases.activation}
+              live={
+                job.activation_status === "pending" ||
+                job.activation_status === "activating"
+              }
+            />
+            <JobLogBlock
+              title="NNC1 填表日志"
+              lines={logPhases.nnc1}
+              live={job.form_status === "pending"}
+            />
           </div>
         ) : null}
       </StateBox>

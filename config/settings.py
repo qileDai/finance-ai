@@ -252,6 +252,10 @@ class Settings(BaseSettings):
     icris_activation_poll_seconds: float = 3600.0
     # 浏览器激活瞬时失败最多几次后标 failed
     icris_activation_max_attempts: int = 3
+    # 步骤日志（result_messages）保留天数；0=不清理
+    job_log_retention_days: int = 14
+    # 步骤日志清理间隔（秒）
+    job_log_cleanup_interval_seconds: float = 86400.0
 
     # ICRIS 账号凭证生成（用户名=英文名首字母+证件后5位+yt，密码=用户名+后缀）
     icris_credential_mode: str = "yingtai"  # "yingtai" initials+id+yt | "legacy" 旧规则

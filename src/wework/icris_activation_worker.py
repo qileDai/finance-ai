@@ -9,6 +9,14 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from src.wework.job_log_capture import (
+    ACTIVATION_LOG_BANNER,
+    ACTIVATION_LOG_PREFIXES,
+    NNC1_LOG_BANNER,
+    NNC1_LOG_PREFIXES,
+    JobLogSession,
+)
+
 logger = logging.getLogger(__name__)
 
 _ACTIVATION_MAX_ATTEMPTS = 3
@@ -286,92 +294,99 @@ class IcrisActivationWorker:
         from config.settings import settings
         from src.browser.cdp_session import SessionWatchdog, hold_cdp_lock
 
-        with hold_cdp_lock("nnc1"):
-            if self.store.has_active_registration_queue():
-                logger.info(
-                    "任务 #%s 拿锁后发现注册队列未空，放锁跳过 NNC1",
-                    job_id,
+        with JobLogSession(
+            self.store,
+            job_id,
+            name_prefixes=NNC1_LOG_PREFIXES,
+            banner=NNC1_LOG_BANNER,
+            phase="nnc1",
+        ):
+            with hold_cdp_lock("nnc1"):
+                if self.store.has_active_registration_queue():
+                    logger.info(
+                        "任务 #%s 拿锁后发现注册队列未空，放锁跳过 NNC1",
+                        job_id,
+                    )
+                    return
+                fill = float(
+                    getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
                 )
-                return
-            fill = float(
-                getattr(settings, "icris_cdp_session_timeout_seconds", 1500) or 1500
-            )
-            keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
-            wd = SessionWatchdog(fill + keep + 30.0)
-            wd.start()
-            from src.storage.db import format_job_run_duration
+                keep = float(getattr(settings, "browser_keep_open_seconds", 15) or 15)
+                wd = SessionWatchdog(fill + keep + 30.0)
+                wd.start()
+                from src.storage.db import format_job_run_duration
 
-            t0 = time.monotonic()
-            try:
-                ok, detail = asyncio.run(
-                    bot.run(
+                t0 = time.monotonic()
+                try:
+                    ok, detail = asyncio.run(
+                        bot.run(
+                            account,
+                            data,
+                            force_isolated=False,
+                            screenshot_path=str(shot_file),
+                        )
+                    )
+                except RuntimeError:
+                    ok, detail = self._run_in_thread(
+                        bot.run,
                         account,
                         data,
                         force_isolated=False,
                         screenshot_path=str(shot_file),
+                        join_timeout=fill + keep + 120.0,
                     )
-                )
-            except RuntimeError:
-                ok, detail = self._run_in_thread(
-                    bot.run,
-                    account,
-                    data,
-                    force_isolated=False,
-                    screenshot_path=str(shot_file),
-                    join_timeout=fill + keep + 120.0,
-                )
-            except Exception as e:
-                ok, detail = False, str(e)
-            finally:
-                wd.stop()
-            nnc1_duration = format_job_run_duration(time.monotonic() - t0)
+                except Exception as e:
+                    ok, detail = False, str(e)
+                finally:
+                    wd.stop()
+                nnc1_duration = format_job_run_duration(time.monotonic() - t0)
 
-        prelim_notified = bool(getattr(bot, "_prelim_notified", False))
-        from src.browser.icris_errors import is_nnc1_loading_timeout
+            prelim_notified = bool(getattr(bot, "_prelim_notified", False))
+            from src.browser.icris_errors import is_nnc1_loading_timeout
 
-        if not ok and is_nnc1_loading_timeout(detail):
-            boosted = self.store.requeue_job_form_loading_timeout(job_id)
-            row = self.store.get_registration_job(job_id) or {}
-            if str(row.get("form_status") or "") == "pending":
-                logger.info(
-                    "任务 #%s 载入中超时，已插队从登录重跑 boost=%s retries=%s",
-                    job_id,
-                    (boosted or row).get("form_boost"),
-                    (boosted or row).get("nnc1_loading_retries"),
-                )
+            if not ok and is_nnc1_loading_timeout(detail):
+                boosted = self.store.requeue_job_form_loading_timeout(job_id)
+                row = self.store.get_registration_job(job_id) or {}
+                if str(row.get("form_status") or "") == "pending":
+                    logger.info(
+                        "任务 #%s 载入中超时，已插队从登录重跑 boost=%s retries=%s",
+                        job_id,
+                        (boosted or row).get("form_boost"),
+                        (boosted or row).get("nnc1_loading_retries"),
+                    )
+                    return
+
+            if self.store.job_form_outcome_written(job_id):
+                if ok:
+                    logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
+                    if not prelim_notified:
+                        self._notify_form_result(job, ok=True, detail=str(shot_file))
+                else:
+                    logger.error("任务 #%s 填表失败: %s", job_id, detail)
+                    if not prelim_notified:
+                        self._notify_form_result(job, ok=False, detail=detail)
                 return
 
-        if self.store.job_form_outcome_written(job_id):
             if ok:
+                self.store.mark_job_form_filled(
+                    job_id, str(shot_file), nnc1_duration=nnc1_duration
+                )
                 logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
                 if not prelim_notified:
                     self._notify_form_result(job, ok=True, detail=str(shot_file))
             else:
+                fail_shot = str(shot_file) if shot_file.is_file() else ""
+                self.store.mark_job_form_failed(
+                    job_id,
+                    f"填表失败: {detail}",
+                    fail_shot,
+                    nnc1_duration=nnc1_duration,
+                )
                 logger.error("任务 #%s 填表失败: %s", job_id, detail)
+                if fail_shot:
+                    logger.info("任务 #%s 填表失败截图: %s", job_id, fail_shot)
                 if not prelim_notified:
                     self._notify_form_result(job, ok=False, detail=detail)
-            return
-
-        if ok:
-            self.store.mark_job_form_filled(
-                job_id, str(shot_file), nnc1_duration=nnc1_duration
-            )
-            logger.info("任务 #%s 填表成功，截图: %s", job_id, shot_file)
-            if not prelim_notified:
-                self._notify_form_result(job, ok=True, detail=str(shot_file))
-        else:
-            fail_shot = str(shot_file) if shot_file.is_file() else ""
-            self.store.mark_job_form_failed(
-                job_id,
-                f"填表失败: {detail}",
-                fail_shot,
-                nnc1_duration=nnc1_duration,
-            )
-            logger.error("任务 #%s 填表失败: %s", job_id, detail)
-            if fail_shot:
-                logger.info("任务 #%s 填表失败截图: %s", job_id, fail_shot)
-            if not prelim_notified:
-                self._notify_form_result(job, ok=False, detail=detail)
 
     def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:
         """填表结果通知到企微内部群（无配置则跳过）。优先群机器人 Webhook。"""
@@ -539,40 +554,49 @@ class IcrisActivationWorker:
             logger.error("任务 #%s %s", job_id, url_err)
             return False
 
-        logger.info(
-            "任务 #%s 开始浏览器激活（账号 %s）",
+        with JobLogSession(
+            self.store,
             job_id,
-            icris_user,
-        )
-        ok, detail = self._run_activate_browser(open_url, icris_user, icris_pass)
+            name_prefixes=ACTIVATION_LOG_PREFIXES,
+            banner=ACTIVATION_LOG_BANNER,
+            phase="activation",
+        ):
+            logger.info(
+                "任务 #%s 开始浏览器激活（账号 %s）",
+                job_id,
+                icris_user,
+            )
+            ok, detail = self._run_activate_browser(open_url, icris_user, icris_pass)
 
-        if ok:
-            self.store.mark_job_activated(job_id)
-            logger.info("任务 #%s 激活成功", job_id)
-            return True
+            if ok:
+                self.store.mark_job_activated(job_id)
+                logger.info("任务 #%s 激活成功", job_id)
+                return True
 
-        kind = _activation_fail_kind(str(detail or ""))
-        attempts = int(job.get("activation_attempts") or 0)
-        if kind in ("credential", "bad_link", "missing_creds"):
-            self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
-            logger.error("任务 #%s 激活失败: %s", job_id, detail)
-            return False
-
-        if kind == "stale_page" or attempts >= self._max_attempts:
-            if attempts >= self._max_attempts and kind != "stale_page":
-                self.store.mark_job_activation_failed(
-                    job_id, f"激活失败（已重试 {attempts} 次）: {detail}"
-                )
-                logger.error("任务 #%s 激活失败耗尽重试: %s", job_id, detail)
+            kind = _activation_fail_kind(str(detail or ""))
+            attempts = int(job.get("activation_attempts") or 0)
+            if kind in ("credential", "bad_link", "missing_creds"):
+                self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
+                logger.error("任务 #%s 激活失败: %s", job_id, detail)
                 return False
-            self.store.release_job_activation_claim(job_id)
-            self.store.clear_job_activation_url(job_id)
-            logger.warning("任务 #%s 链接失效，已清空等下次扫信: %s", job_id, detail)
-            return False
 
-        self.store.release_job_activation_claim(job_id)
-        logger.warning("任务 #%s 激活瞬时失败，保持链接待重试: %s", job_id, detail)
-        return False
+            if kind == "stale_page" or attempts >= self._max_attempts:
+                if attempts >= self._max_attempts and kind != "stale_page":
+                    self.store.mark_job_activation_failed(
+                        job_id, f"激活失败（已重试 {attempts} 次）: {detail}"
+                    )
+                    logger.error("任务 #%s 激活失败耗尽重试: %s", job_id, detail)
+                    return False
+                self.store.release_job_activation_claim(job_id)
+                self.store.clear_job_activation_url(job_id)
+                logger.warning(
+                    "任务 #%s 链接失效，已清空等下次扫信: %s", job_id, detail
+                )
+                return False
+
+            self.store.release_job_activation_claim(job_id)
+            logger.warning("任务 #%s 激活瞬时失败，保持链接待重试: %s", job_id, detail)
+            return False
 
     def _run_activate_browser(
         self, url: str, username: str, password: str

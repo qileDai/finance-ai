@@ -40,6 +40,45 @@ def parse_job_run_duration(text: str) -> int | None:
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
+def parse_job_result_messages(raw: Any) -> list[dict[str, Any]]:
+    """Normalize registration_jobs.result_messages JSON into structured lines."""
+    import json
+
+    parsed: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            msg = str(item.get("message") or "").strip()
+            if not msg:
+                continue
+            level = str(item.get("level") or "INFO").upper()
+            if level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+                level = "INFO"
+            entry: dict[str, Any] = {"level": level, "message": msg}
+            t = str(item.get("time") or "").strip()
+            if t:
+                entry["time"] = t
+            phase = str(item.get("phase") or "").strip()
+            if phase:
+                entry["phase"] = phase
+            out.append(entry)
+        else:
+            text = str(item or "").strip()
+            if text:
+                out.append({"level": "INFO", "message": text})
+    return out
+
+
 def _parse_iso_dt(value: str) -> datetime | None:
     raw = (value or "").strip()
     if not raw:
@@ -1455,6 +1494,12 @@ class ExternalGroupStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_job_result_messages(self, job_id: int) -> list[dict[str, Any]]:
+        row = self.get_registration_job(job_id)
+        if not row:
+            return []
+        return parse_job_result_messages(row.get("result_messages"))
+
     def enqueue_registration_job(
         self,
         roomid: str,
@@ -2250,7 +2295,8 @@ class ExternalGroupStore:
                 conn.execute(
                     """UPDATE registration_jobs
                        SET form_status='filled', form_filled_at=?,
-                           form_screenshot_path=?, nnc1_duration=?, updated_at=?
+                           form_screenshot_path=?, nnc1_duration=?,
+                           last_error='', updated_at=?
                        WHERE id=?""",
                     (now, screenshot_path, dur, now, job_id),
                 )
@@ -2258,7 +2304,7 @@ class ExternalGroupStore:
                 conn.execute(
                     """UPDATE registration_jobs
                        SET form_status='filled', form_filled_at=?,
-                           form_screenshot_path=?, updated_at=?
+                           form_screenshot_path=?, last_error='', updated_at=?
                        WHERE id=?""",
                     (now, screenshot_path, now, job_id),
                 )
@@ -2374,6 +2420,40 @@ class ExternalGroupStore:
                 """,
                 (msgs, now, job_id),
             )
+
+    def purge_old_job_result_messages(self, days: int) -> int:
+        """Clear step logs on finished jobs older than ``days``. Does not delete rows.
+
+        Skips pending/running/awaiting_review, activation pending/activating,
+        and form pending. ``days <= 0`` disables cleanup.
+        """
+        n_days = int(days or 0)
+        if n_days <= 0:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=n_days)).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE registration_jobs
+                SET result_messages = '[]'
+                WHERE IFNULL(result_messages, '') NOT IN ('', '[]')
+                  AND IFNULL(updated_at, '') != ''
+                  AND updated_at < ?
+                  AND IFNULL(status, '') NOT IN ('pending', 'running', 'awaiting_review')
+                  AND IFNULL(activation_status, '') NOT IN ('pending', 'activating')
+                  AND IFNULL(form_status, '') != 'pending'
+                """,
+                (cutoff,),
+            )
+            return int(cur.rowcount or 0)
+
+    def wal_checkpoint_truncate(self) -> None:
+        """Truncate WAL after log cleanup; no-op if journal is not WAL."""
+        with self._conn() as conn:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
 
     def mark_job_failed(
         self,

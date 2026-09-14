@@ -68,3 +68,24 @@
 | `CHROME_CDP_URL` | `http://127.0.0.1:9222` | CDP 地址 |
 
 Worker 应只在 **bot** 进程启用；admin 容器请关 `ICRIS_WORKER_ENABLED`，避免两处抢同一把锁和同一台 Chrome。
+
+## 离线调度回归
+
+验证「入队 → 认领 → 激活 → NNC1 让路」是否通，**不要**用 CLI 旁路，也**不要**把 Mock「确认」当成已经跑完 ICRIS：
+
+- `python main.py wework-external-mock --text "确认"` 只写入 `registration_jobs`（`pending`），须有 `wework-external-bot`（或 admin 且 Worker 开启）才会认领。
+- `python main.py --step register` / `run --step register` **不走**队列，不能用来验调度。
+
+离线（不打 ICRIS / IMAP / 9222）：
+
+```powershell
+python -m unittest tests.test_job_scheduler_e2e -v
+```
+
+覆盖：混源 FIFO 整链、注册未完成不 drain、队列空立刻 drain、NNC1 让路、退避不挡 / 审核挡、注册可重试 vs 不重试、取消、admin 重跑注册与填表、进程回收、激活失败分类、同 room 幂等入队与拒绝不认领。
+
+队列规则与 CDP 锁的分项单测仍是：
+
+```powershell
+python -m unittest tests.test_cdp_queue tests.test_icris_activation_worker tests.test_register_loading_timeout tests.test_nnc1_loading_requeue -v
+```

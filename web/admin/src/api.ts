@@ -152,6 +152,7 @@ export type JobLogLine = {
   level: string;
   message: string;
   time?: string;
+  phase?: string;
 };
 
 export type JobDetailResponse = ApiOk<{

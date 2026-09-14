@@ -195,12 +195,14 @@ class TestNnc1DurationStore(unittest.TestCase):
 
     def test_form_filled_writes_nnc1_duration(self):
         job_id = self._enqueued_id("room-nnc1-ok")
+        self.store.mark_job_form_failed(job_id, "填表失败: 初步检查未通过: 拒絕")
         self.store.mark_job_form_filled(
             job_id, "/tmp/form.png", nnc1_duration="3分12秒"
         )
         row = self.store.get_registration_job(job_id)
         self.assertEqual(row["form_status"], "filled")
         self.assertEqual(row["nnc1_duration"], "3分12秒")
+        self.assertEqual(str(row.get("last_error") or ""), "")
 
     def test_form_failed_writes_duration_and_retry_clears(self):
         job_id = self._enqueued_id("room-nnc1-fail")

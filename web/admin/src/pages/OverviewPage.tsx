@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Card, Radio } from "antd";
 import type { EChartsOption } from "echarts";
 import { api, type DurationStats, type OverviewResponse, type StageStats } from "../api";
@@ -13,8 +13,13 @@ const COLORS = {
   muted: "#5b6b7c",
   ink: "#1c2430",
   admin: "#1677ff",
-  wework: "#0f8a6a",
-  other: "#8fa0b3",
+};
+
+const AREA = {
+  muted: "rgba(91, 107, 124, 0.10)",
+  ok: "rgba(2, 122, 72, 0.12)",
+  admin: "rgba(22, 119, 255, 0.10)",
+  accent: "rgba(15, 138, 106, 0.12)",
 };
 
 const EMPTY_DUR: DurationStats = {
@@ -59,8 +64,37 @@ function axisStyle() {
   return {
     axisLabel: { color: COLORS.muted },
     axisLine: { lineStyle: { color: "#c9d4df" } },
-    splitLine: { lineStyle: { color: "#e8eef3" } },
+    splitLine: { lineStyle: { color: "#e8eef3", type: "dashed" as const } },
   };
+}
+
+function cardTitle(title: string, caption?: string): ReactNode {
+  return (
+    <span className="ops-card-title">
+      {title}
+      {caption ? <span className="ops-card-caption">{caption}</span> : null}
+    </span>
+  );
+}
+
+function OpsKpi({
+  label,
+  value,
+  sub,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string | number;
+  sub?: string;
+  tone?: "ok" | "warn" | "neutral";
+}) {
+  return (
+    <div className={`ops-kpi is-${tone}`}>
+      <div className="ops-kpi-label">{label}</div>
+      <div className="ops-kpi-value">{value}</div>
+      {sub ? <div className="ops-kpi-sub">{sub}</div> : null}
+    </div>
+  );
 }
 
 function backlogOption(backlog: OverviewResponse["backlog"]): EChartsOption {
@@ -75,7 +109,7 @@ function backlogOption(backlog: OverviewResponse["backlog"]): EChartsOption {
   const empty = values.every((n) => n === 0);
   return {
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-    grid: { left: 96, right: 24, top: 16, bottom: 28 },
+    grid: { left: 96, right: 28, top: 8, bottom: 24 },
     xAxis: { type: "value", minInterval: 1, ...axisStyle() },
     yAxis: {
       type: "category",
@@ -89,8 +123,8 @@ function backlogOption(backlog: OverviewResponse["backlog"]): EChartsOption {
       {
         type: "bar",
         data: values,
-        barWidth: 16,
-        itemStyle: { color: COLORS.accent, borderRadius: [0, 4, 4, 0] },
+        barWidth: 14,
+        itemStyle: { color: COLORS.accent, borderRadius: [0, 6, 6, 0] },
         label: { show: !empty, position: "right", color: COLORS.muted },
       },
     ],
@@ -124,7 +158,7 @@ function stageBarOption(stages: OverviewResponse["stages"]): EChartsOption {
     },
     legend: { data: ["成功", "失败"], top: 0, textStyle: { color: COLORS.muted } },
     grid: { left: 48, right: 16, top: 40, bottom: 28 },
-    xAxis: { type: "category", data: labels, axisLabel: { color: COLORS.ink } },
+    xAxis: { type: "category", data: labels, axisLabel: { color: COLORS.ink }, axisTick: { show: false } },
     yAxis: { type: "value", minInterval: 1, ...axisStyle() },
     series: [
       {
@@ -132,14 +166,16 @@ function stageBarOption(stages: OverviewResponse["stages"]): EChartsOption {
         type: "bar",
         stack: "stage",
         data: success,
-        itemStyle: { color: COLORS.ok },
+        barMaxWidth: 36,
+        itemStyle: { color: COLORS.ok, borderRadius: [0, 0, 0, 0] },
       },
       {
         name: "失败",
         type: "bar",
         stack: "stage",
         data: failed,
-        itemStyle: { color: COLORS.danger },
+        barMaxWidth: 36,
+        itemStyle: { color: COLORS.danger, borderRadius: [6, 6, 0, 0] },
       },
     ],
     graphic: emptyGraphic(empty),
@@ -175,12 +211,30 @@ function durationOption(stages: OverviewResponse["stages"]): EChartsOption {
     },
     legend: { data: ["平均", "P50", "P95"], top: 0, textStyle: { color: COLORS.muted } },
     grid: { left: 48, right: 16, top: 40, bottom: 28 },
-    xAxis: { type: "category", data: labels, axisLabel: { color: COLORS.ink } },
+    xAxis: { type: "category", data: labels, axisLabel: { color: COLORS.ink }, axisTick: { show: false } },
     yAxis: { type: "value", name: "分钟", ...axisStyle() },
     series: [
-      { name: "平均", type: "bar", data: avg, itemStyle: { color: COLORS.accent } },
-      { name: "P50", type: "bar", data: p50, itemStyle: { color: COLORS.admin } },
-      { name: "P95", type: "bar", data: p95, itemStyle: { color: COLORS.warn } },
+      {
+        name: "平均",
+        type: "bar",
+        data: avg,
+        barMaxWidth: 18,
+        itemStyle: { color: COLORS.accent, borderRadius: [4, 4, 0, 0] },
+      },
+      {
+        name: "P50",
+        type: "bar",
+        data: p50,
+        barMaxWidth: 18,
+        itemStyle: { color: COLORS.admin, borderRadius: [4, 4, 0, 0] },
+      },
+      {
+        name: "P95",
+        type: "bar",
+        data: p95,
+        barMaxWidth: 18,
+        itemStyle: { color: COLORS.warn, borderRadius: [4, 4, 0, 0] },
+      },
     ],
     graphic: emptyGraphic(empty),
   };
@@ -196,10 +250,12 @@ function trendOption(daily: OverviewResponse["daily"]): EChartsOption {
     legend: {
       data: ["创建", "注册成功", "激活成功", "填表成功"],
       top: 0,
-      textStyle: { color: COLORS.muted },
+      itemWidth: 12,
+      itemGap: 10,
+      textStyle: { color: COLORS.muted, fontSize: 12 },
     },
     grid: { left: 48, right: 20, top: 40, bottom: 28 },
-    xAxis: { type: "category", data: dates, axisLabel: { color: COLORS.muted } },
+    xAxis: { type: "category", data: dates, axisLabel: { color: COLORS.muted }, boundaryGap: false },
     yAxis: { type: "value", minInterval: 1, ...axisStyle() },
     series: [
       {
@@ -207,52 +263,44 @@ function trendOption(daily: OverviewResponse["daily"]): EChartsOption {
         type: "line",
         data: daily.map((d) => d.created),
         smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2 },
         itemStyle: { color: COLORS.muted },
+        areaStyle: { color: AREA.muted },
       },
       {
         name: "注册成功",
         type: "line",
         data: daily.map((d) => d.succeeded),
         smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2 },
         itemStyle: { color: COLORS.ok },
+        areaStyle: { color: AREA.ok },
       },
       {
         name: "激活成功",
         type: "line",
         data: daily.map((d) => d.activated),
         smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2 },
         itemStyle: { color: COLORS.admin },
+        areaStyle: { color: AREA.admin },
       },
       {
         name: "填表成功",
         type: "line",
         data: daily.map((d) => d.form_filled),
         smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2 },
         itemStyle: { color: COLORS.accent },
-      },
-    ],
-    graphic: emptyGraphic(empty),
-  };
-}
-
-function pieOption(
-  items: { name: string; value: number; color: string }[],
-): EChartsOption {
-  const empty = items.every((i) => i.value === 0);
-  return {
-    tooltip: { trigger: "item", formatter: "{b}: {c}（{d}%）" },
-    legend: { bottom: 0, textStyle: { color: COLORS.muted } },
-    series: [
-      {
-        type: "pie",
-        radius: ["42%", "68%"],
-        center: ["50%", "44%"],
-        data: items.map((i) => ({
-          name: i.name,
-          value: i.value,
-          itemStyle: { color: i.color },
-        })),
-        label: { color: COLORS.ink, formatter: empty ? "" : "{b}\n{d}%" },
+        areaStyle: { color: AREA.accent },
       },
     ],
     graphic: emptyGraphic(empty),
@@ -312,84 +360,75 @@ export function OverviewPage({ refreshKey }: { refreshKey: number }) {
       activation: EMPTY_STAGE,
       form: EMPTY_STAGE,
     };
-    const extra = data?.extras ?? {
-      created: 0,
-      e2e_filled: 0,
-      e2e_rate: 0,
-      e2e_avg_minutes: 0,
-      review_rejected: 0,
-      review_approved: 0,
-      review_reject_rate: 0,
-      id_already_registered: 0,
-      form_retries: 0,
-      source: { admin: 0, wework: 0, other: 0 },
-    };
     const daily = data?.daily ?? [];
     return {
       backlog: backlogOption(backlog),
       stages: stageBarOption(stages),
       duration: durationOption(stages),
       trend: trendOption(daily),
-      source: pieOption([
-        { name: "后台快速注册", value: extra.source?.admin ?? 0, color: COLORS.admin },
-        { name: "企微群", value: extra.source?.wework ?? 0, color: COLORS.wework },
-        { name: "其他", value: extra.source?.other ?? 0, color: COLORS.other },
-      ]),
-      e2e: pieOption([
-        { name: "端到端完成", value: extra.e2e_filled, color: COLORS.ok },
-        {
-          name: "未完成",
-          value: Math.max(0, extra.created - extra.e2e_filled),
-          color: COLORS.other,
-        },
-      ]),
     };
   }, [data]);
 
   return (
     <StateBox loading={loading} error={error}>
-      <div className="ops-stats-toolbar">
-        <Radio.Group
-          optionType="button"
-          buttonStyle="solid"
-          value={hours}
-          options={HOURS_OPTIONS}
-          onChange={(e) => setHours(Number(e.target.value))}
-        />
-        <span className="ops-stats-meta">
-          窗口内创建 {extras.created} · 端到端完成 {extras.e2e_filled}（
-          {pct(extras.e2e_rate)}）· 审核拒绝 {extras.review_rejected}（
-          {pct(extras.review_reject_rate)}）· 证件已注册 {extras.id_already_registered}{" "}
-          · 填表重试 {extras.form_retries} · 端到端平均 {Number(extras.e2e_avg_minutes || 0).toFixed(1)} 分
-        </span>
-      </div>
+      <div className="ops-stats">
+        <div className="ops-stats-toolbar">
+          <Radio.Group
+            optionType="button"
+            buttonStyle="solid"
+            value={hours}
+            options={HOURS_OPTIONS}
+            onChange={(e) => setHours(Number(e.target.value))}
+          />
+          <span className="ops-stats-meta">积压为实时快照，其余为窗口内</span>
+        </div>
 
-      <div className="ops-stats-grid">
-        <Card size="small" title="当前积压" extra="实时队列">
-          <OpsChart option={charts.backlog} />
-        </Card>
-        <Card size="small" title="各环节成功 / 失败">
-          <OpsChart option={charts.stages} />
-        </Card>
-        <Card
-          size="small"
-          title="各环节耗时"
-          extra={`S03A 平均 ${Number(s03aAvg || 0).toFixed(1)} 分`}
-        >
-          <OpsChart option={charts.duration} />
-        </Card>
-        <Card size="small" title="按日趋势">
-          <OpsChart option={charts.trend} />
-        </Card>
-      </div>
+        <div className="ops-kpi-row">
+          <OpsKpi label="窗口创建" value={extras.created} />
+          <OpsKpi
+            label="端到端完成"
+            value={extras.e2e_filled}
+            sub={`完成率 ${pct(extras.e2e_rate)}`}
+            tone="ok"
+          />
+          <OpsKpi
+            label="端到端平均耗时"
+            value={Number(extras.e2e_avg_minutes || 0).toFixed(1)}
+            sub="分钟"
+          />
+          <OpsKpi
+            label="审核拒绝"
+            value={extras.review_rejected}
+            sub={`拒绝率 ${pct(extras.review_reject_rate)}`}
+            tone={extras.review_rejected > 0 ? "warn" : "neutral"}
+          />
+          <OpsKpi label="证件已注册" value={extras.id_already_registered} />
+          <OpsKpi label="填表重试" value={extras.form_retries} />
+        </div>
 
-      <div className="ops-stats-pies">
-        <Card size="small" title="来源分布">
-          <OpsChart option={charts.source} height={280} />
-        </Card>
-        <Card size="small" title="端到端完成" extra={`完成率 ${pct(extras.e2e_rate)}`}>
-          <OpsChart option={charts.e2e} height={280} />
-        </Card>
+        <div className="ops-stats-grid">
+          <Card size="small" title={cardTitle("当前积压", "实时队列快照")}>
+            <OpsChart option={charts.backlog} height={280} />
+          </Card>
+          <Card size="small" title={cardTitle("按日趋势", "窗口内按日汇总")}>
+            <OpsChart option={charts.trend} height={280} />
+          </Card>
+        </div>
+
+        <div className="ops-stats-grid">
+          <Card size="small" title={cardTitle("各环节成功 / 失败", "窗口内件数")}>
+            <OpsChart option={charts.stages} />
+          </Card>
+          <Card
+            size="small"
+            title={cardTitle(
+              "各环节耗时",
+              `S03A 平均 ${Number(s03aAvg || 0).toFixed(1)} 分 · 不含审核等待`,
+            )}
+          >
+            <OpsChart option={charts.duration} />
+          </Card>
+        </div>
       </div>
     </StateBox>
   );
