@@ -36,7 +36,7 @@ type Props = {
   onRefresh: () => void;
 };
 
-const POLL_SEC = 20;
+const POLL_SEC = 10;
 const PAGE_SIZE = 10;
 
 async function copyText(text: string): Promise<boolean> {

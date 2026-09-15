@@ -49,6 +49,9 @@ _POLL_MS = 100
 _FORM_PAUSE_MS = 120
 _SPIN_TIMEOUT_MS = 45000
 _STEP_READY_MS = 30000
+_S04_LOCATOR_MS = 3000
+_S04_RADIO_WAIT_MS = 20000
+_S04_RADIO_LABEL_MAX = 200
 
 REGISTRATION_BASE = (
     "https://www.e-services.cr.gov.hk/ICRIS3EF/system/registration/s01.do"
@@ -3588,7 +3591,10 @@ class IcrisRegistrationBot:
                     " | ancestor::*[contains(@class,'ant-radio-wrapper')][1]"
                 )
                 if await wrapper.count() > 0:
-                    txt = await wrapper.first.inner_text()
+                    try:
+                        txt = await wrapper.first.inner_text(timeout=_S04_LOCATOR_MS)
+                    except Exception:
+                        continue
                     if pattern.search(txt):
                         return True
         else:
@@ -3612,11 +3618,18 @@ class IcrisRegistrationBot:
         ]
         for sel in selectors:
             items = page.locator(sel).filter(has_text=regex)
-            for i in range(await items.count()):
+            try:
+                n = await items.count()
+            except Exception:
+                continue
+            for i in range(n):
                 item = items.nth(i)
-                if not await item.is_visible():
+                try:
+                    if not await item.is_visible():
+                        continue
+                    txt = await item.inner_text(timeout=_S04_LOCATOR_MS)
+                except Exception:
                     continue
-                txt = await item.inner_text()
                 if regex.search(txt) and len(txt) < 800:
                     return item
         return page.locator("form, body").first
@@ -3643,16 +3656,23 @@ class IcrisRegistrationBot:
         ]
 
         for loc in candidates:
-            for i in range(await loc.count()):
+            try:
+                n = await loc.count()
+            except Exception:
+                continue
+            for i in range(n):
                 item = loc.nth(i)
-                if not await item.is_visible():
+                try:
+                    if not await item.is_visible():
+                        continue
+                    txt = (await item.inner_text(timeout=_S04_LOCATOR_MS)).strip()
+                except Exception:
                     continue
-                txt = (await item.inner_text()).strip()
                 if re.search(r"机构|機構|团体|團體|法人|公司|组织|組織", txt, re.I):
                     continue
                 try:
-                    await item.scroll_into_view_if_needed()
-                    await item.click(timeout=3000)
+                    await item.scroll_into_view_if_needed(timeout=_S04_LOCATOR_MS)
+                    await item.click(timeout=_S04_LOCATOR_MS)
                     await page.wait_for_timeout(400)
                     if await self._verify_option_selected(page, option_pattern, option_type="radio"):
                         logger.info("已选择 [%s] → %s", section_label, option_pattern)
@@ -3662,9 +3682,13 @@ class IcrisRegistrationBot:
 
                 # Ant Design 隐藏 input，force check
                 inp = item.locator("input[type='radio']").first
-                if await inp.count() > 0:
+                try:
+                    has_inp = await inp.count() > 0
+                except Exception:
+                    has_inp = False
+                if has_inp:
                     try:
-                        await inp.check(force=True)
+                        await inp.check(force=True, timeout=_S04_LOCATOR_MS)
                         await inp.dispatch_event("change")
                         await inp.dispatch_event("click")
                         await page.wait_for_timeout(400)
@@ -3677,41 +3701,47 @@ class IcrisRegistrationBot:
                         pass
 
         # JS 回退：在用户类别区域内点击「个人」
-        ok = await page.evaluate(
-            """([sectionLabel, optionText]) => {
-                const root = document.body || document.documentElement;
-                if (!root) return false;
-                const secRe = new RegExp(sectionLabel, 'i');
-                const optRe = new RegExp(optionText, 'i');
-                const excludeRe = /机构|機構|团体|團體|法人|公司|组织|組織/i;
-                const blocks = [...root.querySelectorAll(
-                    '.ant-form-item, .ant-row, tr, fieldset, .form-group'
-                )];
-                const section = blocks.find(el => secRe.test(el.innerText || ''));
-                const scope = section || root;
-                const wrappers = [...scope.querySelectorAll('.ant-radio-wrapper, label')];
-                for (const w of wrappers) {
-                    const t = (w.innerText || '').trim();
-                    if (!optRe.test(t) || excludeRe.test(t)) continue;
-                    w.click();
-                    const inp = w.querySelector('input[type=radio]') || w.control;
-                    if (inp) {
-                        inp.checked = true;
-                        inp.dispatchEvent(new Event('input', { bubbles: true }));
-                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        try:
+            ok = await self._evaluate_capped(
+                page,
+                """([sectionLabel, optionText]) => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return false;
+                    const secRe = new RegExp(sectionLabel, 'i');
+                    const optRe = new RegExp(optionText, 'i');
+                    const excludeRe = /机构|機構|团体|團體|法人|公司|组织|組織/i;
+                    const blocks = [...root.querySelectorAll(
+                        '.ant-form-item, .ant-row, tr, fieldset, .form-group'
+                    )];
+                    const section = blocks.find(el => secRe.test(el.innerText || ''));
+                    const scope = section || root;
+                    const wrappers = [...scope.querySelectorAll('.ant-radio-wrapper, label')];
+                    for (const w of wrappers) {
+                        const t = (w.innerText || '').trim();
+                        if (!optRe.test(t) || excludeRe.test(t)) continue;
+                        w.click();
+                        const inp = w.querySelector('input[type=radio]') || w.control;
+                        if (inp) {
+                            inp.checked = true;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        const checked = scope.querySelector(
+                            '.ant-radio-wrapper-checked input[type=radio], input[type=radio]:checked'
+                        );
+                        if (checked) {
+                            const wrap = checked.closest('.ant-radio-wrapper') || checked.parentElement;
+                            return optRe.test((wrap && wrap.innerText) || '');
+                        }
                     }
-                    const checked = scope.querySelector(
-                        '.ant-radio-wrapper-checked input[type=radio], input[type=radio]:checked'
-                    );
-                    if (checked) {
-                        const wrap = checked.closest('.ant-radio-wrapper') || checked.parentElement;
-                        return optRe.test((wrap && wrap.innerText) || '');
-                    }
-                }
-                return false;
-            }""",
-            [section_label, option_pattern],
-        )
+                    return false;
+                }""",
+                [section_label, option_pattern],
+                timeout_ms=_S04_LOCATOR_MS * 2,
+            )
+        except Exception as exc:
+            logger.debug("分区 radio JS 回退失败 [%s]: %s", section_label, exc)
+            ok = False
         if ok:
             logger.info("JS 已选择 [%s] → %s", section_label, option_pattern)
             await page.wait_for_timeout(400)
@@ -5617,33 +5647,109 @@ class IcrisRegistrationBot:
         if await self._verify_option_selected(page, text_pattern, option_type="radio"):
             logger.info("已选中 radio: %s", text_pattern)
             return True
-        if await self._select_radio_in_section(page, r".*", text_pattern):
+        section_pat = (
+            r"身分證明|身份证明|證明文件提交方式|证明文件提交方式|"
+            r"證明文件|证明文件"
+        )
+        if await self._select_radio_in_section(page, section_pat, text_pattern):
             return True
         opt_re = re.compile(text_pattern, re.I)
         wrappers = page.locator(".ant-radio-wrapper, label").filter(has_text=opt_re)
-        for i in range(await wrappers.count()):
+        try:
+            n = await wrappers.count()
+        except Exception:
+            return False
+        for i in range(n):
             item = wrappers.nth(i)
-            if not await item.is_visible():
+            try:
+                if not await item.is_visible():
+                    continue
+                txt = (await item.inner_text(timeout=_S04_LOCATOR_MS)).strip()
+            except Exception:
                 continue
-            txt = (await item.inner_text()).strip()
             if not opt_re.search(txt):
                 continue
             # 避免「網上提交」误点到整段说明
-            if len(txt) > 80 and not re.search(r"^網上提交|^网上提交", txt):
+            if len(txt) > _S04_RADIO_LABEL_MAX and not re.search(
+                r"^網上提交|^网上提交", txt
+            ):
+                continue
+            if re.search(r"請選擇|请选择", txt) and len(txt) > 40:
                 continue
             try:
-                await item.scroll_into_view_if_needed()
-                await item.click(timeout=3000)
+                await item.scroll_into_view_if_needed(timeout=_S04_LOCATOR_MS)
+                await item.click(timeout=_S04_LOCATOR_MS)
                 await page.wait_for_timeout(300)
                 logger.info("已点击 radio: %s", txt[:40])
                 return True
             except Exception:
                 inp = item.locator("input[type='radio']").first
-                if await inp.count() > 0:
-                    await inp.check(force=True)
-                    await page.wait_for_timeout(300)
-                    logger.info("已 force 选中 radio: %s", txt[:40])
+                try:
+                    if await inp.count() > 0:
+                        await inp.check(force=True, timeout=_S04_LOCATOR_MS)
+                        await page.wait_for_timeout(300)
+                        logger.info("已 force 选中 radio: %s", txt[:40])
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    async def _evaluate_capped(
+        self,
+        page: "Page",
+        expression: str,
+        arg: Any = None,
+        *,
+        timeout_ms: int = _S04_LOCATOR_MS,
+    ) -> Any:
+        """page.evaluate 无 timeout 参数，用 wait_for 封顶避免静默挂死。"""
+        return await asyncio.wait_for(
+            page.evaluate(expression, arg),
+            timeout=max(0.5, timeout_ms / 1000),
+        )
+
+    async def _wait_s04_id_type_radios(
+        self, page: "Page", timeout_ms: int = _S04_RADIO_WAIT_MS
+    ) -> bool:
+        """等 s04 证件类型 radio 出现。遮罩一直不消则抛载入超时。"""
+        deadline = time.monotonic() + max(0.5, timeout_ms / 1000)
+        logger.info("s04 勾选证件类型 等待radio")
+        while time.monotonic() < deadline:
+            self._raise_if_cancelled()
+            if page.is_closed():
+                return False
+            if await self._is_spinning(page):
+                remain_ms = max(200, int((deadline - time.monotonic()) * 1000))
+                await self._wait_spin_clear(page, timeout_ms=min(3000, remain_ms))
+                if await self._is_spinning(page):
+                    if time.monotonic() >= deadline:
+                        raise IcrisLoadingTimeoutError(
+                            register_loading_timeout_message("s04")
+                        )
+                    await page.wait_for_timeout(min(400, remain_ms))
+                    continue
+            try:
+                n = await self._evaluate_capped(
+                    page,
+                    """() => {
+                        const root = document.body || document.documentElement;
+                        if (!root) return 0;
+                        return root.querySelectorAll(
+                            "input[type='radio'], .ant-radio-wrapper"
+                        ).length;
+                    }""",
+                    timeout_ms=_S04_LOCATOR_MS,
+                )
+                if int(n or 0) > 0:
                     return True
+            except Exception:
+                if page.is_closed():
+                    return False
+            remain_ms = max(100, int((deadline - time.monotonic()) * 1000))
+            await page.wait_for_timeout(min(400, remain_ms))
+        if await self._is_spinning(page):
+            raise IcrisLoadingTimeoutError(register_loading_timeout_message("s04"))
+        logger.warning("s04 证件类型 radio 未出现")
         return False
 
     async def _select_identity_id_type_radio(
@@ -5651,6 +5757,8 @@ class IcrisRegistrationBot:
         page: "Page",
         id_type: str,
         id_type_pat: str,
+        *,
+        timeout_ms: int = _S04_RADIO_WAIT_MS,
     ) -> bool:
         """s04 勾选身份证明类型：香港身分證 / 中華人民共和國身分證 / 護照。"""
         preferred: dict[str, tuple[str, ...]] = {
@@ -5681,28 +5789,14 @@ class IcrisRegistrationBot:
         }
         labels = preferred.get(id_type, preferred["PRC_ID"])
 
-        # 等待 s04 证件类型 radio 出现（body 未就绪时勿 evaluate）
-        try:
-            await page.wait_for_function(
-                """() => {
-                    const root = document.body || document.documentElement;
-                    if (!root) return false;
-                    const t = root.innerText || '';
-                    if (!/身分證明|身份证明|香港身分證|香港身分证|中華人民共和國|中华人民共和国|護照|护照|身分证/.test(t))
-                        return false;
-                    return root.querySelectorAll(
-                        "input[type='radio'], .ant-radio-wrapper"
-                    ).length > 0;
-                }""",
-                timeout=20000,
-            )
-        except Exception:
-            logger.debug("等待 s04 证件类型 radio 超时", exc_info=True)
+        if not await self._wait_s04_id_type_radios(page, timeout_ms=timeout_ms):
+            return False
 
         try:
-            # 1) 安全 JS：按完整标签点选
-            ok = await page.evaluate(
-                """([labels, idType]) => {
+            logger.info("s04 勾选证件类型 JS type=%s", id_type)
+            ok = await self._evaluate_capped(
+                page,
+                """([labels, idType, maxLen]) => {
                     const root = document.body || document.documentElement;
                     if (!root) return false;
                     const labs = labels || [];
@@ -5713,7 +5807,8 @@ class IcrisRegistrationBot:
                     for (const lab of labs) {
                         for (const w of wrappers) {
                             const t = norm(w.innerText || '');
-                            if (!t || t.length > 80) continue;
+                            if (!t || t.length > maxLen) continue;
+                            if (/请选择|請選擇/.test(t) && t.length > 40) continue;
                             if (!t.includes(lab)) continue;
                             if (idType === 'PASSPORT' && /身分證|身分证|身份证/.test(t)) continue;
                             if (idType === 'HKID' && /中華|中华|人民/.test(t)) continue;
@@ -5731,18 +5826,13 @@ class IcrisRegistrationBot:
                                 inp.dispatchEvent(new Event('input', { bubbles: true }));
                                 inp.dispatchEvent(new Event('change', { bubbles: true }));
                             }
-                            if (
-                                w.classList.contains('ant-radio-wrapper-checked')
-                                || (inp && inp.checked)
-                                || !!w.querySelector('.ant-radio-checked')
-                            ) {
-                                return lab;
-                            }
+                            return lab;
                         }
                     }
                     return '';
                 }""",
-                [list(labels), id_type],
+                [list(labels), id_type, _S04_RADIO_LABEL_MAX],
+                timeout_ms=_S04_LOCATOR_MS * 2,
             )
             if ok:
                 logger.info("已勾选身份证明类型: %s (%s)", id_type, ok)
@@ -5751,21 +5841,29 @@ class IcrisRegistrationBot:
         except Exception as exc:
             logger.warning("s04 证件类型 JS 选择失败: %s", exc)
 
-        # 2) Playwright 精确文案
         try:
+            logger.info("s04 勾选证件类型 Playwright type=%s", id_type)
             for lab in labels:
-                wrappers = page.locator(".ant-radio-wrapper, label.ant-radio-wrapper").filter(
-                    has_text=lab
-                )
-                for i in range(await wrappers.count()):
+                wrappers = page.locator(
+                    ".ant-radio-wrapper, label.ant-radio-wrapper"
+                ).filter(has_text=lab)
+                try:
+                    n = await wrappers.count()
+                except Exception:
+                    continue
+                for i in range(n):
                     item = wrappers.nth(i)
                     try:
                         if not await item.is_visible():
                             continue
-                        txt = (await item.inner_text()).strip().replace("\n", " ")
+                        txt = (
+                            await item.inner_text(timeout=_S04_LOCATOR_MS)
+                        ).strip().replace("\n", " ")
                     except Exception:
                         continue
-                    if len(txt) > 80:
+                    if len(txt) > _S04_RADIO_LABEL_MAX:
+                        continue
+                    if re.search(r"請選擇|请选择", txt) and len(txt) > 40:
                         continue
                     if id_type == "PASSPORT" and (
                         "身分證" in txt or "身分证" in txt or "身份证" in txt
@@ -5778,8 +5876,8 @@ class IcrisRegistrationBot:
                     if id_type == "PRC_ID" and ("香港" in txt):
                         continue
                     try:
-                        await item.scroll_into_view_if_needed()
-                        await item.click(timeout=3000)
+                        await item.scroll_into_view_if_needed(timeout=_S04_LOCATOR_MS)
+                        await item.click(timeout=_S04_LOCATOR_MS)
                         await page.wait_for_timeout(400)
                         logger.info("已勾选身份证明类型: %s (%s)", id_type, lab)
                         return True
@@ -5788,7 +5886,7 @@ class IcrisRegistrationBot:
                         try:
                             inp = item.locator("input[type='radio']").first
                             if await inp.count() > 0:
-                                await inp.check(force=True)
+                                await inp.check(force=True, timeout=_S04_LOCATOR_MS)
                                 await page.wait_for_timeout(300)
                                 logger.info(
                                     "已 force 勾选身份证明类型: %s (%s)", id_type, lab
@@ -5799,10 +5897,50 @@ class IcrisRegistrationBot:
         except Exception as exc:
             logger.warning("s04 证件类型 Playwright 选择失败: %s", exc)
 
-        # 3) 正则回退（内部已 null-safe）
         try:
-            if await self._click_radio_by_text(page, id_type_pat):
-                logger.info("已按正则勾选身份证明类型: %s", id_type)
+            logger.info("s04 勾选证件类型 JS正则 type=%s", id_type)
+            ok = await self._evaluate_capped(
+                page,
+                """([pat, idType, maxLen]) => {
+                    const root = document.body || document.documentElement;
+                    if (!root) return '';
+                    let re;
+                    try { re = new RegExp(pat, 'i'); } catch (e) { return ''; }
+                    const wrappers = [...root.querySelectorAll(
+                        '.ant-radio-wrapper, label.ant-radio-wrapper, label'
+                    )];
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+                    for (const w of wrappers) {
+                        const t = norm(w.innerText || '');
+                        if (!t || t.length > maxLen) continue;
+                        if (/请选择|請選擇/.test(t) && t.length > 40) continue;
+                        if (!re.test(t)) continue;
+                        if (idType === 'PASSPORT' && /身分證|身分证|身份证/.test(t)) continue;
+                        if (idType === 'HKID' && /中華|中华|人民/.test(t)) continue;
+                        if (idType === 'PRC_ID' && /香港/.test(t)) continue;
+                        w.scrollIntoView({ block: 'center' });
+                        const inner = w.querySelector(
+                            '.ant-radio, .ant-radio-input, span.ant-radio'
+                        );
+                        if (inner) inner.click();
+                        w.click();
+                        const inp = w.querySelector('input[type=radio]');
+                        if (inp) {
+                            inp.checked = true;
+                            inp.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        return t.slice(0, 40);
+                    }
+                    return '';
+                }""",
+                [id_type_pat, id_type, _S04_RADIO_LABEL_MAX],
+                timeout_ms=_S04_LOCATOR_MS * 2,
+            )
+            if ok:
+                logger.info("已按正则勾选身份证明类型: %s (%s)", id_type, ok)
+                await page.wait_for_timeout(400)
                 return True
         except Exception as exc:
             logger.warning("s04 证件类型正则选择失败: %s", exc)
@@ -5956,7 +6094,8 @@ class IcrisRegistrationBot:
             )
 
         # s04 勿再切语言/URL 重载
-        await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
+        if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
+            raise IcrisLoadingTimeoutError(register_loading_timeout_message("s04"))
         proof = self._derive_identity_proof(data)
         logger.info(
             "开始填写身份证明 (type=%s, submission=%s, url=%s)",
@@ -5971,11 +6110,15 @@ class IcrisRegistrationBot:
             type_ok = await self._select_identity_id_type_radio(
                 page, proof["id_type"], proof["id_type_pat"]
             )
+        except (IcrisLoadingTimeoutError, IcrisFlowError):
+            raise
         except Exception as exc:
             logger.warning("勾选身份证明类型异常 type=%s: %s", proof["id_type"], exc)
             type_ok = False
         if type_ok:
             filled += 1
+            if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
+                raise IcrisLoadingTimeoutError(register_loading_timeout_message("s04"))
             await page.wait_for_timeout(500)
         else:
             logger.warning(
@@ -5983,6 +6126,7 @@ class IcrisRegistrationBot:
                 proof["id_type"],
                 proof["id_type_pat"],
             )
+            return filled
 
         # 选择证件类型后出现号码输入框：港证拆两框，护照填号+签发国，内地证整号
         id_ok = False

@@ -202,6 +202,97 @@ class TestRegisterStepReadyAndMissing(unittest.IsolatedAsyncioTestCase):
         self.assertIn("s02", str(ctx.exception))
 
 
+class TestS04IdentityTypeSelect(unittest.IsolatedAsyncioTestCase):
+    def _page(self) -> MagicMock:
+        page = MagicMock()
+        page.is_closed = MagicMock(return_value=False)
+        page.url = "https://example/s04.do"
+        page.wait_for_timeout = AsyncMock()
+        page.evaluate = AsyncMock(return_value=0)
+        loc = MagicMock()
+        loc.filter.return_value = loc
+        loc.count = AsyncMock(return_value=0)
+        loc.nth.return_value = loc
+        page.locator = MagicMock(return_value=loc)
+        return page
+
+    async def test_fill_identity_raises_when_overlay_stuck(self):
+        bot = IcrisRegistrationBot(llm=MagicMock())
+        page = self._page()
+        bot._identity_proof_filled = False
+        bot._is_identity_proof_step = AsyncMock(return_value=True)
+        bot._wait_spin_clear = AsyncMock(return_value=False)
+        with self.assertRaises(IcrisLoadingTimeoutError) as ctx:
+            await bot._fill_identity_proof_step(page, {})
+        self.assertIn("s04", str(ctx.exception))
+        self.assertIn("载入中超时", str(ctx.exception))
+
+    async def test_wait_radios_overlay_is_loading_timeout(self):
+        bot = IcrisRegistrationBot(llm=MagicMock())
+        page = self._page()
+        bot._raise_if_cancelled = MagicMock()
+        bot._is_spinning = AsyncMock(return_value=True)
+        bot._wait_spin_clear = AsyncMock(return_value=False)
+        with self.assertRaises(IcrisLoadingTimeoutError) as ctx:
+            await bot._wait_s04_id_type_radios(page, timeout_ms=200)
+        self.assertIn("s04", str(ctx.exception))
+
+    async def test_select_id_type_skips_section_scan_when_no_radio(self):
+        bot = IcrisRegistrationBot(llm=MagicMock())
+        page = self._page()
+        bot._wait_s04_id_type_radios = AsyncMock(return_value=False)
+        bot._select_radio_in_section = AsyncMock(return_value=True)
+        bot._click_radio_by_text = AsyncMock(return_value=True)
+        ok = await bot._select_identity_id_type_radio(
+            page, "PRC_ID", r"中华人民共和国身分证号码", timeout_ms=200
+        )
+        self.assertFalse(ok)
+        bot._select_radio_in_section.assert_not_called()
+        bot._click_radio_by_text.assert_not_called()
+        page.evaluate.assert_not_called()
+
+    async def test_click_radio_does_not_use_star_section(self):
+        bot = IcrisRegistrationBot(llm=MagicMock())
+        page = self._page()
+        bot._verify_option_selected = AsyncMock(return_value=False)
+        bot._select_radio_in_section = AsyncMock(return_value=True)
+        ok = await bot._click_radio_by_text(page, r"网上提交|網上提交")
+        self.assertTrue(ok)
+        bot._select_radio_in_section.assert_awaited_once()
+        section = bot._select_radio_in_section.await_args.args[1]
+        self.assertNotEqual(section, r".*")
+        self.assertNotEqual(section.strip(), ".*")
+        self.assertIn("身分證明", section)
+        self.assertIn("证明文件", section)
+
+    async def test_fill_identity_stops_when_type_not_selected(self):
+        bot = IcrisRegistrationBot(llm=MagicMock())
+        page = self._page()
+        bot._identity_proof_filled = False
+        bot._is_identity_proof_step = AsyncMock(return_value=True)
+        bot._wait_spin_clear = AsyncMock(return_value=True)
+        bot._derive_identity_proof = MagicMock(
+            return_value={
+                "id_type": "PRC_ID",
+                "id_type_pat": "中华人民共和国身分证号码",
+                "id_number": "44051420000318492X",
+                "issuing_country": "",
+                "submission_method": "online",
+                "submission_pat": "网上提交",
+                "online_pat": "经核证",
+                "online_method": "certified_copy",
+                "document_files": [],
+            }
+        )
+        bot._select_identity_id_type_radio = AsyncMock(return_value=False)
+        bot._fill_s04_single_number = AsyncMock(return_value=True)
+        bot._click_radio_by_text = AsyncMock(return_value=True)
+        filled = await bot._fill_identity_proof_step(page, {})
+        self.assertEqual(filled, 0)
+        bot._fill_s04_single_number.assert_not_called()
+        bot._click_radio_by_text.assert_not_called()
+
+
 class TestRegenS02Username(unittest.TestCase):
     def test_clears_session_and_rolls_suffix(self):
         bot = IcrisRegistrationBot(llm=MagicMock())

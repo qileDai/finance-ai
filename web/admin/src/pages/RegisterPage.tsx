@@ -450,43 +450,8 @@ export function RegisterPage() {
     }
   }
 
-  async function onIdFileChange(file: File | undefined) {
+  function onIdFileChange(file: File | undefined) {
     setIdFile(file);
-    if (!file || !file.type.startsWith("image/")) return;
-    try {
-      const dataUrl = await readFileAsDataUrl(file);
-      const current: Record<string, string> = { ...fields };
-      if (!idTypeUserEdited && !idTypeFromTextLlm) {
-        delete current.id_type;
-      } else {
-        current.id_type = idType;
-      }
-      const res = await api.registerRunner.extractId({
-        data_url: dataUrl,
-        filename: file.name,
-        current_fields: current,
-        fill_empty_only: true,
-      });
-      const filled = res.fields || {};
-      const skipType = idTypeUserEdited || idTypeFromTextLlm;
-      setFields((p) => {
-        const next = { ...p };
-        for (const [k, v] of Object.entries(filled)) {
-          if (k === "id_type") continue;
-          if (!(next[k] || "").trim() && v) next[k] = v;
-        }
-        return next;
-      });
-      if (
-        !skipType &&
-        filled.id_type &&
-        ID_TYPE_OPTIONS.some((o) => o.value === filled.id_type)
-      ) {
-        setIdType(filled.id_type);
-      }
-    } catch {
-      /* 视觉识别失败不阻断手工上传 */
-    }
   }
 
   function validate(): string | null {
