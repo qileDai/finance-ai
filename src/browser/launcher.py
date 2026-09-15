@@ -19,6 +19,11 @@ USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
+# 翻译条 / 保存密码气泡都会挡住 ICRIS 顶栏「简/繁」（--disable-features 只能出现一次）
+_CHROME_DISABLE_FEATURES = (
+    "Translate,TranslateUI,PasswordManagerOnboarding,PasswordLeakDetection"
+)
+
 
 def _try_import_patchright():
     """尝试导入 patchright（反 CDP 检测的 Playwright fork）。"""
@@ -61,8 +66,8 @@ def import_async_playwright():
         ) from e
 
 
-def _ensure_chrome_profile_disable_translate(profile) -> None:
-    """写入 Chrome Preferences：关翻译，并清掉「未正确关闭」恢复气泡。"""
+def _ensure_chrome_profile_automation_prefs(profile) -> None:
+    """写入 Chrome Preferences：关翻译/密码保存，并清掉「未正确关闭」恢复气泡。"""
     import json
     from pathlib import Path
 
@@ -81,12 +86,15 @@ def _ensure_chrome_profile_disable_translate(profile) -> None:
     else:
         prefs["translate"] = {"enabled": False}
     prefs["translate_blocked_languages"] = ["zh-CN", "zh-TW", "zh-HK", "zh", "en"]
+    prefs["credentials_enable_service"] = False
     profile_prefs = prefs.setdefault("profile", {})
     if not isinstance(profile_prefs, dict):
         profile_prefs = {}
         prefs["profile"] = profile_prefs
     profile_prefs["exit_type"] = "Normal"
     profile_prefs["exited_cleanly"] = True
+    profile_prefs["password_manager_enabled"] = False
+    profile_prefs["password_manager_leak_detection"] = False
     try:
         prefs_path.write_text(json.dumps(prefs, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
@@ -165,7 +173,7 @@ def _kill_cdp_chrome_by_profile(profile, port: int) -> None:
     except Exception as e:
         logger.debug("结束旧 CDP Chrome 失败: %s", e)
     if killed:
-        logger.info("已结束旧 CDP Chrome（禁用翻译后重启）")
+        logger.info("已结束旧 CDP Chrome（禁用翻译/密码保存后重启）")
         import time
 
         time.sleep(1.5)
@@ -206,7 +214,7 @@ def _try_launch_cdp_chrome() -> bool:
         logger.warning("跳过重启 CDP Chrome：其他会话心跳仍在")
         return False
     _kill_cdp_chrome_by_profile(profile, port)
-    _ensure_chrome_profile_disable_translate(profile)
+    _ensure_chrome_profile_automation_prefs(profile)
     launch_args = [
         str(chrome),
         f"--remote-debugging-port={port}",
@@ -217,7 +225,8 @@ def _try_launch_cdp_chrome() -> bool:
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
         "--hide-crash-restore-bubble",
-        "--disable-features=Translate,TranslateUI",
+        "--disable-save-password-bubble",
+        f"--disable-features={_CHROME_DISABLE_FEATURES}",
         "--start-maximized",
     ]
     # Linux/容器环境：无法开 sandbox；Xvfb 提供虚拟 DISPLAY，不需要 headless
@@ -256,7 +265,8 @@ def _chromium_launch_args() -> list[str]:
         "--no-default-browser-check",
         "--disable-infobars",
         "--hide-crash-restore-bubble",
-        "--disable-features=Translate,TranslateUI",
+        "--disable-save-password-bubble",
+        f"--disable-features={_CHROME_DISABLE_FEATURES}",
     ]
     if platform.system() == "Linux":
         args.append("--no-sandbox")
@@ -317,14 +327,14 @@ async def launch_browser(
 
     use_existing = bool(settings.chrome_use_existing) and not force_isolated
     if use_existing:
-        # 先按禁用翻译参数重启 CDP Chrome，避免 Google 翻译气泡遮挡顶栏
+        # 先按禁用翻译/密码保存参数重启 CDP Chrome，避免气泡遮挡顶栏「简/繁」
         if _try_launch_cdp_chrome():
             try:
                 browser = await playwright.chromium.connect_over_cdp(
                     settings.chrome_cdp_url
                 )
                 logger.info(
-                    "已重启并连接 Chrome CDP（已禁用翻译）: %s",
+                    "已重启并连接 Chrome CDP（已禁用翻译/密码保存）: %s",
                     settings.chrome_cdp_url,
                 )
                 return browser

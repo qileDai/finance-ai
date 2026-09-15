@@ -153,7 +153,7 @@ async def wait_portal_ready(page: "Page", timeout_ms: int = 60000) -> bool:
 
 
 async def dismiss_google_translate(page: "Page") -> bool:
-    """关闭 Google 翻译气泡/条（会遮挡 ICRIS 顶栏「简/繁」与菜单）。"""
+    """关掉顶栏 Chrome 原生气泡（翻译条 / 保存密码），避免挡住「简/繁」。"""
     closed = False
     try:
         # 页面内嵌入的翻译条
@@ -189,7 +189,7 @@ async def dismiss_google_translate(page: "Page") -> bool:
     except Exception:
         pass
 
-    # Chrome 内置翻译弹层不在 DOM 内，Esc 可关掉
+    # Chrome 内置翻译 / 保存密码弹层不在 DOM 内，Esc 可关掉
     for _ in range(2):
         try:
             await page.keyboard.press("Escape")
@@ -198,7 +198,7 @@ async def dismiss_google_translate(page: "Page") -> bool:
         except Exception:
             break
     if closed:
-        logger.info("已尝试关闭 Google 翻译遮挡（Esc）")
+        logger.info("已尝试关闭顶栏 Chrome 气泡（Esc）")
     return closed
 
 

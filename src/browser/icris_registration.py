@@ -25,7 +25,11 @@ from src.browser.icris_errors import (
     is_id_already_registered_error,
     register_loading_timeout_message,
 )
-from src.browser.icris_ui_common import ICRIS_PAGE_IS_LOADING_JS, is_page_loading
+from src.browser.icris_ui_common import (
+    ICRIS_PAGE_IS_LOADING_JS,
+    dismiss_google_translate,
+    is_page_loading,
+)
 from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 from src.materials.id_type_classify import (
@@ -1515,6 +1519,7 @@ class IcrisRegistrationBot:
 
     async def _ensure_simplified_chinese(self, page: "Page") -> bool:
         """点击页头右上角「简」切换为简体中文；已是简体则跳过"""
+        await dismiss_google_translate(page)
         if self._locale == "simplified":
             return True
         state = await self._page_language_state(page)
@@ -1739,6 +1744,7 @@ class IcrisRegistrationBot:
 
     async def _ensure_traditional_chinese(self, page: "Page") -> bool:
         """点击页头右上角「繁」切换为繁体中文；已是繁体则跳过（避免 URL 重载打回 s03）。"""
+        await dismiss_google_translate(page)
         if await self._is_traditional_chinese_active(page):
             self._locale = "traditional"
             logger.info("页面已是繁体中文，跳过语言切换")
@@ -6513,6 +6519,7 @@ class IcrisRegistrationBot:
         """账户资料填写完成后点击继续"""
         if not await self._is_account_profile_step(page):
             return False
+        await dismiss_google_translate(page)
         logger.info("账户资料填写完成，点击「继续」进入下一步…")
         return await self._click_continue(page)
 
