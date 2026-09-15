@@ -592,6 +592,11 @@ class ExternalGroupStore:
                 "ALTER TABLE registration_jobs ADD COLUMN activation_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "activation_screenshot_path" not in cols:
+            conn.execute(
+                "ALTER TABLE registration_jobs ADD COLUMN activation_screenshot_path "
+                "TEXT NOT NULL DEFAULT ''"
+            )
 
     def _migrate_intent_routes(self, conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(intent_routes)")}
@@ -2237,6 +2242,20 @@ class ExternalGroupStore:
                 (now, now, job_id),
             )
 
+    def set_job_activation_screenshot(self, job_id: int, path: str) -> None:
+        """旁路写入激活截图路径，不改 activation_status / form_status。"""
+        shot = (path or "").strip()
+        if not shot:
+            return
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET activation_screenshot_path=?, updated_at=?
+                   WHERE id=?""",
+                (shot, now, int(job_id)),
+            )
+
     def mark_job_activated(self, job_id: int) -> None:
         now = _utc_now()
         with self._conn() as conn:
@@ -2811,11 +2830,13 @@ class ExternalGroupStore:
             "esubmit": "esubmit_screenshot_path",
             "success": "success_screenshot_path",
             "form": "form_screenshot_path",
+            "activation": "activation_screenshot_path",
         }.get((shot_type or "").strip().lower(), "screenshot_path")
         if col not in (
             "esubmit_screenshot_path",
             "success_screenshot_path",
             "form_screenshot_path",
+            "activation_screenshot_path",
             "screenshot_path",
         ):
             col = "screenshot_path"
@@ -2919,7 +2940,7 @@ class ExternalGroupStore:
                            run_duration, s03a_duration, nnc1_duration,
                            created_at, finished_at, updated_at,
                            activation_checked_at, activation_activated_at,
-                           form_filled_at, id_already_registered,
+                           activation_url, form_filled_at, id_already_registered,
                            nnc1_loading_retries, form_boost, source
                     FROM registration_jobs
                     """
@@ -2932,6 +2953,10 @@ class ExternalGroupStore:
             "awaiting_review": 0,
             "activation_pending": 0,
             "form_pending": 0,
+            "activation_pending_no_url": 0,
+            "activation_pending_has_url": 0,
+            "activation_failed": 0,
+            "form_failed": 0,
         }
         reg_ok = 0
         reg_fail = 0
@@ -2990,8 +3015,16 @@ class ExternalGroupStore:
                 backlog["awaiting_review"] += 1
             if act_st in ("pending", "activating"):
                 backlog["activation_pending"] += 1
+                if str(row.get("activation_url") or "").strip():
+                    backlog["activation_pending_has_url"] += 1
+                else:
+                    backlog["activation_pending_no_url"] += 1
+            if act_st == "failed":
+                backlog["activation_failed"] += 1
             if form_st == "pending":
                 backlog["form_pending"] += 1
+            if form_st == "failed":
+                backlog["form_failed"] += 1
 
             if _ts_in_window(created_at, cutoff):
                 created += 1

@@ -197,6 +197,7 @@ class TestActivationProbe(unittest.TestCase):
         store.mark_job_activated.assert_not_called()
         store.mark_job_activation_failed.assert_not_called()
         store.mark_job_activation_checked.assert_not_called()
+        store.set_job_activation_screenshot.assert_not_called()
 
     def test_api_missing_fields(self) -> None:
         data, code = handle_admin_api(

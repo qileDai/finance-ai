@@ -147,7 +147,7 @@ class AdminWebServer:
                 """读取 job 截图并返回 image/png。
 
                 rel: jobs/<id>/screenshot
-                query: ?type=esubmit|success|fail（默认 fail）
+                query: ?type=esubmit|success|fail|form|activation（默认 fail）
                 """
                 import re
                 from pathlib import Path

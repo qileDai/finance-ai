@@ -4,6 +4,7 @@ import type { EChartsOption } from "echarts";
 import { api, type DurationStats, type OverviewResponse, type StageStats } from "../api";
 import { OpsChart } from "../components/OpsChart";
 import { pct, StateBox } from "../components/ui";
+import { formatAgeAgo } from "../jobTimeline";
 
 const COLORS = {
   accent: "#0f8a6a",
@@ -45,6 +46,33 @@ const HOURS_OPTIONS = [
   { label: "近 7 天", value: 168 },
   { label: "全部", value: 0 },
 ];
+
+function healthLine(health?: OverviewResponse["health"]): string {
+  const w = health?.worker;
+  const c = health?.cdp;
+  let worker: string;
+  if (!w?.present || w.age_seconds == null) {
+    worker = "Worker 无心跳（异常）";
+  } else {
+    const ago = formatAgeAgo(w.age_seconds);
+    worker = w.stale ? `Worker 心跳 ${ago}（异常）` : `Worker 心跳 ${ago}`;
+  }
+  return `${worker} · CDP ${c?.label || "空闲"}`;
+}
+
+function emptyBacklog(): OverviewResponse["backlog"] {
+  return {
+    register_pending: 0,
+    register_running: 0,
+    awaiting_review: 0,
+    activation_pending: 0,
+    form_pending: 0,
+    activation_pending_no_url: 0,
+    activation_pending_has_url: 0,
+    activation_failed: 0,
+    form_failed: 0,
+  };
+}
 
 function emptyGraphic(show: boolean): EChartsOption["graphic"] {
   if (!show) return undefined;
@@ -346,15 +374,19 @@ export function OverviewPage({ refreshKey }: { refreshKey: number }) {
     source: { admin: 0, wework: 0, other: 0 },
   };
   const s03aAvg = data?.stages?.register?.s03a_duration?.avg_minutes ?? 0;
+  const workerStale = Boolean(
+    !data?.health?.worker?.present || data?.health?.worker?.stale,
+  );
+  const backlog = data?.backlog ?? emptyBacklog();
+  const backlogSplit = [
+    `待激活无链接 ${backlog.activation_pending_no_url ?? 0}`,
+    `待激活已有链接 ${backlog.activation_pending_has_url ?? 0}`,
+    `激活失败 ${backlog.activation_failed ?? 0}`,
+    `填表失败 ${backlog.form_failed ?? 0}`,
+  ].join(" · ");
 
   const charts = useMemo(() => {
-    const backlog = data?.backlog ?? {
-      register_pending: 0,
-      register_running: 0,
-      awaiting_review: 0,
-      activation_pending: 0,
-      form_pending: 0,
-    };
+    const backlog = data?.backlog ?? emptyBacklog();
     const stages = data?.stages ?? {
       register: EMPTY_STAGE,
       activation: EMPTY_STAGE,
@@ -380,7 +412,9 @@ export function OverviewPage({ refreshKey }: { refreshKey: number }) {
             options={HOURS_OPTIONS}
             onChange={(e) => setHours(Number(e.target.value))}
           />
-          <span className="ops-stats-meta">积压为实时快照，其余为窗口内</span>
+          <span className={`ops-stats-meta${workerStale ? " is-warn" : ""}`}>
+            {healthLine(data?.health)} · 积压为实时快照，其余为窗口内
+          </span>
         </div>
 
         <div className="ops-kpi-row">
@@ -409,6 +443,7 @@ export function OverviewPage({ refreshKey }: { refreshKey: number }) {
         <div className="ops-stats-grid">
           <Card size="small" title={cardTitle("当前积压", "实时队列快照")}>
             <OpsChart option={charts.backlog} height={280} />
+            <div className="ops-backlog-split">{backlogSplit}</div>
           </Card>
           <Card size="small" title={cardTitle("按日趋势", "窗口内按日汇总")}>
             <OpsChart option={charts.trend} height={280} />

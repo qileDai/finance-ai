@@ -313,6 +313,44 @@ def cdp_lease_alive() -> bool:
     return get_cdp_lock().lease_is_alive()
 
 
+def cdp_lease_snapshot() -> dict[str, Any]:
+    """Admin 只读 lease，不 acquire、不杀 Chrome。"""
+    lock = get_cdp_lock()
+    data = lock._read_lease()
+    owner = str(data.get("owner") or "").strip()
+    try:
+        pid = int(data.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    try:
+        hb = float(data.get("heartbeat") or 0)
+    except (TypeError, ValueError):
+        hb = 0.0
+    age = round(max(0.0, _utc_ts() - hb), 1) if hb > 0 else None
+    alive = lock._lease_held_by_live_owner(data)
+    if not alive:
+        return {
+            "busy": False,
+            "label": "空闲",
+            "owner": "",
+            "pid": 0,
+            "age_seconds": age,
+        }
+    if owner == "registration":
+        label = "注册占用"
+    elif owner == "nnc1":
+        label = "填表占用"
+    else:
+        label = owner or "占用中"
+    return {
+        "busy": True,
+        "label": label,
+        "owner": owner,
+        "pid": pid,
+        "age_seconds": age,
+    }
+
+
 def should_skip_kill_cdp_chrome() -> bool:
     """其他会话仍活着、且本线程未持锁时，禁止杀 9222。"""
     lock = get_cdp_lock()

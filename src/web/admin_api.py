@@ -476,6 +476,10 @@ def _handle_overview(
                 "awaiting_review": 0,
                 "activation_pending": 0,
                 "form_pending": 0,
+                "activation_pending_no_url": 0,
+                "activation_pending_has_url": 0,
+                "activation_failed": 0,
+                "form_failed": 0,
             },
             "stages": {
                 "register": {**empty_stage, "s03a_duration": empty_dur},
@@ -496,6 +500,15 @@ def _handle_overview(
             },
             "daily": [],
         }
+    from src.browser.cdp_lock import cdp_lease_snapshot
+    from src.wework.worker_heartbeat import read_worker_heartbeat
+
+    form_poll = float(getattr(settings, "icris_form_poll_seconds", 60.0) or 60.0)
+    stale_after = max(120.0, 2.0 * form_poll)
+    stats["health"] = {
+        "worker": read_worker_heartbeat(stale_after_s=stale_after),
+        "cdp": cdp_lease_snapshot(),
+    }
     return _ok(**stats)
 
 

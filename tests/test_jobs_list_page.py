@@ -83,6 +83,10 @@ class TestJobsListPage(unittest.TestCase):
         found, path = self.store.get_job_screenshot_path(job_id, "esubmit")
         self.assertTrue(found)
         self.assertEqual(path, "")
+        self.store.set_job_activation_screenshot(job_id, "/tmp/act.png")
+        found_act, act_path = self.store.get_job_screenshot_path(job_id, "activation")
+        self.assertTrue(found_act)
+        self.assertEqual(act_path, "/tmp/act.png")
         missing, _ = self.store.get_job_screenshot_path(99999, "fail")
         self.assertFalse(missing)
 

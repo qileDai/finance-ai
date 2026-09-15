@@ -138,21 +138,33 @@ export function jobProgressTooltip(p?: JobProgressView | null): string {
 
 const PIPELINE_DONE_STEPS = new Set(["registered", "activated", "form_filled"]);
 
-export function JobPipelineLights({ progress }: { progress?: JobProgressView | null }) {
+export function JobPipelineLights({
+  progress,
+  hint,
+  warnCurrent,
+}: {
+  progress?: JobProgressView | null;
+  hint?: string;
+  warnCurrent?: boolean;
+}) {
   const current = progress?.step || "";
   const failed = Boolean(progress?.failed);
   const detail = (progress?.detail || "").trim();
   const currentIndex = JOB_PIPELINE_STEPS.findIndex((s) => s.step === current);
 
   return (
-    <div className="job-pipeline-lights" role="list">
-      {JOB_PIPELINE_STEPS.map((s, i) => {
+    <div className="job-pipeline-wrap">
+      <div className="job-pipeline-lights" role="list">
+        {JOB_PIPELINE_STEPS.map((s, i) => {
         const isCurrent = i === currentIndex;
-        let tone: "green" | "yellow" | "red" = "yellow";
+        let tone: "green" | "yellow" | "red" | "warn" = "yellow";
         if (currentIndex >= 0 && i < currentIndex) {
           tone = "green";
         } else if (isCurrent) {
-          tone = failed ? "red" : PIPELINE_DONE_STEPS.has(s.step) ? "green" : "yellow";
+          if (failed) tone = "red";
+          else if (PIPELINE_DONE_STEPS.has(s.step)) tone = "green";
+          else if (warnCurrent) tone = "warn";
+          else tone = "yellow";
         }
         const stepEl = (
           <div className="job-pipeline-step" role="listitem">
@@ -178,7 +190,13 @@ export function JobPipelineLights({ progress }: { progress?: JobProgressView | n
             )}
           </div>
         );
-      })}
+        })}
+      </div>
+      {hint ? (
+        <span className={`job-pipeline-hint${warnCurrent ? " is-warn" : ""}`}>
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }

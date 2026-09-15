@@ -69,6 +69,62 @@ class TestPipelineOpsStats(unittest.TestCase):
         self.assertEqual(b["awaiting_review"], 1)
         self.assertEqual(b["activation_pending"], 1)
         self.assertEqual(b["form_pending"], 1)
+        self.assertEqual(b["activation_pending_no_url"], 1)
+        self.assertEqual(b["activation_pending_has_url"], 0)
+        self.assertEqual(b["activation_failed"], 0)
+        self.assertEqual(b["form_failed"], 0)
+
+    def test_backlog_extra_keys_split_pending_and_failures(self) -> None:
+        no_url = self._enqueue("no-url")
+        has_url = self._enqueue("has-url")
+        act_fail = self._enqueue("act-fail")
+        form_fail = self._enqueue("form-fail")
+        queued = self._enqueue("queued")
+        self._update(no_url, status="succeeded", activation_status="pending")
+        self._update(
+            has_url,
+            status="succeeded",
+            activation_status="pending",
+            activation_url="https://example.com/s06",
+        )
+        self._update(act_fail, status="succeeded", activation_status="failed")
+        self._update(
+            form_fail,
+            status="succeeded",
+            activation_status="activated",
+            form_status="failed",
+        )
+        self._update(queued, status="pending")
+
+        stats = self.store.pipeline_ops_stats(hours=24)
+        b = stats["backlog"]
+        self.assertEqual(b["register_pending"], 1)
+        self.assertEqual(b["activation_pending"], 2)
+        self.assertEqual(b["activation_pending_no_url"], 1)
+        self.assertEqual(b["activation_pending_has_url"], 1)
+        self.assertEqual(
+            b["activation_pending"],
+            b["activation_pending_no_url"] + b["activation_pending_has_url"],
+        )
+        self.assertEqual(b["activation_failed"], 1)
+        self.assertEqual(b["form_failed"], 1)
+        self.assertEqual(b["form_pending"], 0)
+
+    def test_activation_screenshot_does_not_change_status(self) -> None:
+        job_id = self._enqueue("shot-only")
+        self._claim()
+        self.store.mark_job_succeeded(job_id)
+        self.store.mark_job_activation_pending(job_id)
+        before = self.store.get_registration_job(job_id)
+        self.store.set_job_activation_screenshot(job_id, "/tmp/act.png")
+        after = self.store.get_registration_job(job_id)
+        self.assertEqual(after["activation_status"], before["activation_status"])
+        self.assertEqual(after["form_status"], before["form_status"])
+        self.assertEqual(after["status"], before["status"])
+        self.assertEqual(after["activation_screenshot_path"], "/tmp/act.png")
+        found, path = self.store.get_job_screenshot_path(job_id, "activation")
+        self.assertTrue(found)
+        self.assertEqual(path, "/tmp/act.png")
 
     def test_stage_rates_and_durations(self) -> None:
         ok_id = self._enqueue("ok", source="admin")

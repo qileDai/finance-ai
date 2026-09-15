@@ -32,6 +32,23 @@ export type DailyPoint = {
   form_filled: number;
 };
 
+export type WorkerHealth = {
+  present: boolean;
+  stale: boolean;
+  age_seconds: number | null;
+  updated_at?: string;
+  pid?: number;
+  label?: string;
+};
+
+export type CdpHealth = {
+  busy: boolean;
+  label: string;
+  owner?: string;
+  pid?: number;
+  age_seconds?: number | null;
+};
+
 export type OverviewResponse = ApiOk<{
   hours: number;
   backlog: {
@@ -40,6 +57,10 @@ export type OverviewResponse = ApiOk<{
     awaiting_review: number;
     activation_pending: number;
     form_pending: number;
+    activation_pending_no_url?: number;
+    activation_pending_has_url?: number;
+    activation_failed?: number;
+    form_failed?: number;
   };
   stages: {
     register: StageStats;
@@ -59,6 +80,10 @@ export type OverviewResponse = ApiOk<{
     source: { admin: number; wework: number; other: number };
   };
   daily: DailyPoint[];
+  health?: {
+    worker: WorkerHealth;
+    cdp: CdpHealth;
+  };
 }>;
 
 export type SessionsResponse = ApiOk<{
@@ -125,6 +150,13 @@ export type JobRow = {
   form_status?: string;
   form_filled_at?: string;
   form_screenshot_path?: string;
+  activation_screenshot_path?: string;
+  activation_checked_at?: string;
+  activation_url_saved_at?: string;
+  activation_activated_at?: string;
+  activation_pending_at?: string;
+  activation_attempts?: number;
+  activation_url?: string;
   company_name?: string;
   company_name_cn?: string;
   company_name_en?: string;
@@ -323,7 +355,7 @@ export const api = {
     request<JobDetailResponse>(`/admin/api/jobs/${id}`),
   jobScreenshotUrl: (
     id: number,
-    type: "esubmit" | "success" | "fail" | "form" = "fail",
+    type: "esubmit" | "success" | "fail" | "form" | "activation" = "fail",
   ) =>
     `/admin/api/jobs/${id}/screenshot?type=${type}`,
   cancelJob: (id: number) =>

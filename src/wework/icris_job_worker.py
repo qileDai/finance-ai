@@ -72,6 +72,9 @@ class IcrisJobWorker:
             )
             while not self._stop.is_set():
                 try:
+                    from src.wework.worker_heartbeat import touch_worker_heartbeat
+
+                    touch_worker_heartbeat("register")
                     if not self.store.peek_claimable_registration():
                         self._stop.wait(poll)
                         continue

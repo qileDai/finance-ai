@@ -4,6 +4,7 @@ import { Image, Tag, Button, Modal, Tooltip } from "antd";
 import { api, type JobDetailResponse, type JobField, type JobLogLine } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines, splitLogPhases } from "../jobLog";
+import { buildJobTimeline } from "../jobTimeline";
 import {
   JOB_FIELD_GROUP_LABELS,
   JOB_SHOT_PREVIEW,
@@ -15,34 +16,6 @@ import {
   jobProgressTooltip,
 } from "../components/ui";
 import { useMessageApi } from "../useMessageApi";
-
-const ACTIVATION_TAG_COLOR: Record<string, string> = {
-  "": "default",
-  pending: "processing",
-  activated: "success",
-  failed: "error",
-};
-
-const ACTIVATION_LABEL: Record<string, string> = {
-  "": "未激活",
-  pending: "待激活",
-  activated: "已激活",
-  failed: "激活失败",
-};
-
-const FORM_TAG_COLOR: Record<string, string> = {
-  "": "default",
-  pending: "processing",
-  filled: "success",
-  failed: "error",
-};
-
-const FORM_LABEL: Record<string, string> = {
-  "": "未填表",
-  pending: "待填表",
-  filled: "已填表",
-  failed: "填表失败",
-};
 
 type Props = {
   refreshKey: number;
@@ -268,6 +241,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
     activationStatus: job?.activation_status,
   });
   const progress = job?.progress || detail?.progress;
+  const timeline = job ? buildJobTimeline(job) : [];
 
   const groupedFields: { group: string; label: string; items: JobField[] }[] = [];
   if (fields.length) {
@@ -431,47 +405,42 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
 
             <section className="reg-card">
               <h2>激活与填表</h2>
-              <dl className="job-meta">
-                <div>
-                  <dt>激活状态</dt>
-                  <dd>
-                    <Tag
-                      color={ACTIVATION_TAG_COLOR[job.activation_status || ""] || "default"}
-                    >
-                      {ACTIVATION_LABEL[job.activation_status || ""] || "未激活"}
-                    </Tag>
-                  </dd>
-                </div>
-                <div>
-                  <dt>填表状态</dt>
-                  <dd>
-                    <Tag color={FORM_TAG_COLOR[job.form_status || ""] || "default"}>
-                      {FORM_LABEL[job.form_status || ""] || "未填表"}
-                    </Tag>
-                    {job.form_filled_at ? (
-                      <span className="muted" style={{ marginLeft: 8 }}>
-                        {formatDateTime(job.form_filled_at)}
+              {timeline.length ? (
+                <ol className="job-timeline">
+                  {timeline.map((it, i) => (
+                    <li key={`${it.time}-${it.text}-${i}`}>
+                      <span className="job-timeline-time">{it.time}</span>
+                      <span
+                        className={
+                          it.tone ? `job-timeline-text is-${it.tone}` : "job-timeline-text"
+                        }
+                      >
+                        {it.text}
                       </span>
-                    ) : null}
-                  </dd>
-                </div>
-                <div>
-                  <dt>填表截图</dt>
-                  <dd>
-                    {job.form_screenshot_path ? (
-                      <Image
-                        src={api.jobScreenshotUrl(job.id, "form")}
-                        width={100}
-                        height={100}
-                        style={{ objectFit: "cover" }}
-                        preview={JOB_SHOT_PREVIEW}
-                      />
-                    ) : (
-                      "-"
-                    )}
-                  </dd>
-                </div>
-              </dl>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="muted">尚未进入激活</p>
+              )}
+              <div className="job-summary-shots" style={{ marginTop: 12 }}>
+                <SummaryShot
+                  label="激活截图"
+                  src={
+                    job.activation_screenshot_path
+                      ? api.jobScreenshotUrl(job.id, "activation")
+                      : null
+                  }
+                />
+                <SummaryShot
+                  label="填表截图"
+                  src={
+                    job.form_screenshot_path
+                      ? api.jobScreenshotUrl(job.id, "form")
+                      : null
+                  }
+                />
+              </div>
               {jobCanFormRetry(job.form_status) ? (
                 <div className="toolbar" style={{ gap: 12, marginTop: 8 }}>
                   <Button

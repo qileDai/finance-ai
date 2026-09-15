@@ -81,6 +81,17 @@ def _activation_fail_kind(detail: str) -> str:
     return "transient"
 
 
+def activation_screenshot_from_detail(detail: str) -> str:
+    """从 activate_icris_account 的 detail（path | url）取出截图路径。"""
+    text = str(detail or "").strip()
+    if not text:
+        return ""
+    left = text.split("|", 1)[0].strip().strip('"')
+    if left.lower().endswith(".png"):
+        return left
+    return ""
+
+
 class IcrisActivationWorker:
     """扫激活邮件（小时）与队列空时 drain（激活+填表）。"""
 
@@ -144,6 +155,9 @@ class IcrisActivationWorker:
     def _activation_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                from src.wework.worker_heartbeat import touch_worker_heartbeat
+
+                touch_worker_heartbeat("activation")
                 self._check_pending_jobs()
                 self.drain()
             except Exception as e:
@@ -153,6 +167,9 @@ class IcrisActivationWorker:
     def _form_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                from src.wework.worker_heartbeat import touch_worker_heartbeat
+
+                touch_worker_heartbeat("form")
                 self.drain()
             except Exception as e:
                 logger.exception("填表 worker 异常: %s", e)
@@ -388,6 +405,16 @@ class IcrisActivationWorker:
                 if not prelim_notified:
                     self._notify_form_result(job, ok=False, detail=detail)
 
+    def _observe_activation(self, job: dict, detail: str) -> None:
+        """激活终态后旁路写入截图路径，不改已写入的状态，不发群通知。"""
+        job_id = int(job.get("id") or 0)
+        shot = activation_screenshot_from_detail(detail)
+        if job_id and shot:
+            try:
+                self.store.set_job_activation_screenshot(job_id, shot)
+            except Exception:
+                logger.exception("写入激活截图路径失败 id=%s", job_id)
+
     def _notify_form_result(self, job: dict, *, ok: bool, detail: str) -> None:
         """填表结果通知到企微内部群（无配置则跳过）。优先群机器人 Webhook。"""
         from config.settings import settings
@@ -442,6 +469,7 @@ class IcrisActivationWorker:
         if not contact_email:
             logger.warning("任务 #%s 无注册邮箱，跳过激活", job_id)
             self.store.mark_job_activation_failed(job_id, "无注册邮箱")
+            self._observe_activation(live, "无注册邮箱")
             return
 
         if not icris_user:
@@ -468,6 +496,9 @@ class IcrisActivationWorker:
             self.store.mark_job_activation_failed(
                 job_id, f"邮箱未配置 IMAP: {contact_email}"
             )
+            self._observe_activation(
+                live, f"邮箱未配置 IMAP: {contact_email}"
+            )
             return
 
         since_raw = str(
@@ -485,6 +516,7 @@ class IcrisActivationWorker:
             if now_utc - since_date > timedelta(days=7):
                 self.store.mark_job_activation_failed(job_id, "激活超时（7天）")
                 logger.warning("任务 #%s 激活超时", job_id)
+                self._observe_activation(live, "激活超时（7天）")
                 return
 
         from src.email.imap_client import EmailClient
@@ -504,6 +536,7 @@ class IcrisActivationWorker:
         if url_err:
             self.store.mark_job_activation_failed(job_id, url_err)
             logger.error("任务 #%s %s", job_id, url_err)
+            self._observe_activation(live, url_err)
             return
 
         saved = self.store.save_job_activation_url(job_id, open_url, icris_user)
@@ -552,6 +585,7 @@ class IcrisActivationWorker:
         if url_err:
             self.store.mark_job_activation_failed(job_id, url_err)
             logger.error("任务 #%s %s", job_id, url_err)
+            self._observe_activation(job, url_err)
             return False
 
         with JobLogSession(
@@ -571,6 +605,7 @@ class IcrisActivationWorker:
             if ok:
                 self.store.mark_job_activated(job_id)
                 logger.info("任务 #%s 激活成功", job_id)
+                self._observe_activation(job, str(detail or ""))
                 return True
 
             kind = _activation_fail_kind(str(detail or ""))
@@ -578,6 +613,7 @@ class IcrisActivationWorker:
             if kind in ("credential", "bad_link", "missing_creds"):
                 self.store.mark_job_activation_failed(job_id, f"激活失败: {detail}")
                 logger.error("任务 #%s 激活失败: %s", job_id, detail)
+                self._observe_activation(job, str(detail or ""))
                 return False
 
             if kind == "stale_page" or attempts >= self._max_attempts:
@@ -586,6 +622,7 @@ class IcrisActivationWorker:
                         job_id, f"激活失败（已重试 {attempts} 次）: {detail}"
                     )
                     logger.error("任务 #%s 激活失败耗尽重试: %s", job_id, detail)
+                    self._observe_activation(job, str(detail or ""))
                     return False
                 self.store.release_job_activation_claim(job_id)
                 self.store.clear_job_activation_url(job_id)

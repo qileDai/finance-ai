@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from src.browser.cdp_lock import (
     CdpHeartbeatLock,
+    cdp_lease_snapshot,
     cdp_lock_held_here,
     pid_is_alive,
     set_cdp_lock_for_tests,
@@ -203,6 +204,35 @@ class TestCdpHeartbeatLock(unittest.TestCase):
         self.lock.lease_path.write_text("{}", encoding="utf-8")
         t.join(timeout=5)
         self.assertEqual(got, ["got"])
+
+    def test_lease_snapshot_idle_does_not_write(self):
+        before = (
+            self.lock.lease_path.read_text(encoding="utf-8")
+            if self.lock.lease_path.is_file()
+            else None
+        )
+        snap = cdp_lease_snapshot()
+        self.assertFalse(snap["busy"])
+        self.assertEqual(snap["label"], "空闲")
+        after = (
+            self.lock.lease_path.read_text(encoding="utf-8")
+            if self.lock.lease_path.is_file()
+            else None
+        )
+        self.assertEqual(before, after)
+
+    def test_lease_snapshot_nnc1_read_only(self):
+        hold = self.lock.acquire("nnc1")
+        try:
+            before = self.lock.lease_path.read_text(encoding="utf-8")
+            snap = cdp_lease_snapshot()
+            self.assertTrue(snap["busy"])
+            self.assertEqual(snap["label"], "填表占用")
+            self.assertEqual(snap["owner"], "nnc1")
+            after = self.lock.lease_path.read_text(encoding="utf-8")
+            self.assertEqual(before, after)
+        finally:
+            hold.release()
 
 
 class TestActivationDoesNotFillAndNnc1Yields(unittest.TestCase):

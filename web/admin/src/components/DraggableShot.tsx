@@ -10,7 +10,7 @@ import {
   type ShotDirHandle,
 } from "../lib/saveFolder";
 
-export type JobShotType = "esubmit" | "success" | "form";
+export type JobShotType = "esubmit" | "success" | "form" | "activation";
 
 type Props = {
   src: string;

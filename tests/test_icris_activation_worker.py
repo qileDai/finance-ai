@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.storage.db import ExternalGroupStore
 from src.wework.icris_activation_worker import (
     IcrisActivationWorker,
+    activation_screenshot_from_detail,
     contact_email_from_payload,
     icris_credentials_from_payload,
 )
@@ -68,6 +69,20 @@ class TestActivationPayloadFields(unittest.TestCase):
         self.assertEqual(user, "MAWADA123")
         self.assertEqual(pwd, "Secret!")
         self.assertEqual(icris_credentials_from_payload({}), ("", ""))
+
+    def test_activation_screenshot_from_detail(self):
+        self.assertEqual(
+            activation_screenshot_from_detail(
+                r"D:\data\icris_activations\a.png | https://example.com/s06"
+            ),
+            r"D:\data\icris_activations\a.png",
+        )
+        self.assertEqual(
+            activation_screenshot_from_detail("/tmp/shot.png"),
+            "/tmp/shot.png",
+        )
+        self.assertEqual(activation_screenshot_from_detail("opened home.do"), "")
+        self.assertEqual(activation_screenshot_from_detail(""), "")
 
 
 class TestActivationWorkerMatch(unittest.TestCase):
@@ -179,6 +194,7 @@ class TestActivationWorkerMatch(unittest.TestCase):
         store.mark_job_activation_failed.assert_called_once()
         err = store.mark_job_activation_failed.call_args[0][1]
         self.assertIn("不是启动帐户链接", err)
+        store.set_job_activation_screenshot.assert_not_called()
 
     def test_already_activated_skips_imap(self):
         store = MagicMock()
@@ -303,7 +319,21 @@ class TestActivationDrainAndFifo(unittest.TestCase):
         self.assertEqual(args[2], "Secret!")
         row = self.store.get_registration_job(job_id)
         self.assertEqual(row["activation_status"], "activated")
+        self.assertEqual(row["activation_screenshot_path"], "/tmp/shot.png")
         form_fn.assert_called_once()
+
+    def test_observe_screenshot_keeps_activated(self):
+        job_id = self._succeeded_job("room-shot", "USERA")
+        self.store.save_job_activation_url(job_id, S06_A, "USERA")
+        worker = IcrisActivationWorker(self.store)
+        with patch.object(
+            worker, "_run_activate_browser", return_value=(True, "/tmp/ok.png")
+        ), patch.object(worker, "_process_form_job"):
+            worker.drain()
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["activation_status"], "activated")
+        self.assertEqual(row["form_status"], "pending")
+        self.assertEqual(row["activation_screenshot_path"], "/tmp/ok.png")
 
     def test_drain_skips_form_when_registration_arrives_after_activate(self):
         job_id = self._succeeded_job("room-gap", "USERA")

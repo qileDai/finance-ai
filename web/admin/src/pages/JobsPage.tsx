@@ -4,6 +4,7 @@ import { api, type JobField, type JobRow } from "../api";
 import { formatDateTime } from "../format";
 import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobProgressTooltip } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
+import { activationWaitHint, isActivationMailStuck } from "../jobTimeline";
 import {
   Alert,
   Button,
@@ -108,7 +109,11 @@ function JobExpandRow({ job }: { job: JobRow }) {
 
   return (
     <div className="job-expand">
-      <JobPipelineLights progress={job.progress} />
+      <JobPipelineLights
+        progress={job.progress}
+        hint={activationWaitHint(job)}
+        warnCurrent={isActivationMailStuck(job)}
+      />
       <div className="job-expand-meta">
         来源 {job.source || "-"}
         {" · "}
@@ -531,22 +536,34 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     {
       title: "状态",
       key: "status",
-      width: 100,
-      onHeaderCell: () => ({ style: { maxWidth: 100 } }),
-      onCell: () => ({ style: { maxWidth: 100 } }),
-      render: (_: unknown, r: JobRow) => (
-        <Tooltip
-          title={
-            <span style={{ whiteSpace: "pre-line" }}>
-              {jobProgressTooltip(r.progress)}
-            </span>
-          }
-        >
-          <Tag color={jobProgressTagColor(r.progress)}>
-            {r.progress?.label || "-"}
-          </Tag>
-        </Tooltip>
-      ),
+      width: 130,
+      onHeaderCell: () => ({ style: { maxWidth: 130 } }),
+      onCell: () => ({ style: { maxWidth: 130 } }),
+      render: (_: unknown, r: JobRow) => {
+        const wait = activationWaitHint(r);
+        const stuck = isActivationMailStuck(r);
+        return (
+          <Tooltip
+            title={
+              <span style={{ whiteSpace: "pre-line" }}>
+                {jobProgressTooltip(r.progress)}
+                {wait ? `\n${wait}` : ""}
+              </span>
+            }
+          >
+            <div>
+              <Tag color={stuck ? "warning" : jobProgressTagColor(r.progress)}>
+                {r.progress?.label || "-"}
+              </Tag>
+              {wait ? (
+                <div className={`job-wait-hint${stuck ? " is-warn" : ""}`}>
+                  {wait}
+                </div>
+              ) : null}
+            </div>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "核对截图",
@@ -577,6 +594,26 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
           <DraggableShot
             src={api.jobScreenshotUrl(r.id, "success")}
             filename={jobShotFilename(r.id, "success")}
+            dir={saveDir}
+            zoneEl={zoneEl}
+            ensureFolder={pickSaveFolder}
+            onSaved={(name) => message.success(`已保存 ${name}`)}
+            onError={(msg) => message.error(msg)}
+            onHoverZone={onHoverZone}
+          />
+        ) : (
+          "-"
+        ),
+    },
+    {
+      title: "激活截图",
+      key: "activation_screenshot",
+      width: 120,
+      render: (_: unknown, r: JobRow) =>
+        r.activation_screenshot_path ? (
+          <DraggableShot
+            src={api.jobScreenshotUrl(r.id, "activation")}
+            filename={jobShotFilename(r.id, "activation")}
             dir={saveDir}
             zoneEl={zoneEl}
             ensureFolder={pickSaveFolder}

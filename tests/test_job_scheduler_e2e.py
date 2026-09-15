@@ -170,6 +170,7 @@ class TestJobSchedulerE2E(unittest.TestCase):
         row = self._job(job_id)
         self.assertEqual(row["activation_status"], "activated")
         self.assertEqual(row["form_status"], "filled")
+        self.assertEqual(row["activation_screenshot_path"], "/tmp/shot.png")
         self.assertEqual(job_pipeline_progress(row)["label"], "已填表")
 
     def test_nnc1_yields_when_registration_enqueued(self):
