@@ -562,8 +562,6 @@ def _handle_jobs_list(
     director_name: str = "",
     id_number: str = "",
 ) -> tuple[dict[str, Any], int]:
-    import json as _json
-
     offset = max(0, int(offset or 0))
     total = store.count_registration_jobs(
         status=status,
@@ -577,7 +575,7 @@ def _handle_jobs_list(
     items = store.list_registration_jobs(
         limit=limit,
         offset=offset,
-        omit_result_messages=True,
+        slim_list=True,
         status=status,
         keyword=keyword,
         date_from=date_from,
@@ -586,68 +584,20 @@ def _handle_jobs_list(
         director_name=director_name,
         id_number=id_number,
     )
-    # 列表不返回完整 payload，但抽取关键字段供列表展示
     slim: list[dict[str, Any]] = []
     for it in items:
         row = dict(it)
-        raw = row.pop("payload_json", "") or ""
+        row.pop("payload_json", None)
         row.pop("result_messages", None)
-        payload: dict[str, Any] = {}
-        if raw:
-            try:
-                parsed = _json.loads(raw)
-                if isinstance(parsed, dict):
-                    payload = parsed
-            except (TypeError, ValueError, _json.JSONDecodeError):
-                payload = {}
-
-        directors = payload.get("directors") or []
-        director = directors[0] if isinstance(directors, list) and directors else {}
-        if not isinstance(director, dict):
-            director = {}
-        applicant = payload.get("applicant") or {}
-        if not isinstance(applicant, dict):
-            applicant = {}
-        account = payload.get("icris_account") or {}
-        if not isinstance(account, dict):
-            account = {}
-        proof = payload.get("identity_proof") or {}
-        if not isinstance(proof, dict):
-            proof = {}
-
-        row["company_name_cn"] = str(payload.get("company_name_cn") or "")
-        row["company_name_en"] = str(payload.get("company_name_en") or "")
-        row["director_name"] = (
-            director.get("name_en")
-            or director.get("name")
-            or director.get("name_cn")
-            or applicant.get("name_cn")
-            or applicant.get("name_en")
-            or ""
-        )
-        row["id_type"] = _id_type_display(
-            applicant.get("id_type")
-            or director.get("id_type")
-            or proof.get("id_type")
-            or ""
-        )
-        row["id_number"] = (
-            applicant.get("id_number")
-            or director.get("id_number")
-            or proof.get("id_number")
-            or ""
-        )
-        row["icris_username"] = str(account.get("username") or "")
-        row["icris_password"] = str(account.get("password") or "")
-        contact = payload.get("contact") or {}
-        if not isinstance(contact, dict):
-            contact = {}
-        row["contact_email"] = str(
-            contact.get("email") or applicant.get("email") or ""
-        )
-        row["contact_phone"] = str(
-            contact.get("phone") or applicant.get("phone") or ""
-        )
+        row["company_name_cn"] = str(row.get("company_name_cn") or "")
+        row["company_name_en"] = str(row.get("company_name_en") or "")
+        row["director_name"] = str(row.get("director_name") or "")
+        row["id_type"] = _id_type_display(row.get("id_type") or "")
+        row["id_number"] = str(row.get("id_number") or "")
+        row["icris_username"] = str(row.get("icris_username") or "")
+        row["icris_password"] = str(row.get("icris_password") or "")
+        row["contact_email"] = str(row.get("contact_email") or "")
+        row["contact_phone"] = str(row.get("contact_phone") or "")
         row["progress"] = job_pipeline_progress(row)
         slim.append(row)
     return _ok(

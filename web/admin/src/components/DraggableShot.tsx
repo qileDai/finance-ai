@@ -14,6 +14,7 @@ export type JobShotType = "esubmit" | "success" | "form" | "activation";
 
 type Props = {
   src: string;
+  thumbSrc?: string;
   filename: string;
   width?: number;
   height?: number;
@@ -39,6 +40,7 @@ function overZone(x: number, y: number, zone: HTMLElement | null): boolean {
 
 export function DraggableShot({
   src,
+  thumbSrc,
   filename,
   width = 80,
   height = 50,
@@ -149,13 +151,14 @@ export function DraggableShot({
         onPointerDown={onPointerDown}
       >
         <Image
-          src={src}
+          src={thumbSrc || src}
           width={width}
           height={height}
           loading="lazy"
           style={{ objectFit: "cover", cursor: "pointer" }}
           preview={{
             ...JOB_SHOT_PREVIEW,
+            src,
             open: previewOpen,
             onOpenChange: (open) => {
               if (open && skipPreviewRef.current) {
@@ -184,7 +187,7 @@ export function DraggableShot({
       {ghost ? (
         <img
           className="shot-save-ghost"
-          src={src}
+          src={thumbSrc || src}
           alt=""
           style={{ left: ghost.x, top: ghost.y }}
         />

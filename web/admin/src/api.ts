@@ -356,8 +356,13 @@ export const api = {
   jobScreenshotUrl: (
     id: number,
     type: "esubmit" | "success" | "fail" | "form" | "activation" = "fail",
-  ) =>
-    `/admin/api/jobs/${id}/screenshot?type=${type}`,
+    opts?: { thumb?: boolean; v?: string },
+  ) => {
+    const q = new URLSearchParams({ type });
+    if (opts?.thumb) q.set("thumb", "1");
+    if (opts?.v) q.set("v", opts.v);
+    return `/admin/api/jobs/${id}/screenshot?${q}`;
+  },
   cancelJob: (id: number) =>
     request<ApiOk<{ job: JobRow; message: string }>>(
       `/admin/api/jobs/${id}/cancel`,

@@ -29,6 +29,62 @@ def format_job_run_duration(seconds: float) -> str:
     return f"{minutes}分{secs}秒"
 
 
+def _payload_json_text(json_path: str) -> str:
+    """SQL：payload_json 里取文本，空串当 NULL，便于 COALESCE。路径由代码写死。"""
+    return f"NULLIF(json_extract(payload_json, '{json_path}'), '')"
+
+
+def _payload_json_coalesce(*json_paths: str) -> str:
+    parts = ", ".join(_payload_json_text(p) for p in json_paths)
+    return f"CAST(COALESCE({parts}, '') AS TEXT)"
+
+
+def _job_list_slim_select_sql() -> str:
+    """管理后台列表：不读 payload_json / result_messages / package_dir 全文。"""
+    cols = (
+        "id, roomid, customer_id, status, attempts, max_attempts, last_error, "
+        "dry_run, allow_submit, "
+        "screenshot_path, esubmit_screenshot_path, success_screenshot_path, "
+        "review_status, source, company_name, "
+        "available_at, created_at, started_at, finished_at, updated_at, "
+        "run_duration, s03a_duration, nnc1_duration, "
+        "id_already_registered, form_boost, nnc1_loading_retries, "
+        "activation_url, activation_username, activation_url_saved_at, "
+        "activation_pending_at, activation_attempts, activation_screenshot_path, "
+        "activation_status, activation_checked_at, activation_activated_at, "
+        "form_status, form_filled_at, form_screenshot_path"
+    )
+    extracted = ", ".join(
+        [
+            f"{_payload_json_coalesce('$.company_name_cn')} AS company_name_cn",
+            f"{_payload_json_coalesce('$.company_name_en')} AS company_name_en",
+            (
+                f"{_payload_json_coalesce('$.directors[0].name_en', '$.directors[0].name', '$.directors[0].name_cn', '$.applicant.name_cn', '$.applicant.name_en')} "
+                "AS director_name"
+            ),
+            (
+                f"{_payload_json_coalesce('$.applicant.id_type', '$.directors[0].id_type', '$.identity_proof.id_type')} "
+                "AS id_type"
+            ),
+            (
+                f"{_payload_json_coalesce('$.applicant.id_number', '$.directors[0].id_number', '$.identity_proof.id_number')} "
+                "AS id_number"
+            ),
+            f"{_payload_json_coalesce('$.icris_account.username')} AS icris_username",
+            f"{_payload_json_coalesce('$.icris_account.password')} AS icris_password",
+            (
+                f"{_payload_json_coalesce('$.contact.email', '$.applicant.email')} "
+                "AS contact_email"
+            ),
+            (
+                f"{_payload_json_coalesce('$.contact.phone', '$.applicant.phone')} "
+                "AS contact_phone"
+            ),
+        ]
+    )
+    return f"SELECT {cols}, {extracted}"
+
+
 def parse_job_run_duration(text: str) -> int | None:
     """「M分S秒」→ 秒。空串或格式不对返回 None。"""
     raw = (text or "").strip()
@@ -2789,6 +2845,7 @@ class ExternalGroupStore:
         limit: int = 50,
         offset: int = 0,
         omit_result_messages: bool = False,
+        slim_list: bool = False,
         status: str = "",
         keyword: str = "",
         date_from: str = "",
@@ -2809,14 +2866,19 @@ class ExternalGroupStore:
             id_number=id_number,
         )
         with self._conn() as conn:
-            select_sql = "SELECT *"
-            if omit_result_messages:
-                cols = [
-                    str(r["name"])
-                    for r in conn.execute("PRAGMA table_info(registration_jobs)").fetchall()
-                    if str(r["name"]) != "result_messages"
-                ]
-                select_sql = "SELECT " + ", ".join(cols)
+            if slim_list:
+                select_sql = _job_list_slim_select_sql()
+            else:
+                select_sql = "SELECT *"
+                if omit_result_messages:
+                    cols = [
+                        str(r["name"])
+                        for r in conn.execute(
+                            "PRAGMA table_info(registration_jobs)"
+                        ).fetchall()
+                        if str(r["name"]) != "result_messages"
+                    ]
+                    select_sql = "SELECT " + ", ".join(cols)
             rows = conn.execute(
                 f"{select_sql} FROM registration_jobs {where} "
                 "ORDER BY id DESC LIMIT ? OFFSET ?",

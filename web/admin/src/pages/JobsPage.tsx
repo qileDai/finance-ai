@@ -39,6 +39,74 @@ type Props = {
 const POLL_SEC = 10;
 const PAGE_SIZE = 10;
 
+type ListShotType = "esubmit" | "success" | "activation" | "form";
+
+function shotCacheV(path?: string, updatedAt?: string): string {
+  const name = (path || "").replace(/\\/g, "/").split("/").pop() || "";
+  return name || updatedAt || "";
+}
+
+function listShotUrls(r: JobRow, type: ListShotType) {
+  const path =
+    type === "esubmit"
+      ? r.esubmit_screenshot_path
+      : type === "success"
+        ? r.success_screenshot_path
+        : type === "activation"
+          ? r.activation_screenshot_path
+          : r.form_screenshot_path;
+  const v = shotCacheV(path, r.updated_at);
+  return {
+    src: api.jobScreenshotUrl(r.id, type),
+    thumbSrc: api.jobScreenshotUrl(r.id, type, { thumb: true, v }),
+  };
+}
+
+function JobsRefreshButton({
+  pollSec,
+  resetKey,
+  onSilent,
+  onManual,
+}: {
+  pollSec: number;
+  resetKey: string;
+  onSilent: () => void;
+  onManual: () => void;
+}) {
+  const [countdown, setCountdown] = useState(pollSec);
+  const silentRef = useRef(onSilent);
+  silentRef.current = onSilent;
+
+  useEffect(() => {
+    setCountdown(pollSec);
+  }, [resetKey, pollSec]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          silentRef.current();
+          return pollSec;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [pollSec, resetKey]);
+
+  return (
+    <Button
+      icon={<ReloadOutlined />}
+      onClick={() => {
+        setCountdown(pollSec);
+        onManual();
+      }}
+    >
+      刷新 {countdown}s
+    </Button>
+  );
+}
+
 async function copyText(text: string): Promise<boolean> {
   const cleaned = (text || "").trim();
   if (!cleaned) return false;
@@ -164,8 +232,6 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
   const [zoneHover, setZoneHover] = useState(false);
   const zoneRef = useRef<HTMLDivElement | null>(null);
   const [zoneEl, setZoneEl] = useState<HTMLDivElement | null>(null);
-  const [countdown, setCountdown] = useState(POLL_SEC);
-  const countdownRef = useRef(POLL_SEC);
   const loadGen = useRef(0);
 
   const loadJobs = useCallback(async (opts?: { silent?: boolean }) => {
@@ -209,30 +275,13 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     }
   }, [status, companyName, directorName, idNumber, dateRange, page]);
 
-  const resetCountdown = useCallback(() => {
-    countdownRef.current = POLL_SEC;
-    setCountdown(POLL_SEC);
-  }, []);
+  const silentReload = useCallback(() => {
+    void loadJobs({ silent: true });
+  }, [loadJobs]);
 
   useEffect(() => {
     void loadJobs({ silent: false });
-    resetCountdown();
-  }, [loadJobs, refreshKey, resetCountdown]);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      const next = countdownRef.current - 1;
-      if (next <= 0) {
-        countdownRef.current = POLL_SEC;
-        setCountdown(POLL_SEC);
-        void loadJobs({ silent: true });
-      } else {
-        countdownRef.current = next;
-        setCountdown(next);
-      }
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [loadJobs]);
+  }, [loadJobs, refreshKey]);
 
   useEffect(() => {
     let alive = true;
@@ -333,14 +382,13 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
   }
 
   function onManualRefresh() {
-    resetCountdown();
     void loadJobs({ silent: false });
   }
 
-  async function runAct(
+  const runAct = useCallback(async (
     id: number,
     kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
-  ) {
+  ) => {
     const labelMap: Record<typeof kind, string> = {
       cancel: "取消",
       requeue: "重跑",
@@ -364,12 +412,12 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     } finally {
       setBusyId(null);
     }
-  }
+  }, [message, onRefresh]);
 
-  function act(
+  const act = useCallback((
     id: number,
     kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
-  ) {
+  ) => {
     if (kind === "approve") {
       Modal.confirm({
         title: "确认提交？",
@@ -419,9 +467,9 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       cancelText: "取消",
       onOk: () => runAct(id, "requeue"),
     });
-  }
+  }, [runAct]);
 
-  const columns = [
+  const columns = useMemo(() => [
     {
       title: "ID",
       dataIndex: "id",
@@ -572,7 +620,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       render: (_: unknown, r: JobRow) =>
         r.esubmit_screenshot_path ? (
           <DraggableShot
-            src={api.jobScreenshotUrl(r.id, "esubmit")}
+            {...listShotUrls(r, "esubmit")}
             filename={jobShotFilename(r.id, "esubmit")}
             dir={saveDir}
             zoneEl={zoneEl}
@@ -592,7 +640,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       render: (_: unknown, r: JobRow) =>
         r.success_screenshot_path ? (
           <DraggableShot
-            src={api.jobScreenshotUrl(r.id, "success")}
+            {...listShotUrls(r, "success")}
             filename={jobShotFilename(r.id, "success")}
             dir={saveDir}
             zoneEl={zoneEl}
@@ -612,7 +660,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       render: (_: unknown, r: JobRow) =>
         r.activation_screenshot_path ? (
           <DraggableShot
-            src={api.jobScreenshotUrl(r.id, "activation")}
+            {...listShotUrls(r, "activation")}
             filename={jobShotFilename(r.id, "activation")}
             dir={saveDir}
             zoneEl={zoneEl}
@@ -632,7 +680,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       render: (_: unknown, r: JobRow) =>
         r.form_screenshot_path ? (
           <DraggableShot
-            src={api.jobScreenshotUrl(r.id, "form")}
+            {...listShotUrls(r, "form")}
             filename={jobShotFilename(r.id, "form")}
             dir={saveDir}
             zoneEl={zoneEl}
@@ -769,7 +817,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
         </Space>
       ),
     },
-  ];
+  ], [saveDir, zoneEl, pickSaveFolder, onHoverZone, message, busyId, act]);
 
   return (
     <div className="jobs-page">
@@ -820,9 +868,12 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
             搜索
           </Button>
           <Button onClick={onReset}>重置</Button>
-          <Button icon={<ReloadOutlined />} onClick={onManualRefresh}>
-            刷新 {countdown}s
-          </Button>
+          <JobsRefreshButton
+            pollSec={POLL_SEC}
+            resetKey={`${refreshKey}|${status}|${companyName}|${directorName}|${idNumber}|${dateRange?.[0]?.format("YYYY-MM-DD") || ""}|${dateRange?.[1]?.format("YYYY-MM-DD") || ""}|${page}`}
+            onSilent={silentReload}
+            onManual={onManualRefresh}
+          />
           {folderOk ? (
             <>
               <Button icon={<FolderOpenOutlined />} onClick={() => void pickSaveFolder()}>

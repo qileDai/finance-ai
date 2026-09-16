@@ -69,6 +69,8 @@ class TestJobsListPage(unittest.TestCase):
         self.assertEqual(len(data["items"]), 10)
         self.assertNotIn("fields", data["items"][0])
         self.assertNotIn("result_messages", data["items"][0])
+        self.assertNotIn("payload_json", data["items"][0])
+        self.assertEqual(data["items"][0]["company_name_en"], "Co 11")
 
         page2, code2 = handle_admin_api(
             method="GET",
@@ -89,6 +91,90 @@ class TestJobsListPage(unittest.TestCase):
         self.assertEqual(act_path, "/tmp/act.png")
         missing, _ = self.store.get_job_screenshot_path(99999, "fail")
         self.assertFalse(missing)
+
+    def test_slim_list_extracts_payload_keeps_default_full(self) -> None:
+        payload = {
+            "company_name_cn": "测试公司",
+            "company_name_en": "Test Co Ltd",
+            "directors": [
+                {
+                    "name_en": "CHAN TAI MAN",
+                    "id_type": "HKID",
+                    "id_number": "A123456(7)",
+                }
+            ],
+            "applicant": {"email": "a@x.com", "phone": "12345678"},
+            "icris_account": {"username": "user1", "password": "pass1"},
+            "contact": {"email": "c@x.com"},
+            "identity_proof": {"id_type": "PASSPORT"},
+        }
+        self._enqueue("room-slim", payload=payload)
+        default = self.store.list_registration_jobs(limit=1)[0]
+        self.assertIn("payload_json", default)
+        self.assertIn("package_dir", default)
+        slim = self.store.list_registration_jobs(limit=1, slim_list=True)[0]
+        self.assertNotIn("payload_json", slim)
+        self.assertNotIn("result_messages", slim)
+        self.assertNotIn("package_dir", slim)
+        self.assertEqual(slim["company_name_cn"], "测试公司")
+        self.assertEqual(slim["company_name_en"], "Test Co Ltd")
+        self.assertEqual(slim["director_name"], "CHAN TAI MAN")
+        self.assertEqual(slim["id_type"], "HKID")
+        self.assertEqual(slim["id_number"], "A123456(7)")
+        self.assertEqual(slim["icris_username"], "user1")
+        self.assertEqual(slim["icris_password"], "pass1")
+        self.assertEqual(slim["contact_email"], "c@x.com")
+        self.assertEqual(slim["contact_phone"], "12345678")
+
+        data, code = handle_admin_api(
+            method="GET",
+            path="/admin/api/jobs?limit=5",
+            store=self.store,
+        )
+        self.assertEqual(code, 200)
+        row = data["items"][0]
+        self.assertEqual(row["director_name"], "CHAN TAI MAN")
+        self.assertEqual(row["id_type"], "香港身份证")
+        self.assertNotIn("payload_json", row)
+
+    def test_screenshot_thumb_jpeg_cached_original_png_unchanged(self) -> None:
+        import os
+        import time
+
+        from PIL import Image
+
+        from src.web.admin_server import (
+            ensure_job_screenshot_thumb,
+            job_screenshot_thumb_path,
+            read_job_screenshot_file,
+        )
+
+        png = Path(self._tmp.name) / "shot.png"
+        Image.new("RGB", (1600, 1000), (30, 80, 200)).save(
+            png, "PNG", compress_level=0
+        )
+        orig, ctype, cache, suffix = read_job_screenshot_file(png, thumb=False)
+        self.assertEqual(ctype, "image/png")
+        self.assertEqual(cache, "private, no-cache")
+        self.assertEqual(suffix, ".png")
+        self.assertGreater(len(orig), 1000)
+
+        thumb, tctype, tcache, tsuffix = read_job_screenshot_file(png, thumb=True)
+        self.assertEqual(tctype, "image/jpeg")
+        self.assertEqual(tcache, "private, max-age=86400")
+        self.assertEqual(tsuffix, ".thumb.jpg")
+        self.assertLess(len(thumb), len(orig))
+        dest = job_screenshot_thumb_path(png)
+        self.assertTrue(dest.is_file())
+        before = dest.read_bytes()
+
+        Image.new("RGB", (1600, 1000), (200, 20, 20)).save(
+            png, "PNG", compress_level=0
+        )
+        future = time.time() + 10
+        os.utime(png, (future, future))
+        ensure_job_screenshot_thumb(png)
+        self.assertNotEqual(before, dest.read_bytes())
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import mimetypes
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -22,6 +23,55 @@ ADMIN_STATIC_ROOT = PROJECT_ROOT / "static" / "admin"
 
 # 无需 Cookie 的 API
 _PUBLIC_API = frozenset({"login", "logout", "me"})
+
+_THUMB_MAX = (160, 100)
+_THUMB_QUALITY = 70
+_CACHE_THUMB = "private, max-age=86400"
+_CACHE_ORIGINAL = "private, no-cache"
+
+
+def job_screenshot_thumb_path(src: Path) -> Path:
+    """原图旁的 JPEG 缩略图路径（例如 foo.png.thumb.jpg）。"""
+    return Path(str(src) + ".thumb.jpg")
+
+
+def ensure_job_screenshot_thumb(src: Path) -> Path:
+    """生成或复用列表用 JPEG 缩略图；原图 mtime 更新则重建。"""
+    dest = job_screenshot_thumb_path(src)
+    st = src.stat()
+    if dest.is_file():
+        dt = dest.stat()
+        if dt.st_mtime >= st.st_mtime and dt.st_size > 0:
+            return dest
+    from PIL import Image
+
+    with Image.open(src) as im:
+        rgb = im.convert("RGB")
+        rgb.thumbnail(_THUMB_MAX)
+        rgb.save(dest, "JPEG", quality=_THUMB_QUALITY, optimize=True)
+    return dest
+
+
+def read_job_screenshot_file(
+    src: Path, *, thumb: bool
+) -> tuple[bytes, str, str, str]:
+    """读取截图文件。
+
+    返回 (bytes, content_type, cache_control, filename_suffix)。
+    thumb=True 时出 JPEG 缩略图并允许浏览器缓存；失败则回退原 PNG + no-cache。
+    """
+    if thumb:
+        try:
+            dest = ensure_job_screenshot_thumb(src)
+            return (
+                dest.read_bytes(),
+                "image/jpeg",
+                _CACHE_THUMB,
+                ".thumb.jpg",
+            )
+        except Exception:
+            logger.exception("列表缩略图生成失败，回退原图: %s", src)
+    return src.read_bytes(), "image/png", _CACHE_ORIGINAL, ".png"
 
 
 @dataclass
@@ -144,13 +194,12 @@ class AdminWebServer:
             def _handle_job_screenshot(
                 self, store: ExternalGroupStore, rel: str
             ) -> None:
-                """读取 job 截图并返回 image/png。
+                """读取 job 截图。默认 image/png + no-cache；?thumb=1 为列表 JPEG 缩略图。
 
                 rel: jobs/<id>/screenshot
                 query: ?type=esubmit|success|fail|form|activation（默认 fail）
                 """
                 import re
-                from pathlib import Path
                 from urllib.parse import parse_qs
 
                 m = re.match(r"jobs/(\d+)/screenshot$", rel)
@@ -162,6 +211,11 @@ class AdminWebServer:
                 qs = urlparse(self.path).query or ""
                 q = parse_qs(qs)
                 shot_type = (q.get("type", ["fail"]) or ["fail"])[0].lower()
+                want_thumb = (q.get("thumb", ["0"]) or ["0"])[0].lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                )
 
                 found, file_path = store.get_job_screenshot_path(job_id, shot_type)
                 if not found:
@@ -183,19 +237,24 @@ class AdminWebServer:
                         404,
                     )
 
-                st = p.stat()
+                data, content_type, cache_control, suffix = read_job_screenshot_file(
+                    p, thumb=want_thumb
+                )
                 safe_type = re.sub(r"[^a-z0-9_-]", "", shot_type) or "fail"
-                etag = f'"{job_id}-{safe_type}-{int(st.st_mtime)}-{st.st_size}"'
+                st = p.stat()
+                etag_kind = "thumb" if want_thumb and suffix.endswith(".jpg") else "full"
+                etag = (
+                    f'"{job_id}-{safe_type}-{etag_kind}-{int(st.st_mtime)}-{len(data)}"'
+                )
                 inm = (self.headers.get("If-None-Match") or "").strip()
                 if inm == etag or inm == f"W/{etag}":
                     self.send_response(304)
                     self.send_header("ETag", etag)
-                    self.send_header("Cache-Control", "private, no-cache")
+                    self.send_header("Cache-Control", cache_control)
                     self.end_headers()
                     return
 
-                data = p.read_bytes()
-                filename = f"job-{job_id}-{safe_type}.png"
+                filename = f"job-{job_id}-{safe_type}{suffix}"
                 as_download = (q.get("download", ["0"]) or ["0"])[0].lower() in (
                     "1",
                     "true",
@@ -203,14 +262,14 @@ class AdminWebServer:
                 )
                 disposition = "attachment" if as_download else "inline"
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header(
                     "Content-Disposition",
                     f'{disposition}; filename="{filename}"',
                 )
                 self.send_header("ETag", etag)
-                self.send_header("Cache-Control", "private, no-cache")
+                self.send_header("Cache-Control", cache_control)
                 self.end_headers()
                 self.wfile.write(data)
 

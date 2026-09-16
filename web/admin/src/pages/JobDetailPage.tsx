@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Image, Tag, Button, Modal, Tooltip } from "antd";
-import { api, type JobDetailResponse, type JobField, type JobLogLine } from "../api";
+import { api, type JobDetailResponse, type JobField, type JobLogLine, type JobRow } from "../api";
 import { formatDateTime } from "../format";
 import { asLogText, logLineClass, normalizeLogLines, splitLogPhases } from "../jobLog";
 import { buildJobTimeline } from "../jobTimeline";
@@ -21,6 +21,45 @@ type Props = {
   refreshKey: number;
   onRefresh: () => void;
 };
+
+type DetailShotType = "esubmit" | "success" | "fail" | "activation" | "form";
+
+function shotCacheV(path?: string, updatedAt?: string): string {
+  const name = (path || "").replace(/\\/g, "/").split("/").pop() || "";
+  return name || updatedAt || "";
+}
+
+function detailShotUrls(
+  job: Pick<
+    JobRow,
+    | "id"
+    | "updated_at"
+    | "esubmit_screenshot_path"
+    | "success_screenshot_path"
+    | "screenshot_path"
+    | "activation_screenshot_path"
+    | "form_screenshot_path"
+  >,
+  type: DetailShotType,
+) {
+  const path = (
+    type === "esubmit"
+      ? job.esubmit_screenshot_path
+      : type === "success"
+        ? job.success_screenshot_path
+        : type === "fail"
+          ? job.screenshot_path
+          : type === "activation"
+            ? job.activation_screenshot_path
+            : job.form_screenshot_path
+  )?.trim();
+  if (!path) return { src: null as string | null, thumbSrc: null as string | null };
+  const v = shotCacheV(path, job.updated_at);
+  return {
+    src: api.jobScreenshotUrl(job.id, type),
+    thumbSrc: api.jobScreenshotUrl(job.id, type, { thumb: true, v }),
+  };
+}
 
 function JobLogBlock({
   title,
@@ -87,20 +126,22 @@ function SummaryPairs({
 function SummaryShot({
   label,
   src,
+  thumbSrc,
 }: {
   label: string;
   src: string | null;
+  thumbSrc?: string | null;
 }) {
   return (
     <div className="job-summary-shot">
       <span>{label}</span>
       {src ? (
         <Image
-          src={src}
+          src={thumbSrc || src}
           width={96}
           height={96}
           style={{ objectFit: "cover" }}
-          preview={JOB_SHOT_PREVIEW}
+          preview={{ ...JOB_SHOT_PREVIEW, src }}
         />
       ) : (
         <span className="job-summary-shot-empty">无</span>
@@ -369,30 +410,9 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                   />
                 </div>
                 <div className="job-summary-shots">
-                  <SummaryShot
-                    label="核对截图"
-                    src={
-                      job.esubmit_screenshot_path
-                        ? api.jobScreenshotUrl(job.id, "esubmit")
-                        : null
-                    }
-                  />
-                  <SummaryShot
-                    label="成功截图"
-                    src={
-                      job.success_screenshot_path
-                        ? api.jobScreenshotUrl(job.id, "success")
-                        : null
-                    }
-                  />
-                  <SummaryShot
-                    label="失败截图"
-                    src={
-                      job.screenshot_path
-                        ? api.jobScreenshotUrl(job.id, "fail")
-                        : null
-                    }
-                  />
+                  <SummaryShot label="核对截图" {...detailShotUrls(job, "esubmit")} />
+                  <SummaryShot label="成功截图" {...detailShotUrls(job, "success")} />
+                  <SummaryShot label="失败截图" {...detailShotUrls(job, "fail")} />
                 </div>
               </div>
               {job.last_error ? (
@@ -424,22 +444,8 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
                 <p className="muted">尚未进入激活</p>
               )}
               <div className="job-summary-shots" style={{ marginTop: 12 }}>
-                <SummaryShot
-                  label="激活截图"
-                  src={
-                    job.activation_screenshot_path
-                      ? api.jobScreenshotUrl(job.id, "activation")
-                      : null
-                  }
-                />
-                <SummaryShot
-                  label="填表截图"
-                  src={
-                    job.form_screenshot_path
-                      ? api.jobScreenshotUrl(job.id, "form")
-                      : null
-                  }
-                />
+                <SummaryShot label="激活截图" {...detailShotUrls(job, "activation")} />
+                <SummaryShot label="填表截图" {...detailShotUrls(job, "form")} />
               </div>
               {jobCanFormRetry(job.form_status) ? (
                 <div className="toolbar" style={{ gap: 12, marginTop: 8 }}>
