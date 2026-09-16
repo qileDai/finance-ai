@@ -62,6 +62,7 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertEqual(directors[0].get("name_en"), "")
         username = str((data.get("icris_account") or {}).get("username") or "")
         self.assertTrue(username)
+        self.assertRegex(username.lower(), r"^yxj")
 
     def test_bracket_english_fills_s03_three_fields(self):
         materials = self._materials("張慧斌【ZHANG，Huibin】")
@@ -105,7 +106,8 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertEqual(directors[0].get("surname_en") or "", "")
         username = str((data.get("icris_account") or {}).get("username") or "")
         self.assertTrue(username)
-        self.assertRegex(username.lower(), r"^hd")
+        # 材料里的 HU Dandong 不写回 S03，但用户名仍按拉丁单词首字母
+        self.assertRegex(username.lower(), r"^hd\d")
         self.assertIn("yt", username.lower())
 
     def test_hudandong_username_from_pinyin_without_en_fields(self):
@@ -116,7 +118,19 @@ class TestAggregatorChineseNameEn(unittest.TestCase):
         self.assertEqual(applicant.get("surname_en") or "", "")
         self.assertEqual(applicant.get("given_en") or "", "")
         username = str((data.get("icris_account") or {}).get("username") or "")
-        self.assertRegex(username.lower(), r"^hd")
+        self.assertRegex(username.lower(), r"^hdd")
+        self.assertIn("yt", username.lower())
+
+    def test_yaoxiaojia_username_one_initial_per_char(self):
+        data = aggregate_company_data(self._materials("姚曉佳"))
+        username = str((data.get("icris_account") or {}).get("username") or "")
+        self.assertRegex(username.lower(), r"^yxj")
+        self.assertIn("yt", username.lower())
+
+    def test_hudan_username_two_initials(self):
+        data = aggregate_company_data(self._materials("胡丹"))
+        username = str((data.get("icris_account") or {}).get("username") or "")
+        self.assertRegex(username.lower(), r"^hd\d")
         self.assertIn("yt", username.lower())
 
     def test_build_materials_keeps_user_english(self):
@@ -160,7 +174,9 @@ class TestS02UsernamePinyin(unittest.TestCase):
     def test_person_en_helper_pinyin_vs_latin(self):
         from src.materials.aggregator import person_en_for_icris_username
 
-        self.assertEqual(person_en_for_icris_username("", "胡丹东"), "Hu Dandong")
+        self.assertEqual(person_en_for_icris_username("", "胡丹东"), "Hu Dan Dong")
+        self.assertEqual(person_en_for_icris_username("", "姚曉佳"), "Yao Xiao Jia")
+        self.assertEqual(person_en_for_icris_username("", "胡丹"), "Hu Dan")
         self.assertEqual(
             person_en_for_icris_username("CHAN Tai Man", "陳大文"),
             "CHAN Tai Man",
@@ -184,9 +200,39 @@ class TestS02UsernamePinyin(unittest.TestCase):
             "icris_account": {},
         }
         user, _pwd = derive_icris_credentials(data)
-        self.assertRegex(user, r"^[Hh]d63846yt")
+        self.assertRegex(user, r"^[Hh]dd63846yt")
         self.assertEqual(data["applicant"].get("name_en") or "", "")
         self.assertEqual(data["applicant"].get("surname_en") or "", "")
+
+    def test_derive_yaoxiaojia_one_initial_per_char(self):
+        from src.browser.icris_registration import derive_icris_credentials
+
+        data = {
+            "applicant": {
+                "name_cn": "姚曉佳",
+                "name_en": "",
+                "id_number": "440514200003184927",
+            },
+            "identity_proof": {"id_number": "440514200003184927"},
+            "icris_account": {},
+        }
+        user, _pwd = derive_icris_credentials(data)
+        self.assertRegex(user, r"^[Yy]xj84927yt")
+
+    def test_derive_hudan_two_initials(self):
+        from src.browser.icris_registration import derive_icris_credentials
+
+        data = {
+            "applicant": {
+                "name_cn": "胡丹",
+                "name_en": "",
+                "id_number": "340421198611163846",
+            },
+            "identity_proof": {"id_number": "340421198611163846"},
+            "icris_account": {},
+        }
+        user, _pwd = derive_icris_credentials(data)
+        self.assertRegex(user, r"^[Hh]d63846yt")
 
     def test_derive_uses_english_initials_not_pinyin(self):
         from src.browser.icris_registration import derive_icris_credentials
@@ -216,7 +262,7 @@ class TestS02UsernamePinyin(unittest.TestCase):
         }
         person_en, id_number = _person_en_and_id_from_data(data)
         user, _pwd = _generate_icris_credentials(person_en, id_number, retry=True)
-        self.assertRegex(user.lower(), r"^hd63846yt")
+        self.assertRegex(user.lower(), r"^hdd63846yt")
         self.assertEqual(data["applicant"].get("name_en") or "", "")
 
     def test_bracket_english_username_zhang_huibin(self):

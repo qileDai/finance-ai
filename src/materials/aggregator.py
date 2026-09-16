@@ -186,9 +186,8 @@ def person_en_for_icris_username(name_en: str = "", name_cn: str = "") -> str:
 
         pinyins = lazy_pinyin(cn)
         if pinyins:
-            family = pinyins[0].capitalize()
-            given = "".join(pinyins[1:]).capitalize() if len(pinyins) > 1 else ""
-            return f"{family} {given}".strip()
+            # 每字一音节，空格分开，便于用户名取每个汉字的拼音首字母
+            return " ".join(p.capitalize() for p in pinyins if p)
     except Exception:
         pass
     return en
@@ -199,7 +198,7 @@ def _generate_icris_credentials(
 ) -> tuple[str, str]:
     """生成 ICRIS 账号凭证。
 
-    用户名 = 姓名拼音首字母（小写） + 证件号码后5位 + yt + N位随机（默认4）
+    用户名 = 每个汉字拼音首字母（小写；有拉丁英文名则按单词） + 证件号码后5位 + yt + N位随机（默认4）
     密码 = 用户名 + @（icris_password_suffix 配置，默认 @）
     retry=True 时重新 roll 随机后缀（任务重跑、用户名已被占用）。
     """

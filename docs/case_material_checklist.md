@@ -67,8 +67,8 @@
 
 | 项目 | 规则 | 示例 |
 |---|---|---|
-| 用户名 (username) | 英文名首字母（小写）+ 证件号后 5 位 + `yt` + 4 位随机 | `yx84927ytk3m9` |
-| 密码 (password) | 用户名 + `@` | `yx84927ytk3m9@` |
+| 用户名 (username) | 中文每字拼音首字母（小写）+ 证件号后 5 位 + `yt` + 4 位随机 | `yxj84927ytk3m9` |
+| 密码 (password) | 用户名 + `@` | `yxj84927ytk3m9@` |
 
 **配置项**（`config/settings.py`）：
 
@@ -77,7 +77,7 @@ icris_credential_mode: str = "yingtai"       # "yingtai" initials+id+yt | "legac
 icris_password_suffix: str = "@"             # 密码后缀（拼在用户名后）
 ```
 
-**示例推导**：姓名 `YAO Xiaojia`、证件 `440514200003184927` → 首字母 `yx` + 后五位 `84927` + `yt` + 4 位随机 → `yx84927ytk3m9` / `yx84927ytk3m9@`（随机部分每次不同）。
+**示例推导**：中文名 `姚曉佳`、证件 `440514200003184927` → 每字拼音首字母 `yxj` + 后五位 `84927` + `yt` + 4 位随机 → `yxj84927ytk3m9` / `yxj84927ytk3m9@`（随机部分每次不同）。二字名如 `胡丹` → `hd`；三字名如 `胡丹东` → `hdd`。材料里已有拉丁英文名时仍按单词取首字母（如 `CHAN Tai Man` → `ctm`，`ZHANG Huibin` → `zh`）。
 
 **一致性保证**：同一注册流程内，`derive_icris_credentials` 通过 `_icris_session` 缓存保证用户名/密码一致，不会因多次调用而变化。旧 `Yingtai…` 前缀凭证会按上述规则重算。
 
