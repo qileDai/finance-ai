@@ -53,6 +53,8 @@ _POLL_MS = 100
 _FORM_PAUSE_MS = 120
 _SPIN_TIMEOUT_MS = 45000
 _STEP_READY_MS = 30000
+# s02/s03/s04/s03a 底栏「继 续 / 繼 續」（字间空格）
+CONTINUE_BTN_RE = re.compile(r"继\s*续|繼\s*續|Continue|Next|下一步", re.I)
 _S04_LOCATOR_MS = 3000
 _S04_RADIO_WAIT_MS = 20000
 _S04_RADIO_LABEL_MAX = 200
@@ -519,6 +521,7 @@ class IcrisRegistrationBot:
         self._locale: str | None = None
         self._user_info_filled: bool = False
         self._identity_proof_filled: bool = False
+        self._s03a_handled: bool = False
         # s03a 截图路径（进入 s03a 时自动截图存档）
         self.esubmit_screenshot_path: str = ""
         # s05 成功页截图路径（提交成功后自动截图存档）
@@ -554,6 +557,7 @@ class IcrisRegistrationBot:
         """关页重开前重置步骤内存标志，避免假成功。"""
         self._user_info_filled = False
         self._identity_proof_filled = False
+        self._s03a_handled = False
         self._locale = None
 
     def _job_is_cancelled(self) -> bool:
@@ -672,6 +676,11 @@ class IcrisRegistrationBot:
 
         store = ExternalGroupStore()
         self._raise_if_cancelled()
+
+        existing_review = store.get_job_review_status(self.job_id)
+        if existing_review == "approved":
+            logger.info("s03a job #%s 已审核通过，跳过重复等待", self.job_id)
+            return True
 
         # 1) 标记 awaiting_review
         store.mark_job_awaiting_review(self.job_id)
@@ -4938,22 +4947,29 @@ class IcrisRegistrationBot:
     def _is_esubmit_terms_url(self, url: str) -> bool:
         return bool(re.search(r"registration/s03a", (url or "").lower()))
 
-    async def _is_esubmit_terms_step(self, page: "Page") -> bool:
-        """s03a：电子提交服务的条款和条件（双确认勾选页）。"""
-        if self._is_esubmit_terms_url(page.url):
-            return True
-        return bool(
-            await page.evaluate(
-                """() => {
-                    const root = document.body || document.documentElement;
-                    if (!root) return false;
-                    const t = root.innerText || '';
-                    return /电子提交服务的条款|電子提交服務的條款/.test(t)
-                        && /个人资料收集声明|個人資料收集聲明/.test(t)
-                        && /资料正确完整|資料正確完整/.test(t);
-                }"""
+    async def _esubmit_terms_copy_present(self, page: "Page") -> bool:
+        """条款+确认文案是否在页上（简繁均可）。不能只凭 URL。"""
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const root = document.body || document.documentElement;
+                        if (!root) return false;
+                        const t = root.innerText || '';
+                        return /电子提交服务的条款|電子提交服務的條款/.test(t)
+                            && /资料正确完整|資料正確完整/.test(t);
+                    }"""
+                )
             )
-        )
+        except Exception:
+            return False
+
+    async def _is_esubmit_terms_step(self, page: "Page") -> bool:
+        """s03a：电子提交服务的条款和条件（双确认勾选页）。
+
+        必须见到条款文案。点完繼續后 URL 仍可能是 s03a.do，不能据此当成还在条款页。
+        """
+        return await self._esubmit_terms_copy_present(page)
 
     def _is_success_page_url(self, url: str) -> bool:
         return bool(re.search(r"registration/s05", (url or "").lower()))
@@ -5315,64 +5331,34 @@ class IcrisRegistrationBot:
             logger.error("s03a 提交前校验失败：勾选状态丢失")
             return False
 
-        # s03a 的推进按钮是"继续"（不是"提交"）：优先匹配"继续/繼續/下一步"，fallback 到"提交/Submit"
-        advance_selectors = [
-            "button:has-text('继续')",
-            "button:has-text('繼續')",
-            "button:has-text('下一步')",
-            "button:has-text('Next')",
-            "input[type='submit'][value*='继续']",
-            "input[type='submit'][value*='繼續']",
-            "input[type='button'][value*='继续']",
-            "input[type='button'][value*='繼續']",
-            "button:has-text('提交')",
-            "button:has-text('提 交')",
-            "input[type='submit'][value*='提交']",
-            "input[type='button'][value*='提交']",
-            "button:has-text('Submit')",
-            "input[type='submit'][value*='Submit' i]",
-            "form button[type='submit']",
-            "form input[type='submit']",
-        ]
-        for sel in advance_selectors:
-            btn = page.locator(sel).first
-            try:
-                if await btn.count() == 0 or not await btn.is_visible():
-                    continue
-                logger.warning("s03a 即将点击继续/提交: %s", sel)
-                await btn.click(timeout=15000)
-                await self._wait_spin_clear(page, timeout_ms=45000)
+        for attempt in (1, 2):
+            if await self._is_success_step(page):
                 await self._log_page(page, "s03a 继续后")
                 return True
-            except Exception:
-                logger.debug("s03a 按钮 点击失败 sel=%s", sel, exc_info=True)
-
-        try:
-            clicked = await page.evaluate(
-                """() => {
-                    const nodes = Array.from(document.querySelectorAll(
-                        "button, input[type='submit'], input[type='button'], .ant-btn"
-                    ));
-                    for (const el of nodes) {
-                        const t = ((el.innerText || el.value || '') + '').trim();
-                        if (/继续|繼續|下一步|Next/i.test(t)
-                            || /提交|Submit/i.test(t)) {
-                            el.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }"""
-            )
-            if clicked:
-                await self._wait_spin_clear(page, timeout_ms=45000)
-                logger.warning("s03a 已通过 JS 点击继续/提交")
+            if not await self._esubmit_terms_is_ready(page):
+                if await self._wait_step_ready(
+                    page,
+                    self._is_success_step,
+                    timeout_ms=_STEP_READY_MS,
+                    label="s05",
+                ):
+                    await self._log_page(page, "s03a 继续后")
+                    return True
+                raise IcrisStepLoadError(
+                    f"s03a 点继续后未进入提交成功页: {page.url[:160]}"
+                )
+            logger.info("s03a 点击红色繼續进入 s05 (尝试 %d/2)", attempt)
+            ok = await self._click_continue(page, expect_step="s05")
+            if ok or await self._is_success_step(page):
+                await self._log_page(page, "s03a 继续后")
                 return True
-        except Exception:
-            logger.debug("s03a JS 点击失败", exc_info=True)
 
-        logger.warning("s03a 已勾选但未找到继续/提交按钮")
-        return False
+        if await self._is_success_step(page):
+            await self._log_page(page, "s03a 继续后")
+            return True
+        raise IcrisStepLoadError(
+            f"s03a 点继续后未进入提交成功页: {page.url[:160]}"
+        )
 
     def _normalize_icris_id_type(self, raw: str, id_number: str = "") -> str:
         """归一证件类型：库里已有则尊重；空类型才弱兜底。"""
@@ -6292,7 +6278,7 @@ class IcrisRegistrationBot:
 
         await self._wait_spin_clear(page, timeout_ms=15000)
 
-        continue_pattern = re.compile(r"继\s*续|繼\s*續|Continue|Next|下一步", re.I)
+        continue_pattern = CONTINUE_BTN_RE
 
         async def _try_click(btn, *, require_text: bool = True) -> bool:
             if await btn.count() == 0 or not await btn.is_visible():
@@ -6333,6 +6319,17 @@ class IcrisRegistrationBot:
             except Exception as exc:
                 logger.debug("点击继续失败: %s", exc)
                 return False
+
+        expect = (expect_step or "").lower()
+        want_s05 = "s05" in expect
+        if want_s05:
+            danger = page.locator(
+                "button[type='submit'].ant-btn-danger, "
+                "button.ant-btn-danger.primary, "
+                "button.primary.ant-btn.ant-btn-danger"
+            ).last
+            if await _try_click(danger, require_text=True):
+                return True
 
         # s02 页面继续按钮：button[type=submit].primary（文字「继 续」）
         submit_continue = page.locator(
@@ -6409,12 +6406,15 @@ class IcrisRegistrationBot:
         previous_url: str,
         *,
         want_s04: bool,
+        want_s05: bool = False,
     ) -> bool:
         """判断点击继续后是否已完成期望导航（含 spin 已清）。"""
         if page.is_closed() or self._is_home_or_portal(page.url):
             return False
         if await self._is_spinning(page):
             return False
+        if want_s05:
+            return await self._is_success_step(page)
         if want_s04:
             if await self._is_identity_proof_step(page):
                 return True
@@ -6443,16 +6443,18 @@ class IcrisRegistrationBot:
         *,
         expect_step: str | None = None,
     ) -> bool:
-        """点击继续后：等 20s → 失败则 reload 再等 20s。
+        """点击继续后：等 30s → 失败则 reload 再等 30s。
 
         expect_step='s04' 时：仍停在用户资料页不算成功，须等到 s04。
+        expect_step='s05' 时：须进入提交成功页；未到则不刷新（s03a 提交后 reload 会打回 s01）。
         """
         expect = (expect_step or "").lower()
-        want_s04 = "s04" in expect or expect.endswith("4")
+        want_s04 = "s04" in expect
+        want_s05 = "s05" in expect
 
         async def _ready(p: "Page") -> bool:
             return await self._continue_nav_ok(
-                p, previous_url, want_s04=want_s04
+                p, previous_url, want_s04=want_s04, want_s05=want_s05
             )
 
         if await self._wait_step_ready(
@@ -6474,6 +6476,15 @@ class IcrisRegistrationBot:
             await self._raise_if_format_invalid(
                 page, errs, step=self._nav_step_label(expect_step, previous_url)
             )
+            return False
+
+        if want_s05:
+            logger.warning(
+                "s03a 点继续后未进入 s05，不刷新 url=%s",
+                page.url[:120],
+            )
+            if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
+                raise IcrisLoadingTimeoutError(register_loading_timeout_message("s05"))
             return False
 
         logger.warning(
@@ -6526,6 +6537,27 @@ class IcrisRegistrationBot:
     async def _click_next_if_exists(self, page: "Page") -> bool:
         """兼容旧调用，统一走 _click_continue"""
         return await self._click_continue(page)
+
+    async def _run_s03a_review_and_submit(self, page: "Page") -> None:
+        """s03a 只走一遍：截图、审核、勾选；允许提交时点红色繼續并等 s05。"""
+        if self._s03a_handled:
+            logger.info("s03a 已处理过，跳过重复审核/勾选")
+            return
+        if not await self._is_esubmit_terms_step(page):
+            return
+        if not self.esubmit_screenshot_path:
+            await self._save_esubmit_screenshot(page)
+        if self.allow_submit and self.job_id:
+            approved = await self._wait_for_review_approval(page)
+            if not approved:
+                logger.warning("s03a 审核未通过/超时，停止流程")
+                raise IcrisFlowError(
+                    "s03a 审核未通过或超时",
+                    screenshot_path=self.esubmit_screenshot_path or "",
+                    no_requeue=True,
+                )
+        await self._accept_esubmit_terms(page, submit=bool(self.allow_submit))
+        self._s03a_handled = True
 
     async def _run_registration_attempt(
         self, page: "Page", data: dict[str, Any]
@@ -6652,12 +6684,7 @@ class IcrisRegistrationBot:
                 await self._advance_from_identity_to_esubmit(page)
         if await self._is_esubmit_terms_step(page):
             logger.info("=== s03a 电子提交服务条款 ===")
-            await self._save_esubmit_screenshot(page)
-            # allow_submit=True 时由后续循环统一处理审核等待 + 提交
-            if not (self.allow_submit and self.job_id):
-                await self._accept_esubmit_terms(
-                    page, submit=bool(self.allow_submit)
-                )
+            await self._run_s03a_review_and_submit(page)
 
         # Step 5+: 其余多步表单
         max_steps = 6
@@ -6669,32 +6696,26 @@ class IcrisRegistrationBot:
             if await self._is_success_step(page):
                 logger.info("步骤 %d 检测到 s05 成功页，退出步骤循环", step + 5)
                 break
+            if self._s03a_handled:
+                if not self.allow_submit:
+                    break
+                if await self._wait_step_ready(
+                    page,
+                    self._is_success_step,
+                    timeout_ms=_STEP_READY_MS,
+                    label="s05",
+                ):
+                    break
+                raise IcrisStepLoadError(
+                    f"s03a 点继续后未进入提交成功页: {page.url[:160]}"
+                )
             if await self._is_esubmit_terms_step(page):
                 logger.info("=== s03a 电子提交服务条款（步骤循环）===")
-                if not self.esubmit_screenshot_path:
-                    await self._save_esubmit_screenshot(page)
-                # allow_submit=True 时等待人工审核确认
-                if self.allow_submit and self.job_id:
-                    approved = await self._wait_for_review_approval(page)
-                    if not approved:
-                        logger.warning("s03a 审核未通过/超时，停止流程")
-                        raise IcrisFlowError(
-                            "s03a 审核未通过或超时",
-                            screenshot_path=self.esubmit_screenshot_path or "",
-                            no_requeue=True,
-                        )
-                await self._accept_esubmit_terms(
-                    page, submit=bool(self.allow_submit)
-                )
+                await self._run_s03a_review_and_submit(page)
                 if not await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS):
                     raise IcrisLoadingTimeoutError(
                         register_loading_timeout_message("s03a")
                     )
-                if (
-                    await self._is_esubmit_terms_step(page)
-                    and not self.allow_submit
-                ):
-                    break
                 continue
             if await self._is_identity_proof_step(page):
                 if self._identity_proof_filled:
@@ -6730,29 +6751,15 @@ class IcrisRegistrationBot:
             if not await self._ensure_on_registration(page, f"步骤{step + 5}后"):
                 break
 
-        # 末尾再处理一次 s03a
-        if await self._is_esubmit_terms_step(page):
+        # 末尾再处理一次 s03a（仅尚未处理时）
+        if await self._is_esubmit_terms_step(page) and not self._s03a_handled:
             logger.info("=== s03a 电子提交服务条款（流程末尾）===")
-            if not self.esubmit_screenshot_path:
-                await self._save_esubmit_screenshot(page)
-            # allow_submit=True 时等待人工审核确认
-            if self.allow_submit and self.job_id:
-                approved = await self._wait_for_review_approval(page)
-                if not approved:
-                    logger.warning("s03a 审核未通过/超时，停止流程")
-                    raise IcrisFlowError(
-                        "s03a 审核未通过或超时",
-                        screenshot_path=self.esubmit_screenshot_path or "",
-                        no_requeue=True,
-                    )
-                await self._accept_esubmit_terms(
-                    page, submit=bool(self.allow_submit)
-                )
-            else:
-                await self._accept_esubmit_terms(
-                    page, submit=bool(self.allow_submit)
-                )
-        else:
+            await self._run_s03a_review_and_submit(page)
+        elif (
+            not self._s03a_handled
+            and not await self._is_success_step(page)
+            and not await self._is_esubmit_terms_step(page)
+        ):
             submit_btns = page.locator(
                 "form input[type='submit'], form button[type='submit']"
             )
