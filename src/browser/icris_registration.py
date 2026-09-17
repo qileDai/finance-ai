@@ -31,7 +31,7 @@ from src.browser.icris_ui_common import (
     dismiss_google_translate,
     is_page_loading,
 )
-from src.browser.launcher import close_browser_session, create_browser_context, launch_browser
+from src.browser.launcher import create_browser_context, launch_browser
 from src.llm.openai_client import LLMClient
 from src.materials.id_type_classify import (
     normalize_stored_id_type,
@@ -7037,10 +7037,6 @@ class IcrisRegistrationBot:
             browser = await launch_browser(
                 p, force_isolated=force_isolated_browser
             )
-            via_cdp = (
-                bool(settings.chrome_use_existing and browser.contexts)
-                and not force_isolated_browser
-            )
             context = await create_browser_context(browser)
             page = await context.new_page()
             self._active_page = page
@@ -7119,7 +7115,12 @@ class IcrisRegistrationBot:
                         except Exception:
                             break
                         remaining -= step
-                await close_browser_session(browser, external_cdp=via_cdp)
+                # 任务结束必释放整个浏览器（含 CDP 9222），避免残留影响下一个任务
+                try:
+                    await browser.close()
+                    logger.info("浏览器已关闭释放")
+                except Exception as exc:
+                    logger.warning("关闭浏览器失败: %s", exc)
 
             if run_error:
                 raise run_error

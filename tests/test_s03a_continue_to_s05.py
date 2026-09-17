@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.browser.icris_errors import IcrisFlowError, IcrisRestartFromS01
@@ -497,6 +498,64 @@ class TestS03aNavToS05(unittest.IsolatedAsyncioTestCase):
         page.goto.assert_not_called()
         bot._save_error_screenshot.assert_awaited()
         self.assertNotIn("s04.do", page.url)
+
+    def _patch_browser_stack(self, page: MagicMock):
+        """mock run() 的 playwright/浏览器栈，返回 (browser, patchers)。"""
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        browser.contexts = [MagicMock()]
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        pw_cm = MagicMock()
+        pw_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+        pw_cm.__aexit__ = AsyncMock(return_value=False)
+        pw_factory = MagicMock(return_value=pw_cm)
+        patchers = [
+            patch(
+                "src.browser.launcher.import_async_playwright",
+                return_value=pw_factory,
+            ),
+            patch(
+                "src.browser.icris_registration.launch_browser",
+                new=AsyncMock(return_value=browser),
+            ),
+            patch(
+                "src.browser.icris_registration.create_browser_context",
+                new=AsyncMock(return_value=context),
+            ),
+            patch("src.browser.icris_registration.settings"),
+        ]
+        return browser, patchers
+
+    async def test_run_closes_browser_on_success(self):
+        bot = self._bot()
+        page = MagicMock()
+        page.is_closed = MagicMock(return_value=False)
+        page.wait_for_timeout = AsyncMock()
+        browser, patchers = self._patch_browser_stack(page)
+        bot._run_attempt_with_s03a_rerun = AsyncMock(return_value=page)
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in patchers]
+            mocks[3].browser_keep_open_seconds = 0
+            await bot.run({})
+        browser.close.assert_awaited()
+
+    async def test_run_closes_browser_on_failure(self):
+        bot = self._bot()
+        page = MagicMock()
+        page.is_closed = MagicMock(return_value=True)
+        browser, patchers = self._patch_browser_stack(page)
+        bot._run_attempt_with_s03a_rerun = AsyncMock(
+            side_effect=IcrisFlowError(
+                "页面报错", no_requeue=True, screenshot_path="x.png"
+            )
+        )
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in patchers]
+            mocks[3].browser_keep_open_seconds = 0
+            with self.assertRaises(IcrisFlowError):
+                await bot.run({})
+        browser.close.assert_awaited()
 
 
 if __name__ == "__main__":
