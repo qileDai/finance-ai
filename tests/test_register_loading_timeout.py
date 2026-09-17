@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.browser.icris_errors import (
     IcrisFlowError,
     IcrisLoadingTimeoutError,
+    IcrisRestartFromS01,
     IcrisStepLoadError,
     is_icris_format_invalid_error,
     is_icris_username_taken_error,
@@ -41,6 +42,12 @@ class TestRegisterLoadingTimeoutHelpers(unittest.TestCase):
         self.assertFalse(register_failure_should_requeue(err, 3, 3))
         no_rq = IcrisFlowError("审核拒绝", no_requeue=True)
         self.assertFalse(register_failure_should_requeue(no_rq, 1, 3))
+        page_err = IcrisFlowError(
+            "页面报错已整段重跑一次仍未成功: s$",
+            no_requeue=True,
+            screenshot_path="/tmp/a.png",
+        )
+        self.assertFalse(register_failure_should_requeue(page_err, 1, 3))
         fmt = IcrisFlowError("s04 香港身分證號碼格式不正確！", no_requeue=True)
         self.assertFalse(register_failure_should_requeue(fmt, 1, 3))
         taken = IcrisFlowError("s02 用户名称已存在")
@@ -138,6 +145,7 @@ class TestRegisterStepReadyAndMissing(unittest.IsolatedAsyncioTestCase):
                 page, page.url, expect_step="s04"
             )
         self.assertIn("s04", str(ctx.exception))
+        page.reload.assert_not_called()
 
     async def test_wait_after_continue_format_raises(self):
         bot = IcrisRegistrationBot(llm=MagicMock())
@@ -156,7 +164,7 @@ class TestRegisterStepReadyAndMissing(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ctx.exception.id_already_registered)
         self.assertIn("格式不", str(ctx.exception).replace(" ", ""))
 
-    async def test_wait_after_continue_required_not_fatal(self):
+    async def test_wait_after_continue_required_restarts(self):
         bot = IcrisRegistrationBot(llm=MagicMock())
         page = MagicMock()
         page.url = "https://example/s03.do"
@@ -166,11 +174,14 @@ class TestRegisterStepReadyAndMissing(unittest.IsolatedAsyncioTestCase):
             return_value=["請輸入身分證號碼"]
         )
         bot._page_body_text = AsyncMock(return_value="")
-        ok = await bot._wait_after_continue(
-            page, page.url, expect_step="s04"
-        )
-        self.assertFalse(ok)
+        bot._save_error_screenshot = AsyncMock(return_value="x.png")
+        with self.assertRaises(IcrisRestartFromS01) as ctx:
+            await bot._wait_after_continue(
+                page, page.url, expect_step="s04"
+            )
+        self.assertIn("請輸入身分證號碼", str(ctx.exception))
         page.reload.assert_not_called()
+        bot._save_error_screenshot.assert_awaited()
 
     async def test_id_registered_raised_before_format(self):
         bot = IcrisRegistrationBot(llm=MagicMock())

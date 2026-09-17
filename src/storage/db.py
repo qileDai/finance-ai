@@ -1820,6 +1820,23 @@ class ExternalGroupStore:
             )
         self.set_job_s03a_duration(job_id)
 
+    def reset_job_review_for_rerun(self, job_id: int) -> None:
+        """整段重跑：清掉上次审核，status 改回 running，以便再次进入待审。
+
+        不覆盖 cancelled / rejected。批准后任务仍是 awaiting_review，必须先改回 running，
+        否则 mark_job_awaiting_review 写不进去。
+        """
+        now = _utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE registration_jobs
+                   SET status='running', review_status='', updated_at=?
+                   WHERE id=?
+                     AND status IN ('running', 'awaiting_review')
+                     AND IFNULL(review_status, '') != 'rejected'""",
+                (now, job_id),
+            )
+
     def set_job_s03a_duration(self, job_id: int) -> None:
         """第一次进入 s03a 时写入到 s03a 耗时（不含审批等待）。已有值不覆盖。"""
         now = _utc_now()

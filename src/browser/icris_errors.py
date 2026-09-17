@@ -26,6 +26,14 @@ class IcrisStepLoadError(RuntimeError):
     """步骤关键元素长时间未出现；由 worker 按 attempts 决定是否重跑。"""
 
 
+class IcrisRestartFromS01(Exception):
+    """页面报错后关页重开、从 s01 整段再跑一次（s03a 须再审核）。"""
+
+    def __init__(self, message: str, *, screenshot_path: str = "") -> None:
+        super().__init__(message)
+        self.screenshot_path = screenshot_path or ""
+
+
 NNC1_LOADING_TIMEOUT_MSG = "页面载入中超时，遮罩仍在"
 NNC1_LOADING_RETRY_CAP = 1
 # 注册切步载入超时：第 1 次失败后重跑一次（attempts < 2），不改全局 max_attempts。
