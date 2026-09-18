@@ -298,18 +298,15 @@ class IcrisJobWorker:
                 capture.uninstall()
                 return
             if (review_status or "").lower() == "rejected":
-                requeue = False
-                available_at = ""
                 logger.warning(
                     "ICRIS job 已拒绝不重跑 id=%s status=%s",
                     job_id,
                     cur_status,
                 )
-                if cur_status == "failed":
-                    stop_flush.set()
-                    flush_thread.join(timeout=2.0)
-                    capture.uninstall()
-                    return
+                stop_flush.set()
+                flush_thread.join(timeout=2.0)
+                capture.uninstall()
+                return
             ctx_fail = getattr(e, "ctx", None)
             if ctx_fail is not None:
                 capture.merge_ctx_messages(

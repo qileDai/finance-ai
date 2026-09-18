@@ -398,6 +398,33 @@ class TestJobSchedulerE2E(unittest.TestCase):
         self.assertIsNone(self.store.peek_claimable_registration())
         self.assertIsNone(self.store.claim_next_job())
 
+    def test_rejected_does_not_write_playwright_error(self):
+        rej = self._enqueue("room-rej-eval", "REJEVAL")
+        claimed = self.store.claim_next_job()
+        self.store.mark_job_awaiting_review(int(claimed["id"]))
+        rejected = self.store.reject_job_submit(int(claimed["id"]))
+        self.assertEqual(rejected["last_error"], "")
+        self.store.mark_job_failed(
+            int(claimed["id"]),
+            error="Page.evaluate: Execution context was destroyed, "
+            "most likely because of a navigation",
+            requeue=True,
+        )
+        row = self._job(int(claimed["id"]))
+        self.assertEqual(row["review_status"], "rejected")
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["last_error"], "")
+
+        self.workflow.run_icris_job.side_effect = RuntimeError(
+            "Page.evaluate: Execution context was destroyed, "
+            "most likely because of a navigation"
+        )
+        self.job_worker._process_job(claimed)
+        after = self._job(int(claimed["id"]))
+        self.assertEqual(after["review_status"], "rejected")
+        self.assertEqual(after["status"], "failed")
+        self.assertEqual(after["last_error"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

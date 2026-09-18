@@ -144,6 +144,7 @@ class TestJobRunDurationStore(unittest.TestCase):
         rejected = self.store.reject_job_submit(job_id)
         self.assertEqual(rejected["status"], "failed")
         self.assertEqual(rejected["s03a_duration"], s03a)
+        self.assertEqual(str(rejected.get("last_error") or ""), "")
         total = str(rejected["run_duration"] or "")
         self.assertRegex(total, _DURATION_RE)
         self.assertGreaterEqual(_duration_seconds(total), _duration_seconds(s03a))

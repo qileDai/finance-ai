@@ -134,6 +134,72 @@ class TestS03aNavToS05(unittest.IsolatedAsyncioTestCase):
         store.mark_job_awaiting_review.assert_not_called()
         bot.on_review_needed.assert_not_called()
 
+    async def test_review_stops_when_already_rejected(self):
+        bot = self._bot()
+        bot.job_id = 73
+        bot.on_review_needed = MagicMock()
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        with patch("src.storage.db.ExternalGroupStore") as store_cls:
+            store = store_cls.return_value
+            store.get_job_review_status.return_value = "rejected"
+            ok = await bot._wait_for_review_approval(page)
+        self.assertFalse(ok)
+        store.mark_job_awaiting_review.assert_not_called()
+        page.wait_for_timeout.assert_not_called()
+
+    async def test_review_wait_destroyed_context_if_rejected(self):
+        bot = self._bot()
+        bot.job_id = 73
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock(
+            side_effect=RuntimeError(
+                "Page.evaluate: Execution context was destroyed"
+            )
+        )
+        with patch("src.storage.db.ExternalGroupStore") as store_cls:
+            store = store_cls.return_value
+            store.get_job_review_status.side_effect = [
+                "",
+                "awaiting_review",
+                "rejected",
+            ]
+            store.get_job_status.return_value = "awaiting_review"
+            ok = await bot._wait_for_review_approval(page)
+        self.assertFalse(ok)
+
+    async def test_abort_reject_kills_whole_chrome(self):
+        bot = self._bot()
+        bot.job_id = 73
+        page = MagicMock()
+        page.close = AsyncMock()
+        bot._active_page = page
+        with patch("src.storage.db.ExternalGroupStore") as store_cls, patch(
+            "src.browser.launcher.shutdown_cdp_chrome"
+        ) as kill:
+            store = store_cls.return_value
+            store.get_job_status.return_value = "failed"
+            store.get_job_review_status.return_value = "rejected"
+            await bot._abort_page_if_cancelled()
+        kill.assert_called_once()
+        page.close.assert_not_called()
+
+    async def test_abort_cancel_kills_whole_chrome(self):
+        bot = self._bot()
+        bot.job_id = 74
+        page = MagicMock()
+        page.close = AsyncMock()
+        bot._active_page = page
+        with patch("src.storage.db.ExternalGroupStore") as store_cls, patch(
+            "src.browser.launcher.shutdown_cdp_chrome"
+        ) as kill:
+            store = store_cls.return_value
+            store.get_job_status.return_value = "cancelled"
+            store.get_job_review_status.return_value = ""
+            await bot._abort_page_if_cancelled()
+        kill.assert_called_once()
+        page.close.assert_not_called()
+
     async def test_s03a_handler_skips_second_pass(self):
         bot = self._bot()
         bot._s03a_handled = True

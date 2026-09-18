@@ -574,21 +574,44 @@ class IcrisRegistrationBot:
         except Exception:
             return False
 
+    def _job_is_rejected(self) -> bool:
+        if not self.job_id:
+            return False
+        try:
+            from src.storage.db import ExternalGroupStore
+
+            return ExternalGroupStore().get_job_review_status(self.job_id) == "rejected"
+        except Exception:
+            return False
+
+    def _job_abort_reason(self) -> str:
+        """取消或审核拒绝时返回原因，否则空串。"""
+        if self._job_is_cancelled():
+            return "任务已取消"
+        if self._job_is_rejected():
+            return "审核已拒绝"
+        return ""
+
     def _raise_if_cancelled(self) -> None:
         if self._job_is_cancelled():
             raise IcrisFlowError("任务已被取消", no_requeue=True)
 
+    def _shutdown_job_chrome(self, reason: str) -> None:
+        """立刻杀掉整套 CDP Chrome（须在持锁线程调用）。"""
+        logger.warning("%s，关闭整窗 Chrome job #%s", reason, self.job_id)
+        try:
+            from src.browser.launcher import shutdown_cdp_chrome
+
+            shutdown_cdp_chrome()
+        except Exception:
+            logger.debug("结束 CDP Chrome 失败", exc_info=True)
+
     async def _abort_page_if_cancelled(self) -> None:
-        """管理员取消后关掉本任务标签页，打断 Playwright 等待。不关整窗 Chrome。"""
+        """管理员取消或拒绝后立刻关掉整套 CDP Chrome，打断 Playwright 等待。"""
         while True:
-            if self._job_is_cancelled():
-                page = self._active_page
-                logger.warning("任务已取消，关闭页面 job #%s", self.job_id)
-                try:
-                    if page is not None and not page.is_closed():
-                        await page.close()
-                except Exception:
-                    pass
+            reason = self._job_abort_reason()
+            if reason:
+                self._shutdown_job_chrome(reason)
                 return
             await asyncio.sleep(1.0)
 
@@ -711,6 +734,9 @@ class IcrisRegistrationBot:
         if existing_review == "approved":
             logger.info("s03a job #%s 已审核通过，跳过重复等待", self.job_id)
             return True
+        if existing_review == "rejected":
+            logger.warning("s03a job #%s 已审核拒绝，停止等待", self.job_id)
+            return False
 
         # 1) 标记 awaiting_review
         store.mark_job_awaiting_review(self.job_id)
@@ -745,9 +771,29 @@ class IcrisRegistrationBot:
         elapsed = 0.0
         while elapsed < timeout_s:
             self._raise_if_cancelled()
-            await page.wait_for_timeout(int(poll_interval * 1000))
+            status = store.get_job_review_status(self.job_id)
+            if status == "rejected":
+                logger.warning("s03a 审核已拒绝 job #%s", self.job_id)
+                return False
+            if status == "approved":
+                logger.info(
+                    "s03a 审核已通过 job #%s（等待 %.0fs）",
+                    self.job_id,
+                    elapsed,
+                )
+                return True
+            try:
+                await page.wait_for_timeout(int(poll_interval * 1000))
+            except Exception:
+                self._raise_if_cancelled()
+                if store.get_job_review_status(self.job_id) == "rejected":
+                    logger.warning(
+                        "s03a 审核已拒绝（等待中浏览器已关闭）job #%s",
+                        self.job_id,
+                    )
+                    return False
+                raise
             elapsed += poll_interval
-            # 优先检查任务是否被取消
             job_status = store.get_job_status(self.job_id)
             if job_status == "cancelled":
                 logger.warning("s03a 任务被取消 job #%s", self.job_id)
@@ -7054,6 +7100,16 @@ class IcrisRegistrationBot:
                     run_error = IcrisFlowError("任务已被取消", no_requeue=True)
                     run_error.__cause__ = e
                     logger.warning("注册流程因取消中止 job #%s: %s", self.job_id, e)
+                elif self._job_is_rejected():
+                    run_error = IcrisFlowError(
+                        "s03a 审核未通过或超时",
+                        screenshot_path=self.esubmit_screenshot_path or "",
+                        no_requeue=True,
+                    )
+                    run_error.__cause__ = e
+                    logger.warning(
+                        "注册流程因审核拒绝中止 job #%s: %s", self.job_id, e
+                    )
                 else:
                     run_error = e
                     logger.exception("注册流程异常: %s", e)

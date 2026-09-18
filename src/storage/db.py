@@ -1926,7 +1926,7 @@ class ExternalGroupStore:
         return dict(row) if row else None
 
     def reject_job_submit(self, job_id: int) -> dict[str, Any] | None:
-        """审核拒绝：设 review_status=rejected, status=failed。"""
+        """审核拒绝：设 review_status=rejected, status=failed，清空 last_error。"""
         now = _utc_now()
         with self._conn() as conn:
             cur = conn.execute(
@@ -1941,6 +1941,7 @@ class ExternalGroupStore:
             conn.execute(
                 """UPDATE registration_jobs
                    SET review_status='rejected', status='failed',
+                       last_error='',
                        finished_at=?,
                        run_duration = CASE WHEN IFNULL(run_duration, '') = ''
                                            THEN ? ELSE run_duration END,
@@ -2584,7 +2585,7 @@ class ExternalGroupStore:
             if cur_status == "cancelled":
                 return
             if review == "rejected":
-                requeue = False
+                return
             status = "pending" if requeue else "failed"
             conn.execute(
                 """
