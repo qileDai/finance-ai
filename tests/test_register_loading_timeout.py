@@ -392,7 +392,7 @@ class TestRegisterLoadingTimeoutWorker(unittest.TestCase):
         self.assertEqual(row["activation_status"], "pending")
         self.assertEqual(row["last_error"], "")
 
-    def test_format_invalid_failed_writes_success_shot(self):
+    def test_format_invalid_failed_keeps_success_shot_empty(self):
         shot = str(Path(self._tmp.name) / "fail.png")
         self.worker.workflow.run_icris_job = MagicMock(
             side_effect=IcrisFlowError(
@@ -406,11 +406,42 @@ class TestRegisterLoadingTimeoutWorker(unittest.TestCase):
         row = self.store.get_registration_job(job_id)
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["screenshot_path"], shot)
-        self.assertEqual(row["success_screenshot_path"], shot)
+        # 失败截图不得写入成功截图列
+        self.assertEqual(row["success_screenshot_path"], "")
         self.assertIn("格式不", str(row["last_error"]).replace(" ", ""))
         self.assertEqual(int(row.get("id_already_registered") or 0), 0)
         self.assertNotEqual(str(row.get("activation_status") or ""), "pending")
         self.worker.workflow.notify_job_result.assert_called()
+
+    def test_real_success_shot_survives_failure(self):
+        """异常携带真实 s05 成功图（icris_success/）时落库保留。"""
+        fail_shot = str(Path(self._tmp.name) / "fail.png")
+        ok_shot = str(
+            Path(self._tmp.name) / "icris_success" / "job_success_x.png"
+        )
+        err = IcrisFlowError(
+            "s05 截图后页面异常", no_requeue=True, screenshot_path=fail_shot
+        )
+        err.success_screenshot_path = ok_shot
+        self.worker.workflow.run_icris_job = MagicMock(side_effect=err)
+        job_id, claimed = self._claimed("room-okshot")
+        self.worker._process_job(claimed)
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["screenshot_path"], fail_shot)
+        self.assertEqual(row["success_screenshot_path"], ok_shot)
+
+    def test_non_success_dir_shot_dropped_from_success_column(self):
+        """异常携带的成功图不在 icris_success/ 下时不予采纳。"""
+        fail_shot = str(Path(self._tmp.name) / "fail.png")
+        err = IcrisFlowError("boom", no_requeue=True, screenshot_path=fail_shot)
+        err.success_screenshot_path = fail_shot
+        self.worker.workflow.run_icris_job = MagicMock(side_effect=err)
+        job_id, claimed = self._claimed("room-badshot")
+        self.worker._process_job(claimed)
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["success_screenshot_path"], "")
 
     def test_id_already_registered_still_flagged(self):
         shot = str(Path(self._tmp.name) / "dup.png")
@@ -427,7 +458,8 @@ class TestRegisterLoadingTimeoutWorker(unittest.TestCase):
         row = self.store.get_registration_job(job_id)
         self.assertEqual(row["status"], "failed")
         self.assertEqual(int(row["id_already_registered"]), 1)
-        self.assertEqual(row["success_screenshot_path"], shot)
+        # 失败截图不得写入成功截图列
+        self.assertEqual(row["success_screenshot_path"], "")
         self.assertEqual(row["screenshot_path"], shot)
 
     def test_generic_error_failed_on_third_attempt(self):
@@ -452,7 +484,7 @@ class TestRegisterLoadingTimeoutWorker(unittest.TestCase):
         self.assertEqual(row["status"], "failed")
         self.assertIn("未进入身份证明页", row["last_error"])
 
-    def test_failed_shot_fallback_fills_success_column(self):
+    def test_failed_shot_does_not_fill_success_column(self):
         job_id, claimed = self._claimed("room-shotcol")
         self.store.mark_job_failed(
             job_id,
@@ -462,5 +494,21 @@ class TestRegisterLoadingTimeoutWorker(unittest.TestCase):
         row = self.store.get_registration_job(job_id)
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["screenshot_path"], "D:/fail.png")
-        self.assertEqual(row["success_screenshot_path"], "D:/fail.png")
+        # 不再用失败图兜底成功截图列
+        self.assertEqual(row["success_screenshot_path"], "")
         self.assertIn("格式不", str(row["last_error"]).replace(" ", ""))
+
+    def test_failed_with_explicit_success_shot_keeps_it(self):
+        job_id, claimed = self._claimed("room-shotcol2")
+        self.store.mark_job_failed(
+            job_id,
+            error="boom",
+            screenshot_path="D:/fail.png",
+            success_screenshot_path="D:/icris_success/job_success_1.png",
+        )
+        row = self.store.get_registration_job(job_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["screenshot_path"], "D:/fail.png")
+        self.assertEqual(
+            row["success_screenshot_path"], "D:/icris_success/job_success_1.png"
+        )

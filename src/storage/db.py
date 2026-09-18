@@ -2570,7 +2570,8 @@ class ExternalGroupStore:
             except (TypeError, ValueError):
                 msgs = "[]"
         shot = (screenshot_path or "").strip()
-        success_shot = (success_screenshot_path or shot).strip()
+        # 成功图不回落到失败图：只接受显式传入的真实 s05 成功截图
+        success_shot = (success_screenshot_path or "").strip()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT status, review_status FROM registration_jobs WHERE id = ?",

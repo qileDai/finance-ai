@@ -317,6 +317,11 @@ class IcrisJobWorker:
                 )
             capture.append_error(err)
             msgs = capture.snapshot()
+            # 成功截图只接受 bot 透传的真实 s05 成功图（icris_success/ 下），
+            # 失败截图只写 screenshot_path，避免「成功截图」列展示失败图。
+            success_shot = str(getattr(e, "success_screenshot_path", "") or "").strip()
+            if success_shot and "icris_success" not in success_shot.replace("\\", "/"):
+                success_shot = ""
             self.store.mark_job_failed(
                 job_id,
                 error=err,
@@ -324,7 +329,7 @@ class IcrisJobWorker:
                 available_at=available_at,
                 package_dir=package_dir,
                 screenshot_path=screenshot_path,
-                success_screenshot_path=screenshot_path,
+                success_screenshot_path=success_shot,
                 result_messages=msgs or None,
                 run_duration=format_job_run_duration(elapsed),
             )

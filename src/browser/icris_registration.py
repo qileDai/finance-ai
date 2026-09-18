@@ -641,7 +641,7 @@ class IcrisRegistrationBot:
             logger.warning("保存 s03a 截图失败: %s", shot_err)
 
     async def _save_success_screenshot(self, page: "Page") -> None:
-        """进入 s05 后等 loading 结束且成功文案出现再截图整页存档。"""
+        """进入 s05 后等 loading 结束再截图整页存档（不依赖成功文案）。"""
         try:
             from config.settings import PROJECT_ROOT
             from datetime import datetime, timezone
@@ -652,17 +652,6 @@ class IcrisRegistrationBot:
                     break
                 await page.wait_for_timeout(100)
             await self._wait_spin_clear(page, timeout_ms=_STEP_READY_MS)
-            ready = await self._wait_step_ready(
-                page,
-                self._success_copy_present,
-                timeout_ms=_STEP_READY_MS,
-                label="s05截图前",
-            )
-            if not ready:
-                logger.warning(
-                    "s05 成功文案未出现，跳过截图 url=%s", page.url[:160]
-                )
-                return
             await self._dismiss_cookie_banner(page)
             await page.wait_for_timeout(300)
 
@@ -5066,30 +5055,13 @@ class IcrisRegistrationBot:
     def _is_success_page_url(self, url: str) -> bool:
         return bool(re.search(r"registration/s05", (url or "").lower()))
 
-    async def _success_copy_present(self, page: "Page") -> bool:
-        """s05 成功文案是否已渲染。不能只凭 URL。"""
-        try:
-            return bool(
-                await page.evaluate(
-                    """() => {
-                        const t = (document.body && document.body.innerText) || '';
-                        const has = /遞交成功|递交成功|提交成功|遞交完成|递交完成|已成功提交|registration.*complete|successfully submitted/i.test(t);
-                        const hasRef = /參考編號|参考编号|Reference Number|Submission Reference/i.test(t);
-                        const notTerms = !/電子提交服務的條款|电子提交服务的条款/.test(t);
-                        return (has || hasRef) && notTerms;
-                    }"""
-                )
-            )
-        except Exception:
-            return False
-
     async def _is_success_step(self, page: "Page") -> bool:
-        """s05：须见到提交成功文案，不能只认 URL。"""
-        return await self._success_copy_present(page)
+        """s05：只认 URL（registration/s05）。成功文案不参与判定。"""
+        return self._is_success_page_url(page.url)
 
     async def _s03a_post_continue_where(self, page: "Page") -> str:
         """点繼續/刷新后所在页：s05 | s03a | s01 | left。"""
-        if self._is_success_page_url(page.url) or await self._is_success_step(page):
+        if self._is_success_page_url(page.url):
             return "s05"
         if await self._is_esubmit_terms_step(page):
             return "s03a"
@@ -6852,8 +6824,22 @@ class IcrisRegistrationBot:
                     label="s05",
                 ):
                     break
-                raise IcrisStepLoadError(
-                    f"s03a 点继续后未进入提交成功页: {page.url[:160]}"
+                if self._is_success_page_url(page.url):
+                    # URL 已在 s05：提交已发出，按成功处理（文案可能未渲染）
+                    logger.info(
+                        "s03a 点继续后 URL 已在 s05，按成功处理: %s", page.url[:120]
+                    )
+                    break
+                if await self._is_esubmit_terms_step(page):
+                    # 仍在条款页：提交点击未生效，可重跑
+                    raise IcrisStepLoadError(
+                        f"s03a 点继续后未进入提交成功页: {page.url[:160]}"
+                    )
+                # 页面去向不明（可能已提交成功）：不自动重跑，避免撞「已登记」
+                raise IcrisFlowError(
+                    "s03a 点继续后页面去向不明，需人工核对是否已提交: "
+                    f"{page.url[:160]}",
+                    no_requeue=True,
                 )
             if await self._is_esubmit_terms_step(page):
                 logger.info("=== s03a 电子提交服务条款（步骤循环）===")
@@ -6935,11 +6921,22 @@ class IcrisRegistrationBot:
 
         if self.allow_submit:
             if not await self._is_success_step(page):
-                await self._raise_if_missing_registration_step(
-                    page, step="s05", label="提交成功页"
-                )
+                if self.success_screenshot_path:
+                    # s05 成功截图已存：提交已成功，页面后续跳走不影响结果
+                    logger.warning(
+                        "s05 重查未见到成功页，但成功截图已存，按成功收尾: %s",
+                        page.url[:120],
+                    )
+                else:
+                    await self._raise_if_missing_registration_step(
+                        page, step="s05", label="提交成功页"
+                    )
             logger.info("注册表单填写完成（已按开关尝试提交）")
         else:
+            if await self._is_success_step(page):
+                # 未允许提交但页面已进入 s05（如审核后状态残留/人工干预）：按实际结果收尾
+                logger.info("注册表单填写完成（页面已进入 s05 成功页）")
+                return page
             if not await self._is_esubmit_terms_step(page):
                 await self._raise_if_missing_registration_step(
                     page, step="s03a", label="电子提交条款页"
@@ -7082,7 +7079,9 @@ class IcrisRegistrationBot:
                         except Exception as shot_err:
                             logger.warning("保存失败截图失败: %s", shot_err)
                     if screenshot_path:
-                        self.success_screenshot_path = screenshot_path
+                        # 注意：失败截图只进 screenshot_path，绝不能覆盖
+                        # success_screenshot_path（只存真实 s05 成功图），
+                        # 否则后台「成功截图」列会把失败图当成功图展示。
                         if isinstance(e, IcrisFlowError):
                             if not e.screenshot_path:
                                 e.screenshot_path = screenshot_path
@@ -7092,6 +7091,14 @@ class IcrisRegistrationBot:
                                 str(e), screenshot_path=screenshot_path
                             )
                             run_error.__cause__ = e
+                    # 若异常前已存真实 s05 成功图（罕见：截图后页面跳走），
+                    # 透传给 worker 落库，避免成功图丢失。
+                    real_success_shot = (self.success_screenshot_path or "").strip()
+                    if real_success_shot and run_error is not None:
+                        try:
+                            run_error.success_screenshot_path = real_success_shot
+                        except Exception:
+                            pass
             finally:
                 if cancel_watch:
                     cancel_watch.cancel()

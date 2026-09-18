@@ -1,4 +1,4 @@
-"""s03a 点红色「繼 續」：出错截图刷新再点一次；打回 s01 整段重跑；s05 等文案再截图。"""
+"""s03a 点红色「繼 續」：出错截图刷新再点一次；打回 s01 整段重跑；s05 等加载完即截图。"""
 
 from __future__ import annotations
 
@@ -313,16 +313,19 @@ class TestS03aNavToS05(unittest.IsolatedAsyncioTestCase):
         self.assertIn("anticon-close-circle", captured["js"])
         self.assertIn("ant-form-item-has-error", captured["js"])
 
-    async def test_success_step_needs_copy_not_url(self):
+    async def test_success_step_url_only(self):
+        """s05：只认 URL，成功文案不参与判定。"""
         bot = self._bot()
         page = MagicMock()
-        page.url = "https://example/registration/s05.do"
-        page.evaluate = AsyncMock(return_value=False)
-        self.assertFalse(await bot._is_success_step(page))
         page.evaluate = AsyncMock(return_value=True)
+        page.url = "https://example/registration/s05.do"
         self.assertTrue(await bot._is_success_step(page))
+        page.url = "https://example/registration/s03a.do"
+        self.assertFalse(await bot._is_success_step(page))
+        page.evaluate.assert_not_called()
 
-    async def test_save_success_screenshot_skips_without_copy(self):
+    async def test_save_success_screenshot_after_load(self):
+        """s05：等 loading 结束即截图，不依赖成功文案。"""
         bot = self._bot()
         page = MagicMock()
         page.url = "https://example/registration/s05.do"
@@ -334,8 +337,10 @@ class TestS03aNavToS05(unittest.IsolatedAsyncioTestCase):
         bot._dismiss_cookie_banner = AsyncMock()
         bot._wait_step_ready = AsyncMock(return_value=False)
         await bot._save_success_screenshot(page)
-        page.screenshot.assert_not_called()
-        self.assertEqual(bot.success_screenshot_path, "")
+        page.screenshot.assert_awaited()
+        bot._wait_step_ready.assert_not_called()
+        self.assertIn("icris_success", bot.success_screenshot_path.replace("\\", "/"))
+        self.assertIn("job_success_", bot.success_screenshot_path)
 
     async def test_click_continue_s05_does_not_scan_other_selectors(self):
         bot = self._bot()
