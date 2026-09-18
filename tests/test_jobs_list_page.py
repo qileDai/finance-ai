@@ -176,6 +176,75 @@ class TestJobsListPage(unittest.TestCase):
         ensure_job_screenshot_thumb(png)
         self.assertNotEqual(before, dest.read_bytes())
 
+    def _delete(self, job_id: int) -> tuple[dict, int]:
+        return handle_admin_api(
+            method="DELETE",
+            path=f"/admin/api/jobs/{job_id}",
+            store=self.store,
+        )
+
+    def test_delete_failed_cancelled_rejected(self) -> None:
+        failed_id = self._enqueue("room-failed")
+        self.store.mark_job_failed(failed_id, error="boom")
+        data, code = self._delete(failed_id)
+        self.assertEqual(code, 200)
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(self.store.count_registration_jobs(), 0)
+
+        cancelled_id = self._enqueue("room-cancelled")
+        self.store.cancel_registration_job(cancelled_id)
+        data, code = self._delete(cancelled_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(self.store.count_registration_jobs(), 0)
+
+        rejected_id = self._enqueue("room-rejected")
+        claimed = self.store.claim_next_job()
+        self.assertEqual(int(claimed["id"]), rejected_id)
+        self.store.mark_job_awaiting_review(rejected_id)
+        rejected = self.store.reject_job_submit(rejected_id)
+        self.assertEqual(str(rejected.get("status")), "failed")
+        self.assertEqual(str(rejected.get("review_status")), "rejected")
+        data, code = self._delete(rejected_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(self.store.count_registration_jobs(), 0)
+
+    def test_delete_running_pending_succeeded_review_rejected(self) -> None:
+        pending_id = self._enqueue("room-pending")
+        data, code = self._delete(pending_id)
+        self.assertEqual(code, 409)
+        self.assertFalse(data.get("ok"))
+        self.assertIsNotNone(self.store.get_registration_job(pending_id))
+
+        running_id = self._enqueue("room-running")
+        claimed = self.store.claim_next_job()
+        self.assertEqual(int(claimed["id"]), pending_id)
+        claimed2 = self.store.claim_next_job()
+        self.assertEqual(int(claimed2["id"]), running_id)
+        data, code = self._delete(running_id)
+        self.assertEqual(code, 409)
+        self.assertIsNotNone(self.store.get_registration_job(running_id))
+
+        review_id = self._enqueue("room-review")
+        claimed3 = self.store.claim_next_job()
+        self.assertEqual(int(claimed3["id"]), review_id)
+        self.store.mark_job_awaiting_review(review_id)
+        data, code = self._delete(review_id)
+        self.assertEqual(code, 409)
+        self.assertIsNotNone(self.store.get_registration_job(review_id))
+
+        ok_id = self._enqueue("room-ok")
+        claimed4 = self.store.claim_next_job()
+        self.assertEqual(int(claimed4["id"]), ok_id)
+        self.store.mark_job_succeeded(ok_id)
+        data, code = self._delete(ok_id)
+        self.assertEqual(code, 409)
+        self.assertIsNotNone(self.store.get_registration_job(ok_id))
+
+    def test_delete_missing_job(self) -> None:
+        data, code = self._delete(99999)
+        self.assertEqual(code, 404)
+        self.assertFalse(data.get("ok"))
+
 
 if __name__ == "__main__":
     unittest.main()

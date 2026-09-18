@@ -2652,6 +2652,21 @@ class ExternalGroupStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def delete_registration_job(self, job_id: int) -> dict[str, Any] | None:
+        """仅 failed/cancelled（含审核拒绝）可删。其它状态原样返回、不删。无行返回 None。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM registration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            if str(item.get("status") or "") not in ("failed", "cancelled"):
+                return item
+            conn.execute("DELETE FROM registration_jobs WHERE id = ?", (job_id,))
+        return item
+
     def requeue_registration_job(self, job_id: int) -> dict[str, Any] | None:
         """将 failed/cancelled 任务重新入队（同 room 若已有活跃任务则拒绝）。"""
         now = _utc_now()

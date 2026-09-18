@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { Image, Tag, Button, Modal, Tooltip } from "antd";
 import { api, type JobDetailResponse, type JobField, type JobLogLine, type JobRow } from "../api";
 import { formatDateTime } from "../format";
@@ -10,6 +10,7 @@ import {
   JOB_SHOT_PREVIEW,
   StateBox,
   jobCanCancel,
+  jobCanDelete,
   jobCanFormRetry,
   jobCanRequeue,
   jobProgressTagColor,
@@ -152,6 +153,7 @@ function SummaryShot({
 
 export function JobDetailPage({ refreshKey, onRefresh }: Props) {
   const message = useMessageApi();
+  const navigate = useNavigate();
   const { id } = useParams();
   const jobId = Number(id);
   const [loading, setLoading] = useState(true);
@@ -215,7 +217,7 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
     };
   }, [jobId, logsLive]);
 
-  function act(kind: "cancel" | "requeue") {
+  function act(kind: "cancel" | "requeue" | "delete") {
     if (kind === "cancel") {
       Modal.confirm({
         title: "确认取消？",
@@ -224,6 +226,17 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
         okButtonProps: { danger: true },
         cancelText: "返回",
         onOk: () => runJobAct("cancel"),
+      });
+      return;
+    }
+    if (kind === "delete") {
+      Modal.confirm({
+        title: "确认删除？",
+        content: `确认删除任务 #${jobId}？列表将不再显示，不可恢复。`,
+        okText: "删除",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: () => runJobAct("delete"),
       });
       return;
     }
@@ -236,10 +249,17 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
     });
   }
 
-  async function runJobAct(kind: "cancel" | "requeue") {
-    const label = kind === "cancel" ? "取消" : "重跑";
+  async function runJobAct(kind: "cancel" | "requeue" | "delete") {
+    const label = kind === "cancel" ? "取消" : kind === "delete" ? "删除" : "重跑";
     setBusy(true);
     try {
+      if (kind === "delete") {
+        const res = await api.deleteJob(jobId);
+        message.success(res.message || "删除成功");
+        navigate("/jobs");
+        onRefresh();
+        return;
+      }
       const res =
         kind === "cancel" ? await api.cancelJob(jobId) : await api.requeueJob(jobId);
       message.success(res.message || `${label}成功`);
@@ -335,6 +355,16 @@ export function JobDetailPage({ refreshKey, onRefresh }: Props) {
             onClick={() => act("requeue")}
           >
             重跑
+          </Button>
+        ) : null}
+        {jobCanDelete(job?.status) ? (
+          <Button
+            size="small"
+            danger
+            disabled={busy}
+            onClick={() => act("delete")}
+          >
+            删除
           </Button>
         ) : null}
       </div>

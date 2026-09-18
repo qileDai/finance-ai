@@ -44,6 +44,11 @@ export function jobCanRequeue(status: string | undefined): boolean {
   return s === "failed" || s === "cancelled";
 }
 
+export function jobCanDelete(status: string | undefined): boolean {
+  const s = (status || "").toLowerCase();
+  return s === "failed" || s === "cancelled";
+}
+
 export function jobCanFormRetry(formStatus: string | undefined): boolean {
   return (formStatus || "").toLowerCase() === "failed";
 }

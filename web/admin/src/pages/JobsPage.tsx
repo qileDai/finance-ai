@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Link } from "react-router-dom";
 import { api, type JobField, type JobRow } from "../api";
 import { formatDateTime } from "../format";
-import { StateBox, JobPipelineLights, jobCanCancel, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobProgressTooltip } from "../components/ui";
+import { StateBox, JobPipelineLights, jobCanCancel, jobCanDelete, jobCanFormRetry, jobCanRequeue, jobProgressTagColor, jobProgressTooltip } from "../components/ui";
 import { DraggableShot, jobShotFilename } from "../components/DraggableShot";
 import { activationWaitHint, isActivationMailStuck } from "../jobTimeline";
 import {
@@ -387,7 +387,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
 
   const runAct = useCallback(async (
     id: number,
-    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
+    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry" | "delete",
   ) => {
     const labelMap: Record<typeof kind, string> = {
       cancel: "取消",
@@ -395,6 +395,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       approve: "提交审核",
       reject: "拒绝审核",
       formRetry: "重跑填表",
+      delete: "删除",
     };
     const label = labelMap[kind];
     setBusyId(id);
@@ -405,6 +406,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
       else if (kind === "approve") res = await api.approveJob(id);
       else if (kind === "reject") res = await api.rejectJob(id);
       else if (kind === "formRetry") res = await api.formRetryJob(id);
+      else if (kind === "delete") res = await api.deleteJob(id);
       message.success(res?.message || `${label}成功`);
       onRefresh();
     } catch (e) {
@@ -416,7 +418,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
 
   const act = useCallback((
     id: number,
-    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry",
+    kind: "cancel" | "requeue" | "approve" | "reject" | "formRetry" | "delete",
   ) => {
     if (kind === "approve") {
       Modal.confirm({
@@ -457,6 +459,17 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
         okText: "重跑填表",
         cancelText: "取消",
         onOk: () => runAct(id, "formRetry"),
+      });
+      return;
+    }
+    if (kind === "delete") {
+      Modal.confirm({
+        title: "确认删除？",
+        content: `确认删除任务 #${id}？列表将不再显示，不可恢复。`,
+        okText: "删除",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: () => runAct(id, "delete"),
       });
       return;
     }
@@ -752,7 +765,7 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
     {
       title: "操作",
       key: "action",
-      width: 240,
+      width: 280,
       fixed: "right" as const,
       render: (_: unknown, r: JobRow) => (
         <Space
@@ -808,9 +821,20 @@ export function JobsPage({ refreshKey, onRefresh }: Props) {
               </Button>
             </>
           ) : null}
+          {jobCanDelete(r.status) ? (
+            <Button
+              size="small"
+              danger
+              disabled={busyId === r.id}
+              onClick={() => act(r.id, "delete")}
+            >
+              删除
+            </Button>
+          ) : null}
           {jobCanCancel(r.status) ||
           jobCanRequeue(r.status) ||
           jobCanFormRetry(r.form_status) ||
+          jobCanDelete(r.status) ||
           r.status === "awaiting_review"
             ? null
             : "-"}

@@ -120,6 +120,11 @@ def handle_admin_api(
             if job_id is None:
                 return _err("invalid job id", 400)
             return _handle_job_form_retry(store, job_id)
+        if method == "DELETE" and rel.startswith("jobs/"):
+            mid = rel[len("jobs/") :]
+            if "/" not in mid and mid.isdigit():
+                return _handle_job_delete(store, int(mid))
+            return _err("invalid job id", 400)
         # 邮箱账号配置
         if method == "GET" and rel == "email-accounts":
             return _ok(items=store.list_email_accounts())
@@ -1072,6 +1077,21 @@ def _handle_job_detail(
         messages=messages,
         progress=out["progress"],
     )
+
+
+def _handle_job_delete(
+    store: ExternalGroupStore, job_id: int
+) -> tuple[dict[str, Any], int]:
+    job = store.delete_registration_job(job_id)
+    if not job:
+        return _err("job not found", 404)
+    status = str(job.get("status") or "")
+    if status not in ("failed", "cancelled"):
+        return _err(
+            f"cannot delete (status={status}; failed/cancelled only)",
+            409,
+        )
+    return _ok(message=f"deleted #{job_id}")
 
 
 def _handle_job_cancel(

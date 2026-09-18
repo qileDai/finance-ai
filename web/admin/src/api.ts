@@ -388,6 +388,11 @@ export const api = {
       `/admin/api/jobs/${id}/form-retry`,
       { method: "POST" },
     ),
+  deleteJob: (id: number) =>
+    request<ApiOk<{ message: string }>>(
+      `/admin/api/jobs/${id}`,
+      { method: "DELETE" },
+    ),
   emailAccounts: {
     list: () =>
       request<ApiOk<{ items: EmailAccount[] }>>(`/admin/api/email-accounts`),
